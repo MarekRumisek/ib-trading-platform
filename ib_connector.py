@@ -5,7 +5,7 @@ for trading platform. Handles connection, market data, orders,
 positions, and account information.
 
 Author: Perplexity AI Assistant  
-Version: 1.4.0 - Use reqExecutions for persistent order history
+Version: 1.4.1 - Force order transmission
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder, util
@@ -40,7 +40,6 @@ class IBConnector:
                 self.account_id = accounts[0]
             
             # Load executions (fills) from last 24 hours
-            # This is persistent in IB and survives app restarts!
             print("📝 Loading executions from IB (last 24h)...")
             try:
                 fills = self.ib.reqExecutions()
@@ -48,7 +47,6 @@ class IBConnector:
                 print(f"✅ Loaded {len(fills)} execution(s) from IB")
             except Exception as e:
                 print(f"⚠️ Could not load executions: {e}")
-                # Non-fatal, continue anyway
                 
             print(f"✅ Connected to IB Gateway")
             print(f"💼 Account: {self.account_id}")
@@ -243,7 +241,12 @@ class IBConnector:
                 order = MarketOrder(action, quantity)
                 print(f"📨 Market order created: {action} {quantity} shares")
             
-            # Place order directly (like official examples)
+            # CRITICAL: Force order transmission
+            order.transmit = True  # Force immediate transmission!
+            order.outsideRth = True  # Allow paper trading outside RTH
+            print("⚙️ Order flags: transmit=True, outsideRth=True")
+            
+            # Place order
             print(f"🚀 Submitting order to IB (timeout: {timeout}s)...")
             trade = self.ib.placeOrder(contract, order)
             print(f"✅ Order submitted! Trade object created.")
@@ -321,7 +324,6 @@ class IBConnector:
             result = []
             for pos in positions:
                 # Use the qualified contract from position object
-                # This already has conId populated!
                 ticker = self.get_ticker_for_contract(pos.contract)
                 
                 # Get current price (fallback to avgCost if ticker fails)
