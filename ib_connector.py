@@ -5,13 +5,14 @@ for trading platform. Handles connection, market data, orders,
 positions, and account information.
 
 Author: Perplexity AI Assistant
-Version: 1.0.0
+Version: 1.0.1
 """
 
 from ib_async import IB, Stock, MarketOrder, util
 from datetime import datetime
 import config
 import time
+import asyncio
 
 class IBConnector:
     """Interactive Brokers API connector"""
@@ -28,7 +29,8 @@ class IBConnector:
             self.ib.connect(
                 config.IB_HOST,
                 config.IB_PORT,
-                clientId=config.IB_CLIENT_ID
+                clientId=config.IB_CLIENT_ID,
+                timeout=20
             )
             self.connected = True
             
@@ -101,7 +103,8 @@ class IBConnector:
                 barSizeSetting=bar_size,
                 whatToShow='TRADES',
                 useRTH=True,
-                formatDate=1
+                formatDate=1,
+                timeout=15
             )
             
             # Convert to list of dicts
@@ -169,6 +172,8 @@ class IBConnector:
             return {'success': False, 'error': 'Not connected to IB'}
         
         try:
+            print(f"📤 Placing order: {action} {quantity} {symbol}...")
+            
             contract = Stock(symbol, 'SMART', 'USD')
             self.ib.qualifyContracts(contract)
             
@@ -176,14 +181,35 @@ class IBConnector:
             
             trade = self.ib.placeOrder(contract, order)
             
-            print(f"📤 Order placed: {action} {quantity} {symbol}")
-            print(f"📋 Order ID: {trade.order.orderId}")
+            # Wait for order to be submitted (max 10 seconds)
+            print(f"⏳ Waiting for order confirmation...")
+            start_time = time.time()
+            while time.time() - start_time < 10:
+                self.ib.sleep(0.5)
+                if trade.orderStatus.status in ['Submitted', 'Filled', 'PreSubmitted']:
+                    break
             
-            return {
-                'success': True,
-                'order_id': trade.order.orderId,
-                'error': None
-            }
+            # Check if order was accepted
+            if trade.orderStatus.status in ['Submitted', 'Filled', 'PreSubmitted']:
+                print(f"✅ Order placed: {action} {quantity} {symbol}")
+                print(f"📋 Order ID: {trade.order.orderId}")
+                print(f"📊 Status: {trade.orderStatus.status}")
+                
+                return {
+                    'success': True,
+                    'order_id': trade.order.orderId,
+                    'status': trade.orderStatus.status,
+                    'error': None
+                }
+            else:
+                error_msg = f"Order status: {trade.orderStatus.status}"
+                print(f"⚠️ Order not confirmed: {error_msg}")
+                return {'success': False, 'error': error_msg}
+            
+        except asyncio.TimeoutError:
+            error_msg = "Order placement timed out (10s)"
+            print(f"❌ {error_msg}")
+            return {'success': False, 'error': error_msg}
             
         except Exception as e:
             error_msg = str(e)
