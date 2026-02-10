@@ -5,7 +5,7 @@ for trading platform. Handles connection, market data, orders,
 positions, and account information.
 
 Author: Perplexity AI Assistant  
-Version: 1.2.1 - Fixed ticker caching
+Version: 1.2.2 - Fixed position ticker using qualified contracts
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder, util
@@ -20,7 +20,7 @@ class IBConnector:
         self.ib = IB()
         self.connected = False
         self.account_id = None
-        self.tickers = {}  # Cache for ticker objects (key = symbol string)
+        self.tickers = {}  # Cache for ticker objects (key = conId or symbol)
         
     def connect(self):
         """Connect to IB Gateway or TWS"""
@@ -126,9 +126,10 @@ class IBConnector:
             return []
     
     def get_ticker(self, symbol):
-        """Get real-time ticker data
+        """Get real-time ticker data for a new symbol
         
-        Uses symbol string as cache key to avoid hashing issues
+        Note: This is for standalone ticker requests.
+        For positions, use get_ticker_for_contract() instead.
         """
         if not self.is_connected():
             return None
@@ -141,14 +142,13 @@ class IBConnector:
                 # Subscribe to market data
                 contract = Stock(symbol, 'SMART', 'USD')
                 ticker = self.ib.reqMktData(contract, '', False, False)
-                # Cache using symbol string as key (not contract object!)
                 self.tickers[symbol] = ticker
             
             # Wait for data
             self.ib.sleep(0.5)
             
             return {
-                'last': ticker.last if ticker.last == ticker.last else 0,  # Check for NaN
+                'last': ticker.last if ticker.last == ticker.last else 0,
                 'bid': ticker.bid if ticker.bid == ticker.bid else 0,
                 'ask': ticker.ask if ticker.ask == ticker.ask else 0,
                 'close': ticker.close if ticker.close == ticker.close else 0,
@@ -157,6 +157,44 @@ class IBConnector:
             
         except Exception as e:
             print(f"❌ Error getting ticker for {symbol}: {e}")
+            return None
+    
+    def get_ticker_for_contract(self, contract):
+        """Get real-time ticker for a qualified contract (from position)
+        
+        Args:
+            contract: A qualified contract with conId populated
+            
+        Returns:
+            dict with price data or None
+        """
+        if not self.is_connected():
+            return None
+        
+        try:
+            # Use conId as cache key (contract is already qualified!)
+            cache_key = contract.conId
+            
+            if cache_key in self.tickers:
+                ticker = self.tickers[cache_key]
+            else:
+                # Contract is already qualified from position, just subscribe
+                ticker = self.ib.reqMktData(contract, '', False, False)
+                self.tickers[cache_key] = ticker
+            
+            # Wait for data
+            self.ib.sleep(0.5)
+            
+            return {
+                'last': ticker.last if ticker.last == ticker.last else 0,
+                'bid': ticker.bid if ticker.bid == ticker.bid else 0,
+                'ask': ticker.ask if ticker.ask == ticker.ask else 0,
+                'close': ticker.close if ticker.close == ticker.close else 0,
+                'volume': ticker.volume if ticker.volume == ticker.volume else 0
+            }
+            
+        except Exception as e:
+            print(f"❌ Error getting ticker for contract {contract.symbol}: {e}")
             return None
     
     def place_order(self, symbol, action, quantity, order_type='MARKET', limit_price=None, timeout=15):
@@ -238,7 +276,7 @@ class IBConnector:
                 error_msg = f"Order not confirmed after {timeout}s. Final status: {final_status}"
                 print(f"⚠️ {error_msg}")
                 
-                # Try to get more details about why it failed
+                # Try to get more details
                 if hasattr(trade, 'log') and trade.log:
                     for entry in trade.log:
                         print(f"   Log: {entry}")
@@ -258,7 +296,10 @@ class IBConnector:
         return self.place_order(symbol, action, quantity, 'MARKET')
     
     def get_positions(self):
-        """Get all open positions with P&L"""
+        """Get all open positions with P&L
+        
+        Uses qualified contracts from position objects to avoid conId errors
+        """
         if not self.is_connected():
             return []
         
@@ -267,9 +308,12 @@ class IBConnector:
             
             result = []
             for pos in positions:
-                # Get current market price
-                ticker = self.get_ticker(pos.contract.symbol)
-                current_price = ticker['last'] if ticker else pos.avgCost
+                # Use the qualified contract from position object
+                # This already has conId populated!
+                ticker = self.get_ticker_for_contract(pos.contract)
+                
+                # Get current price (fallback to avgCost if ticker fails)
+                current_price = ticker['last'] if ticker and ticker['last'] > 0 else pos.avgCost
                 
                 market_value = pos.position * current_price
                 cost_basis = pos.position * pos.avgCost
@@ -316,7 +360,7 @@ class IBConnector:
                     price = f"${order.lmtPrice:.2f}"
                 
                 result.append({
-                    'time': datetime.now().strftime('%H:%M'),  # Placeholder
+                    'time': datetime.now().strftime('%H:%M'),
                     'symbol': trade.contract.symbol,
                     'action': order.action,
                     'quantity': order.totalQuantity,
