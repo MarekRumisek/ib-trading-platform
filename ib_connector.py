@@ -5,7 +5,7 @@ for trading platform. Handles connection, market data, orders,
 positions, and account information.
 
 Author: Perplexity AI Assistant  
-Version: 1.2.0 - Added LIMIT order support
+Version: 1.2.1 - Fixed ticker caching
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder, util
@@ -20,7 +20,7 @@ class IBConnector:
         self.ib = IB()
         self.connected = False
         self.account_id = None
-        self.tickers = {}  # Cache for ticker objects
+        self.tickers = {}  # Cache for ticker objects (key = symbol string)
         
     def connect(self):
         """Connect to IB Gateway or TWS"""
@@ -126,18 +126,22 @@ class IBConnector:
             return []
     
     def get_ticker(self, symbol):
-        """Get real-time ticker data"""
+        """Get real-time ticker data
+        
+        Uses symbol string as cache key to avoid hashing issues
+        """
         if not self.is_connected():
             return None
         
         try:
-            # Check cache
+            # Check cache using symbol string as key
             if symbol in self.tickers:
                 ticker = self.tickers[symbol]
             else:
-                # Subscribe to market data (NO qualifyContracts needed!)
+                # Subscribe to market data
                 contract = Stock(symbol, 'SMART', 'USD')
                 ticker = self.ib.reqMktData(contract, '', False, False)
+                # Cache using symbol string as key (not contract object!)
                 self.tickers[symbol] = ticker
             
             # Wait for data
@@ -152,7 +156,7 @@ class IBConnector:
             }
             
         except Exception as e:
-            print(f"❌ Error getting ticker: {e}")
+            print(f"❌ Error getting ticker for {symbol}: {e}")
             return None
     
     def place_order(self, symbol, action, quantity, order_type='MARKET', limit_price=None, timeout=15):
