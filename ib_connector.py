@@ -5,7 +5,7 @@ for trading platform. Handles connection, market data, orders,
 positions, and account information.
 
 Author: Perplexity AI Assistant  
-Version: 1.3.0 - Load completed orders on connect
+Version: 1.4.0 - Use reqExecutions for persistent order history
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder, util
@@ -21,6 +21,7 @@ class IBConnector:
         self.connected = False
         self.account_id = None
         self.tickers = {}  # Cache for ticker objects (key = conId or symbol)
+        self.executions = []  # Store executions from IB
         
     def connect(self):
         """Connect to IB Gateway or TWS"""
@@ -38,14 +39,15 @@ class IBConnector:
             if accounts:
                 self.account_id = accounts[0]
             
-            # Load completed orders from today's trading session
-            # This ensures orders persist after app restart
-            print("📝 Loading completed orders from today...")
+            # Load executions (fills) from last 24 hours
+            # This is persistent in IB and survives app restarts!
+            print("📝 Loading executions from IB (last 24h)...")
             try:
-                completed_trades = self.ib.reqCompletedOrders(apiOnly=False)
-                print(f"✅ Loaded {len(completed_trades)} completed order(s)")
+                fills = self.ib.reqExecutions()
+                self.executions = fills
+                print(f"✅ Loaded {len(fills)} execution(s) from IB")
             except Exception as e:
-                print(f"⚠️ Could not load completed orders: {e}")
+                print(f"⚠️ Could not load executions: {e}")
                 # Non-fatal, continue anyway
                 
             print(f"✅ Connected to IB Gateway")
@@ -347,26 +349,42 @@ class IBConnector:
             return []
     
     def get_recent_orders(self, limit=10):
-        """Get recent orders (including completed from today)
+        """Get recent orders from executions (fills)
         
-        Note: After calling reqCompletedOrders() in connect(),
-        ib.trades() will contain all orders from today's session.
+        Uses self.executions loaded from IB via reqExecutions()
+        These persist for 24 hours in IB and survive app restarts!
         """
         if not self.is_connected():
             return []
         
         try:
-            trades = self.ib.trades()
-            
+            # Combine live trades with historical executions
             result = []
-            for trade in trades[-limit:]:
+            
+            # Add historical executions (from last 24h)
+            for fill in self.executions[-limit:]:
+                exec_data = fill.execution
+                result.append({
+                    'time': exec_data.time.strftime('%H:%M') if hasattr(exec_data.time, 'strftime') else str(exec_data.time)[:5],
+                    'symbol': fill.contract.symbol,
+                    'action': exec_data.side,
+                    'quantity': exec_data.shares,
+                    'price': f"${exec_data.price:.2f}",
+                    'status': 'Filled'
+                })
+            
+            # Add current open/pending trades
+            trades = self.ib.trades()
+            for trade in trades:
                 order = trade.order
                 status = trade.orderStatus
                 
-                # Determine price display
+                # Skip if already filled (in executions)
                 if status.status == 'Filled':
-                    price = f"${status.avgFillPrice:.2f}"
-                elif order.orderType == 'MKT':
+                    continue
+                
+                # Determine price display
+                if order.orderType == 'MKT':
                     price = "Market"
                 elif order.orderType == 'LMT':
                     price = f"Limit ${order.lmtPrice:.2f}"
@@ -382,7 +400,7 @@ class IBConnector:
                     'status': status.status
                 })
             
-            return result[::-1]  # Reverse to show newest first
+            return result[::-1][-limit:]  # Reverse and limit
             
         except Exception as e:
             print(f"❌ Error getting orders: {e}")
