@@ -4,15 +4,14 @@ Wrapper for Interactive Brokers API with simplified interface
 for trading platform. Handles connection, market data, orders,
 positions, and account information.
 
-Author: Perplexity AI Assistant
-Version: 1.0.2
+Author: Perplexity AI Assistant  
+Version: 1.1.0
 """
 
 from ib_async import IB, Stock, MarketOrder, util
 from datetime import datetime
 import config
 import time
-import asyncio
 
 class IBConnector:
     """Interactive Brokers API connector"""
@@ -22,7 +21,6 @@ class IBConnector:
         self.connected = False
         self.account_id = None
         self.tickers = {}  # Cache for ticker objects
-        self.qualified_contracts = {}  # Cache for qualified contracts
         
     def connect(self):
         """Connect to IB Gateway or TWS"""
@@ -59,42 +57,6 @@ class IBConnector:
     def is_connected(self):
         """Check if connected to IB"""
         return self.connected and self.ib.isConnected()
-    
-    def _qualify_contract(self, symbol, timeout=5):
-        """Qualify a contract with timeout
-        
-        Returns:
-            Qualified contract or None if failed
-        """
-        # Check cache
-        if symbol in self.qualified_contracts:
-            print(f"💾 Using cached contract for {symbol}")
-            return self.qualified_contracts[symbol]
-        
-        try:
-            print(f"🔍 Qualifying contract for {symbol}...")
-            
-            contract = Stock(symbol, 'SMART', 'USD')
-            
-            # Qualify with timeout
-            qualified = self.ib.qualifyContracts(contract)
-            
-            if not qualified:
-                print(f"❌ Failed to qualify {symbol}")
-                return None
-            
-            # Cache it
-            self.qualified_contracts[symbol] = qualified[0]
-            print(f"✅ Contract qualified: {qualified[0].symbol} @ {qualified[0].primaryExchange}")
-            
-            return qualified[0]
-            
-        except asyncio.TimeoutError:
-            print(f"❌ Contract qualification timed out for {symbol}")
-            return None
-        except Exception as e:
-            print(f"❌ Error qualifying contract {symbol}: {e}")
-            return None
     
     def get_account_info(self):
         """Get account information"""
@@ -173,9 +135,8 @@ class IBConnector:
             if symbol in self.tickers:
                 ticker = self.tickers[symbol]
             else:
-                # Subscribe to market data
+                # Subscribe to market data (NO qualifyContracts needed!)
                 contract = Stock(symbol, 'SMART', 'USD')
-                self.ib.qualifyContracts(contract)
                 ticker = self.ib.reqMktData(contract, '', False, False)
                 self.tickers[symbol] = ticker
             
@@ -195,7 +156,7 @@ class IBConnector:
             return None
     
     def place_market_order(self, symbol, action, quantity):
-        """Place a market order
+        """Place a market order (following official ib_async examples)
         
         Args:
             symbol: Stock symbol (e.g. 'AAPL')
@@ -211,23 +172,22 @@ class IBConnector:
         try:
             print(f"📤 Placing order: {action} {quantity} {symbol}...")
             
-            # Qualify contract first (with timeout)
-            contract = self._qualify_contract(symbol, timeout=5)
+            # Create contract (NO qualifyContracts needed for basic stocks!)
+            # Following official ib_async documentation pattern
+            contract = Stock(symbol, 'SMART', 'USD')
+            print(f"📝 Contract created: {symbol} @ SMART/USD")
             
-            if not contract:
-                error_msg = f"Failed to qualify contract for {symbol}"
-                print(f"❌ {error_msg}")
-                return {'success': False, 'error': error_msg}
-            
-            print(f"📝 Creating market order...")
+            # Create market order
             order = MarketOrder(action, quantity)
+            print(f"📨 Order created: {action} {quantity} shares")
             
-            print(f"📨 Submitting order to IB...")
+            # Place order directly (like official examples)
+            print(f"🚀 Submitting order to IB...")
             trade = self.ib.placeOrder(contract, order)
+            print(f"✅ Order submitted! Trade object created.")
             
-            print(f"⏳ Waiting for order confirmation (max 10s)...")
-            
-            # Wait for order to be submitted (max 10 seconds)
+            # Wait for order to be accepted (max 10 seconds)
+            print(f"⏳ Waiting for order confirmation...")
             start_time = time.time()
             last_status = None
             
@@ -239,7 +199,13 @@ class IBConnector:
                     print(f"📊 Status update: {current_status}")
                     last_status = current_status
                 
+                # Check if order is in a final/accepted state
                 if current_status in ['Submitted', 'Filled', 'PreSubmitted']:
+                    break
+                    
+                # Check for immediate rejection
+                if current_status in ['Cancelled', 'ApiCancelled', 'Inactive']:
+                    print(f"❌ Order rejected/cancelled: {current_status}")
                     break
             
             # Check final status
@@ -257,18 +223,19 @@ class IBConnector:
                     'error': None
                 }
             else:
-                error_msg = f"Order not confirmed. Status: {final_status}"
+                error_msg = f"Order not confirmed. Final status: {final_status}"
                 print(f"⚠️ {error_msg}")
+                
+                # Try to get more details about why it failed
+                if hasattr(trade, 'log') and trade.log:
+                    for entry in trade.log:
+                        print(f"   Log: {entry}")
+                
                 return {'success': False, 'error': error_msg}
-            
-        except asyncio.TimeoutError:
-            error_msg = "Order placement timed out"
-            print(f"❌ {error_msg}")
-            return {'success': False, 'error': error_msg}
             
         except Exception as e:
             error_msg = str(e)
-            print(f"❌ Order FAILED: {error_msg}")
+            print(f"❌ Order FAILED with exception: {error_msg}")
             import traceback
             traceback.print_exc()
             return {'success': False, 'error': error_msg}
