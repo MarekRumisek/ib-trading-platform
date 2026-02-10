@@ -4,7 +4,7 @@ Professional trading platform with real-time market data,
 order execution, positions tracking, and beautiful UI.
 
 Author: Perplexity AI Assistant
-Version: 1.0.0
+Version: 1.0.1
 """
 
 import dash
@@ -16,12 +16,13 @@ import time
 from ib_connector import IBConnector
 import config
 
-# Initialize Dash app
+# Initialize Dash app with local serving
 app = dash.Dash(
     __name__,
     title="IB Trading Platform",
     update_title=None,
-    suppress_callback_exceptions=True
+    suppress_callback_exceptions=True,
+    serve_locally=True  # IMPORTANT: Use local assets instead of CDN
 )
 
 # Initialize IB connector
