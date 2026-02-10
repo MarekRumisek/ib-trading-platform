@@ -5,7 +5,7 @@ for trading platform. Handles connection, market data, orders,
 positions, and account information.
 
 Author: Perplexity AI Assistant
-Version: 1.0.1
+Version: 1.0.2
 """
 
 from ib_async import IB, Stock, MarketOrder, util
@@ -22,6 +22,7 @@ class IBConnector:
         self.connected = False
         self.account_id = None
         self.tickers = {}  # Cache for ticker objects
+        self.qualified_contracts = {}  # Cache for qualified contracts
         
     def connect(self):
         """Connect to IB Gateway or TWS"""
@@ -58,6 +59,42 @@ class IBConnector:
     def is_connected(self):
         """Check if connected to IB"""
         return self.connected and self.ib.isConnected()
+    
+    def _qualify_contract(self, symbol, timeout=5):
+        """Qualify a contract with timeout
+        
+        Returns:
+            Qualified contract or None if failed
+        """
+        # Check cache
+        if symbol in self.qualified_contracts:
+            print(f"💾 Using cached contract for {symbol}")
+            return self.qualified_contracts[symbol]
+        
+        try:
+            print(f"🔍 Qualifying contract for {symbol}...")
+            
+            contract = Stock(symbol, 'SMART', 'USD')
+            
+            # Qualify with timeout
+            qualified = self.ib.qualifyContracts(contract)
+            
+            if not qualified:
+                print(f"❌ Failed to qualify {symbol}")
+                return None
+            
+            # Cache it
+            self.qualified_contracts[symbol] = qualified[0]
+            print(f"✅ Contract qualified: {qualified[0].symbol} @ {qualified[0].primaryExchange}")
+            
+            return qualified[0]
+            
+        except asyncio.TimeoutError:
+            print(f"❌ Contract qualification timed out for {symbol}")
+            return None
+        except Exception as e:
+            print(f"❌ Error qualifying contract {symbol}: {e}")
+            return None
     
     def get_account_info(self):
         """Get account information"""
@@ -174,46 +211,66 @@ class IBConnector:
         try:
             print(f"📤 Placing order: {action} {quantity} {symbol}...")
             
-            contract = Stock(symbol, 'SMART', 'USD')
-            self.ib.qualifyContracts(contract)
+            # Qualify contract first (with timeout)
+            contract = self._qualify_contract(symbol, timeout=5)
             
+            if not contract:
+                error_msg = f"Failed to qualify contract for {symbol}"
+                print(f"❌ {error_msg}")
+                return {'success': False, 'error': error_msg}
+            
+            print(f"📝 Creating market order...")
             order = MarketOrder(action, quantity)
             
+            print(f"📨 Submitting order to IB...")
             trade = self.ib.placeOrder(contract, order)
             
+            print(f"⏳ Waiting for order confirmation (max 10s)...")
+            
             # Wait for order to be submitted (max 10 seconds)
-            print(f"⏳ Waiting for order confirmation...")
             start_time = time.time()
+            last_status = None
+            
             while time.time() - start_time < 10:
                 self.ib.sleep(0.5)
-                if trade.orderStatus.status in ['Submitted', 'Filled', 'PreSubmitted']:
+                
+                current_status = trade.orderStatus.status
+                if current_status != last_status:
+                    print(f"📊 Status update: {current_status}")
+                    last_status = current_status
+                
+                if current_status in ['Submitted', 'Filled', 'PreSubmitted']:
                     break
             
-            # Check if order was accepted
-            if trade.orderStatus.status in ['Submitted', 'Filled', 'PreSubmitted']:
-                print(f"✅ Order placed: {action} {quantity} {symbol}")
+            # Check final status
+            final_status = trade.orderStatus.status
+            
+            if final_status in ['Submitted', 'Filled', 'PreSubmitted']:
+                print(f"✅ Order SUCCESSFUL!")
                 print(f"📋 Order ID: {trade.order.orderId}")
-                print(f"📊 Status: {trade.orderStatus.status}")
+                print(f"📊 Final Status: {final_status}")
                 
                 return {
                     'success': True,
                     'order_id': trade.order.orderId,
-                    'status': trade.orderStatus.status,
+                    'status': final_status,
                     'error': None
                 }
             else:
-                error_msg = f"Order status: {trade.orderStatus.status}"
-                print(f"⚠️ Order not confirmed: {error_msg}")
+                error_msg = f"Order not confirmed. Status: {final_status}"
+                print(f"⚠️ {error_msg}")
                 return {'success': False, 'error': error_msg}
             
         except asyncio.TimeoutError:
-            error_msg = "Order placement timed out (10s)"
+            error_msg = "Order placement timed out"
             print(f"❌ {error_msg}")
             return {'success': False, 'error': error_msg}
             
         except Exception as e:
             error_msg = str(e)
-            print(f"❌ Order failed: {error_msg}")
+            print(f"❌ Order FAILED: {error_msg}")
+            import traceback
+            traceback.print_exc()
             return {'success': False, 'error': error_msg}
     
     def get_positions(self):
