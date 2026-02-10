@@ -5,10 +5,10 @@ for trading platform. Handles connection, market data, orders,
 positions, and account information.
 
 Author: Perplexity AI Assistant  
-Version: 1.1.0
+Version: 1.2.0 - Added LIMIT order support
 """
 
-from ib_async import IB, Stock, MarketOrder, util
+from ib_async import IB, Stock, MarketOrder, LimitOrder, util
 from datetime import datetime
 import config
 import time
@@ -155,13 +155,16 @@ class IBConnector:
             print(f"❌ Error getting ticker: {e}")
             return None
     
-    def place_market_order(self, symbol, action, quantity):
-        """Place a market order (following official ib_async examples)
+    def place_order(self, symbol, action, quantity, order_type='MARKET', limit_price=None, timeout=15):
+        """Place an order (MARKET or LIMIT)
         
         Args:
             symbol: Stock symbol (e.g. 'AAPL')
             action: 'BUY' or 'SELL'
             quantity: Number of shares
+            order_type: 'MARKET' or 'LIMIT'
+            limit_price: Limit price (required for LIMIT orders)
+            timeout: Seconds to wait for order confirmation
             
         Returns:
             dict: {'success': bool, 'order_id': int, 'error': str}
@@ -170,28 +173,33 @@ class IBConnector:
             return {'success': False, 'error': 'Not connected to IB'}
         
         try:
-            print(f"📤 Placing order: {action} {quantity} {symbol}...")
+            print(f"📤 Placing order: {action} {quantity} {symbol} @ {order_type}...")
             
             # Create contract (NO qualifyContracts needed for basic stocks!)
-            # Following official ib_async documentation pattern
             contract = Stock(symbol, 'SMART', 'USD')
             print(f"📝 Contract created: {symbol} @ SMART/USD")
             
-            # Create market order
-            order = MarketOrder(action, quantity)
-            print(f"📨 Order created: {action} {quantity} shares")
+            # Create order based on type
+            if order_type == 'LIMIT':
+                if not limit_price:
+                    return {'success': False, 'error': 'Limit price required for LIMIT orders'}
+                order = LimitOrder(action, quantity, limit_price)
+                print(f"📨 Limit order created: {action} {quantity} @ ${limit_price:.2f}")
+            else:
+                order = MarketOrder(action, quantity)
+                print(f"📨 Market order created: {action} {quantity} shares")
             
             # Place order directly (like official examples)
-            print(f"🚀 Submitting order to IB...")
+            print(f"🚀 Submitting order to IB (timeout: {timeout}s)...")
             trade = self.ib.placeOrder(contract, order)
             print(f"✅ Order submitted! Trade object created.")
             
-            # Wait for order to be accepted (max 10 seconds)
-            print(f"⏳ Waiting for order confirmation...")
+            # Wait for order to be accepted
+            print(f"⏳ Waiting for order confirmation (max {timeout}s)...")
             start_time = time.time()
             last_status = None
             
-            while time.time() - start_time < 10:
+            while time.time() - start_time < timeout:
                 self.ib.sleep(0.5)
                 
                 current_status = trade.orderStatus.status
@@ -223,7 +231,7 @@ class IBConnector:
                     'error': None
                 }
             else:
-                error_msg = f"Order not confirmed. Final status: {final_status}"
+                error_msg = f"Order not confirmed after {timeout}s. Final status: {final_status}"
                 print(f"⚠️ {error_msg}")
                 
                 # Try to get more details about why it failed
@@ -239,6 +247,11 @@ class IBConnector:
             import traceback
             traceback.print_exc()
             return {'success': False, 'error': error_msg}
+    
+    # Legacy method for backward compatibility
+    def place_market_order(self, symbol, action, quantity):
+        """Legacy method - calls place_order with MARKET type"""
+        return self.place_order(symbol, action, quantity, 'MARKET')
     
     def get_positions(self):
         """Get all open positions with P&L"""
@@ -293,6 +306,8 @@ class IBConnector:
                     price = f"${status.avgFillPrice:.2f}"
                 elif order.orderType == 'MKT':
                     price = "Market"
+                elif order.orderType == 'LMT':
+                    price = f"Limit ${order.lmtPrice:.2f}"
                 else:
                     price = f"${order.lmtPrice:.2f}"
                 

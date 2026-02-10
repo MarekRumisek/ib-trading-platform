@@ -4,7 +4,7 @@ Simplified version using pure Flask + vanilla JavaScript
 to test if the issue is with Dash/Plotly or IB backend.
 
 Author: Perplexity AI Assistant
-Version: 1.0.0-simple
+Version: 1.1.0 - Added LIMIT order support + timeout settings
 """
 
 from flask import Flask, render_template_string, jsonify, request
@@ -76,13 +76,17 @@ HTML_TEMPLATE = '''
             background: linear-gradient(135deg, #ef5350 0%, #c62828 100%);
             color: white;
         }
-        .btn-qty {
+        .btn-qty, .btn-order-type {
             background: #667eea;
             color: white;
             padding: 8px 15px;
             font-size: 14px;
         }
-        input {
+        .btn-order-type.active {
+            background: #764ba2;
+            box-shadow: 0 0 10px #764ba2;
+        }
+        input, select {
             padding: 10px;
             border: 2px solid #667eea;
             border-radius: 5px;
@@ -90,6 +94,9 @@ HTML_TEMPLATE = '''
             color: white;
             font-size: 16px;
             margin: 5px;
+        }
+        input[type="range"] {
+            width: 200px;
         }
         table {
             width: 100%;
@@ -112,13 +119,25 @@ HTML_TEMPLATE = '''
         }
         .feedback.success { background: #26a69a33; color: #26a69a; }
         .feedback.error { background: #ef535033; color: #ef5350; }
+        .settings-row {
+            margin: 10px 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .limit-price-group {
+            display: none;
+        }
+        .limit-price-group.visible {
+            display: inline-block;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <!-- Header -->
         <div class="header">
-            <h1>🚀 IB Trading Platform (Simple Version)</h1>
+            <h1>🚀 IB Trading Platform (Simple + Advanced)</h1>
             <p id="connection-status">
                 <span class="status disconnected"></span>
                 Checking connection...
@@ -138,11 +157,23 @@ HTML_TEMPLATE = '''
         <!-- Order Entry -->
         <div class="panel">
             <h2>📤 Order Entry</h2>
-            <div>
+            
+            <div class="settings-row">
                 <label><strong>Symbol:</strong></label>
                 <input type="text" id="symbol" value="AAPL" style="width: 150px;">
             </div>
-            <div style="margin-top: 15px;">
+            
+            <div class="settings-row">
+                <label><strong>Order Type:</strong></label>
+                <button class="btn-order-type active" id="order-type-market" onclick="setOrderType('MARKET')">MARKET</button>
+                <button class="btn-order-type" id="order-type-limit" onclick="setOrderType('LIMIT')">LIMIT</button>
+                <span class="limit-price-group" id="limit-price-group">
+                    <label>Price:</label>
+                    <input type="number" id="limit-price" value="150.00" step="0.01" style="width: 100px;">
+                </span>
+            </div>
+            
+            <div class="settings-row">
                 <label><strong>Quantity:</strong></label>
                 <button class="btn-qty" onclick="setQty(1)">1</button>
                 <button class="btn-qty" onclick="setQty(5)">5</button>
@@ -151,9 +182,16 @@ HTML_TEMPLATE = '''
                 <button class="btn-qty" onclick="setQty(100)">100</button>
                 <input type="number" id="quantity" value="1" min="1" style="width: 100px;">
             </div>
+            
+            <div class="settings-row">
+                <label><strong>⏱️ Timeout:</strong></label>
+                <input type="range" id="timeout-slider" min="5" max="60" value="15" oninput="updateTimeout(this.value)">
+                <span id="timeout-value">15s</span>
+            </div>
+            
             <div style="margin-top: 20px;">
-                <button class="btn-buy" onclick="placeOrder('BUY')">🟢 BUY MARKET</button>
-                <button class="btn-sell" onclick="placeOrder('SELL')">🔴 SELL MARKET</button>
+                <button class="btn-buy" onclick="placeOrder('BUY')">🟢 BUY</button>
+                <button class="btn-sell" onclick="placeOrder('SELL')">🔴 SELL</button>
             </div>
             <div id="order-feedback"></div>
         </div>
@@ -176,6 +214,9 @@ HTML_TEMPLATE = '''
     </div>
 
     <script>
+        let currentOrderType = 'MARKET';
+        let currentTimeout = 15;
+        
         // Update connection status
         function updateStatus() {
             fetch('/api/status')
@@ -271,6 +312,28 @@ HTML_TEMPLATE = '''
                 });
         }
 
+        // Set order type
+        function setOrderType(type) {
+            currentOrderType = type;
+            document.getElementById('order-type-market').classList.remove('active');
+            document.getElementById('order-type-limit').classList.remove('active');
+            document.getElementById('order-type-' + type.toLowerCase()).classList.add('active');
+            
+            // Show/hide limit price input
+            const limitGroup = document.getElementById('limit-price-group');
+            if (type === 'LIMIT') {
+                limitGroup.classList.add('visible');
+            } else {
+                limitGroup.classList.remove('visible');
+            }
+        }
+
+        // Update timeout
+        function updateTimeout(value) {
+            currentTimeout = parseInt(value);
+            document.getElementById('timeout-value').textContent = value + 's';
+        }
+
         // Set quantity
         function setQty(qty) {
             document.getElementById('quantity').value = qty;
@@ -280,6 +343,9 @@ HTML_TEMPLATE = '''
         function placeOrder(action) {
             const symbol = document.getElementById('symbol').value;
             const quantity = parseInt(document.getElementById('quantity').value);
+            const orderType = currentOrderType;
+            const limitPrice = orderType === 'LIMIT' ? parseFloat(document.getElementById('limit-price').value) : null;
+            const timeout = currentTimeout;
             const feedbackEl = document.getElementById('order-feedback');
             
             if (!symbol) {
@@ -288,19 +354,33 @@ HTML_TEMPLATE = '''
                 return;
             }
             
-            feedbackEl.textContent = '⏳ Placing order...';
+            if (orderType === 'LIMIT' && (!limitPrice || limitPrice <= 0)) {
+                feedbackEl.className = 'feedback error';
+                feedbackEl.textContent = '❌ Please enter a valid limit price';
+                return;
+            }
+            
+            const orderTypeText = orderType === 'LIMIT' ? `LIMIT @ $${limitPrice.toFixed(2)}` : 'MARKET';
+            feedbackEl.textContent = `⏳ Placing ${orderTypeText} order (timeout: ${timeout}s)...`;
             feedbackEl.className = 'feedback';
             
             fetch('/api/place_order', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({symbol, action, quantity})
+                body: JSON.stringify({
+                    symbol: symbol,
+                    action: action,
+                    quantity: quantity,
+                    order_type: orderType,
+                    limit_price: limitPrice,
+                    timeout: timeout
+                })
             })
             .then(r => r.json())
             .then(data => {
                 if (data.success) {
                     feedbackEl.className = 'feedback success';
-                    feedbackEl.textContent = `✅ Order placed: ${action} ${quantity} ${symbol} @ Market`;
+                    feedbackEl.textContent = `✅ Order placed: ${action} ${quantity} ${symbol} @ ${orderTypeText} (ID: ${data.order_id})`;
                     // Update positions/orders after 2 seconds
                     setTimeout(() => {
                         updatePositions();
@@ -327,8 +407,8 @@ HTML_TEMPLATE = '''
         setInterval(updatePositions, 3000);
         setInterval(updateOrders, 5000);
 
-        console.log('✅ Simple IB Trading Platform loaded!');
-        console.log('📊 Buttons should work now!');
+        console.log('✅ Advanced IB Trading Platform loaded!');
+        console.log('📊 Features: MARKET/LIMIT orders + configurable timeout');
     </script>
 </body>
 </html>
@@ -377,14 +457,17 @@ def api_place_order():
     symbol = data.get('symbol')
     action = data.get('action')
     quantity = data.get('quantity', 1)
+    order_type = data.get('order_type', 'MARKET')
+    limit_price = data.get('limit_price')
+    timeout = data.get('timeout', 15)
     
-    result = ib.place_market_order(symbol, action, quantity)
+    result = ib.place_order(symbol, action, quantity, order_type, limit_price, timeout)
     return jsonify(result)
 
 # ========== RUN ==========
 
 if __name__ == '__main__':
-    print("🚀 Starting SIMPLE IB Trading Platform...")
+    print("🚀 Starting ADVANCED IB Trading Platform...")
     print(f"Connecting to IB Gateway on {config.IB_HOST}:{config.IB_PORT}")
     
     # Connect to IB
@@ -396,9 +479,10 @@ if __name__ == '__main__':
     print("\n" + "="*50)
     print("🌐 Open browser at: http://localhost:8051")
     print("="*50)
-    print("\n📊 This is a SIMPLIFIED version (no Dash/Plotly)")
-    print("✅ If buttons work here = Dash/Plotly issue")
-    print("❌ If buttons don't work = IB backend issue")
+    print("\n✨ NEW FEATURES:")
+    print("   📊 MARKET / LIMIT order toggle")
+    print("   ⏱️  Configurable timeout (5-60s)")
+    print("   💰 Limit price input")
     print("\nPress Ctrl+C to stop\n")
     
     app.run(debug=False, host='0.0.0.0', port=8051)
