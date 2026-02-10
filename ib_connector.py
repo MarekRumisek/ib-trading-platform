@@ -5,7 +5,7 @@ for trading platform. Handles connection, market data, orders,
 positions, and account information.
 
 Author: Perplexity AI Assistant  
-Version: 1.2.2 - Fixed position ticker using qualified contracts
+Version: 1.3.0 - Load completed orders on connect
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder, util
@@ -37,6 +37,16 @@ class IBConnector:
             accounts = self.ib.managedAccounts()
             if accounts:
                 self.account_id = accounts[0]
+            
+            # Load completed orders from today's trading session
+            # This ensures orders persist after app restart
+            print("📝 Loading completed orders from today...")
+            try:
+                completed_trades = self.ib.reqCompletedOrders(apiOnly=False)
+                print(f"✅ Loaded {len(completed_trades)} completed order(s)")
+            except Exception as e:
+                print(f"⚠️ Could not load completed orders: {e}")
+                # Non-fatal, continue anyway
                 
             print(f"✅ Connected to IB Gateway")
             print(f"💼 Account: {self.account_id}")
@@ -337,7 +347,11 @@ class IBConnector:
             return []
     
     def get_recent_orders(self, limit=10):
-        """Get recent orders"""
+        """Get recent orders (including completed from today)
+        
+        Note: After calling reqCompletedOrders() in connect(),
+        ib.trades() will contain all orders from today's session.
+        """
         if not self.is_connected():
             return []
         
