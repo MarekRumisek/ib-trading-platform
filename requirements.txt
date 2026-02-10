@@ -1,0 +1,13 @@
+# IB Trading Platform - Python Dependencies
+# Install: pip install -r requirements.txt
+
+# Core
+dash==2.14.2
+plotly==5.18.0
+pandas==2.1.4
+
+# IB API
+ib-async==2.1.0
+
+# Utilities
+python-dateutil==2.8.2
