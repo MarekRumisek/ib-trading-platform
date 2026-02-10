@@ -653,4 +653,5 @@ if __name__ == '__main__':
     print("Opening web browser at http://localhost:8050")
     print("Press Ctrl+C to stop\n")
     
-    app.run_server(debug=True, host='0.0.0.0', port=8050)
+    # IMPORTANT: use_reloader=False prevents duplicate IB connections
+    app.run_server(debug=True, use_reloader=False, host='0.0.0.0', port=8050)
