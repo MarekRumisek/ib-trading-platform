@@ -4,8 +4,33 @@ This module provides a thread-safe order handler that runs in its own
 thread with its own IB connection and event loop. This ensures IB API
 callbacks are properly received and processed without Flask interference.
 
+⚠️ CRITICAL: DO NOT MODIFY WITHOUT READING ARCHITECTURE.md FIRST!
+
+Why This Exists:
+- Flask worker threads are ephemeral - they die after handling requests
+- ib_async needs persistent event loop to receive IB API callbacks
+- Sharing IB connection between Flask threads causes orders to stuck in PendingSubmit
+- This handler creates OWN IB connection in OWN thread with OWN event loop
+
+Key Design Points:
+1. Dedicated thread that runs for entire app lifetime
+2. Own IB connection (different clientId than main connection)
+3. Own asyncio event loop (never dies, callbacks always work)
+4. Sleep workarounds for paper trading validation delays
+
+Documentation:
+- Full explanation: ARCHITECTURE.md
+- Test baseline: test_order.py
+
+DO NOT:
+- Share IB connection between threads
+- Place orders directly in Flask routes
+- Remove sleep workarounds
+- Use same clientId as main connection
+
 Author: Perplexity AI Assistant
 Version: 2.0.0 - Own IB connection per thread
+Last Validated: February 11, 2026 - Orders successfully filling
 """
 
 import threading
@@ -17,7 +42,16 @@ from ib_async import IB, Stock, MarketOrder, LimitOrder
 import config
 
 class OrderHandler:
-    """Thread-safe order handler with dedicated IB connection and event loop."""
+    """Thread-safe order handler with dedicated IB connection and event loop.
+    
+    ⚠️ READ ARCHITECTURE.md BEFORE MODIFYING!
+    
+    This class solves the Flask + ib_async threading incompatibility by:
+    1. Running in dedicated long-lived thread (not Flask worker)
+    2. Creating own IB connection in that thread
+    3. Maintaining own asyncio event loop for callbacks
+    4. Processing orders via queue (thread-safe communication)
+    """
     
     def __init__(self):
         """Initialize handler (IB connection created in thread)."""
@@ -61,7 +95,11 @@ class OrderHandler:
             print("🛑 Order handler thread stopped")
     
     def _run_event_loop(self):
-        """Run dedicated event loop in this thread."""
+        """Run dedicated event loop in this thread.
+        
+        CRITICAL: This creates a NEW IB connection in THIS thread.
+        Do not share connections from other threads!
+        """
         # Create new event loop for this thread
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
@@ -158,12 +196,13 @@ class OrderHandler:
                 print(f"✅ Order submitted! Order ID: {trade.order.orderId}")
             
             # CRITICAL: Sleep workaround for paper trading!
+            # DO NOT REMOVE - See ARCHITECTURE.md for explanation
             if config.DEBUG_ORDERS:
                 print("\n⏱️ Applying sleep workaround...")
             
-            self.ib.sleep(1)
-            time.sleep(2)  # Extra sleep for paper trading
-            self.ib.sleep(1)
+            self.ib.sleep(1)        # Process ib_async events
+            time.sleep(2)           # Give TWS time to validate
+            self.ib.sleep(1)        # Process any pending callbacks
             
             if config.DEBUG_ORDERS:
                 print("✅ Sleep completed")
