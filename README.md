@@ -1,6 +1,6 @@
-# 🚀 IB Trading Platform v1.0
+# 🚀 IB Trading Platform v1.5
 
-**Professional trading platform** with Interactive Brokers API integration, real-time market data, order execution, and beautiful Dash UI.
+**Professional trading platform** with Interactive Brokers API integration, real-time market data, order execution, beautiful Dash UI, and **flexible connection modes**.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-green.svg)
@@ -8,18 +8,20 @@
 
 ---
 
-## ✨ Features (Phase 1)
+## ✨ Features
 
 ### ✅ **Working & Production-Ready:**
 
 - 🔌 **IB Gateway Connection** - Auto-connect with status monitoring
+- 🔄 **Multi-Mode Support** - Switch between TWS/Gateway, Paper/Live
 - 💰 **Real-time Account Info** - Balance, buying power, account type
 - 📊 **Market Data** - Live quotes with bid/ask/last prices
 - 📈 **Professional Charts** - Plotly candlestick charts with volume
 - ⏱️ **Multiple Timeframes** - 1m, 5m, 15m, 30m, 1h, 1D
-- 🎯 **Order Execution** - Market orders (BUY/SELL)
+- 🎯 **Order Execution** - Market orders (BUY/SELL) with detailed logging
 - 📋 **Position Tracking** - Real-time positions with P&L calculation
 - 📜 **Order History** - Status tracking with visual indicators
+- 🐛 **Debug Mode** - Comprehensive order and connection logging
 - 🎨 **Dark Theme UI** - Professional, responsive design
 - 🔄 **Auto-Updates** - Real-time price and position updates
 
@@ -29,9 +31,10 @@
 
 ```
 ┌────────────────────────────────────────────────────────┐
-│ 🚀 IB Trading Platform v1.0                           │
+│ 🚀 IB Trading Platform v1.5                           │
 ├────────────────────────────────────────────────────────┤
 │ 🔌 Connected  💰 $6,720.35  📈 $15,430.20            │
+│ Mode: 📊 TWS Paper Trading (Port 7497)               │
 │                                                        │
 │ Symbol: AAPL  Last: $274.35 ▲ +1.25 (+0.46%)         │
 │                                                        │
@@ -68,25 +71,45 @@ cd ib-trading-platform
 pip install -r requirements.txt
 ```
 
-### **3. Configure IB Gateway:**
+### **3. Configure Connection Mode:**
 
-Edit `config.py`:
+**🆕 NEW: Multiple Connection Modes!**
+
+Edit `config.py` to choose your connection:
 ```python
-# Paper Trading (default)
-IB_PORT = 4002
-
-# Live Trading (change only when ready!)
-# IB_PORT = 4001
+# Available modes:
+CONNECTION_MODE = 'TWS_PAPER'       # Paper Trading TWS (default, port 7497)
+# CONNECTION_MODE = 'GATEWAY_PAPER'  # Paper Trading Gateway (port 4002)
+# CONNECTION_MODE = 'TWS_LIVE'       # Live Trading TWS ⚠️ REAL MONEY (port 7496)
+# CONNECTION_MODE = 'GATEWAY_LIVE'   # Live Trading Gateway ⚠️ REAL MONEY (port 4001)
 ```
 
-### **4. Start IB Gateway:**
-- Open IB Gateway
-- Login with your credentials
-- Make sure API is enabled:
-  - Configure → Settings → API → Settings
-  - Enable "Enable ActiveX and Socket Clients"
-  - Socket port: **4002** (Paper) or **4001** (Live)
-  - Trusted IPs: Add `127.0.0.1`
+**Or via environment variable:**
+```bash
+# Windows PowerShell
+$env:IB_CONNECTION_MODE="TWS_PAPER"
+python app.py
+
+# Linux/Mac
+export IB_CONNECTION_MODE="TWS_PAPER"
+python app.py
+```
+
+📚 **Full Connection Guide:** See [CONNECTION_MODES.md](CONNECTION_MODES.md)
+
+### **4. Configure IB Gateway/TWS:**
+
+**Paper Trading TWS (Port 7497) - RECOMMENDED:**
+1. Open **Paper Trading TWS**
+2. File → Global Configuration → API → Settings:
+   - ✅ **Enable ActiveX and Socket Clients** = ON
+   - ❌ **Read-Only API** = OFF (important!)
+   - Socket port: **7497**
+   - Trusted IPs: Add `127.0.0.1`
+3. **Restart TWS** after changes
+4. Confirm paper trading dialog on first connection
+
+**Other modes:** See [CONNECTION_MODES.md](CONNECTION_MODES.md) for full setup guide.
 
 ### **5. Run Platform:**
 ```bash
@@ -95,6 +118,24 @@ python app.py
 
 ### **6. Open Browser:**
 Go to: **http://localhost:8050**
+
+---
+
+## 🧪 Testing
+
+### **Test Connection & Orders:**
+```bash
+python test_order.py
+```
+
+This diagnostic script:
+- ✅ Tests connection to IB
+- 📤 Places a test market order (BUY 1 AAPL)
+- 📊 Monitors order status for 15 seconds
+- 💬 Shows all IB API messages and warnings
+- 🔧 Provides troubleshooting tips if issues occur
+
+**Use this first** to verify your IB setup works correctly!
 
 ---
 
@@ -111,6 +152,7 @@ Go to: **http://localhost:8050**
    - Select quantity (1, 5, 10, 25, 100 or custom)
    - Click **🟢 BUY MARKET** or **🔴 SELL MARKET**
    - Order confirmation appears below buttons
+   - Check console for detailed debug output
 
 3. **Monitor Positions:**
    - Real-time P&L updates every 2 seconds
@@ -124,18 +166,58 @@ Go to: **http://localhost:8050**
 
 ## 🔧 Configuration
 
-### **Switch to Live Trading:**
+### **Debug Mode (NEW):**
 
-⚠️ **WARNING:** Live trading uses real money!
-
-1. Edit `config.py`:
+In `config.py`, enable verbose logging:
 ```python
-IB_PORT = 4001  # Live trading
+DEBUG_ORDERS = True      # Detailed order placement logs
+DEBUG_CONNECTION = True  # Detailed connection logs
 ```
 
-2. Login to IB Gateway with **Live** credentials
+With debug enabled, you'll see:
+```
+============================================================
+🚀 PLACING ORDER
+============================================================
+📤 Order: BUY 1 AAPL @ MARKET
+📝 Contract: AAPL @ SMART/USD
+📨 Market order: BUY 1 shares
+⚙️ Flags: transmit=True, outsideRth=True
 
-3. Start small - test with 1 share orders
+🚀 Submitting to IB (timeout: 15s)...
+✅ Order submitted! Order ID: 3
+
+⏳ Monitoring status...
+
+[ 0s] 📊 Status: None → PreSubmitted
+       ⚠️ Warning 399: Order will be placed at market open (15:30 CET)
+[ 1s] Status: PreSubmitted
+[ 2s] 📊 Status: PreSubmitted → Submitted
+
+🎉 SUCCESS! Order reached: Submitted
+
+============================================================
+📊 FINAL RESULTS
+============================================================
+Final Status: Submitted
+Order ID: 3
+Filled: 0.0
+Remaining: 1.0
+============================================================
+```
+
+### **Switch Connection Modes:**
+
+See full guide: [CONNECTION_MODES.md](CONNECTION_MODES.md)
+
+Quick reference:
+
+| Mode | Port | Type | Money |
+|------|------|------|-------|
+| **TWS_PAPER** | 7497 | TWS | Paper ✅ |
+| **GATEWAY_PAPER** | 4002 | Gateway | Paper ✅ |
+| **TWS_LIVE** | 7496 | TWS | Live ⚠️ |
+| **GATEWAY_LIVE** | 4001 | Gateway | Live ⚠️ |
 
 ### **Timeframe Settings:**
 
@@ -154,12 +236,14 @@ IB_PORT = 4001  # Live trading
 
 ```
 ib-trading-platform/
-├── app.py                 # Main Dash application
-├── ib_connector.py        # IB API wrapper
-├── config.py              # Configuration settings
-├── requirements.txt       # Python dependencies
-├── .gitignore            # Git ignore rules
-└── README.md             # This file
+├── app.py                    # Main Dash application
+├── ib_connector.py           # IB API wrapper with debug logging
+├── config.py                 # Configuration + connection modes
+├── test_order.py             # Order testing script
+├── requirements.txt          # Python dependencies
+├── CONNECTION_MODES.md       # Connection modes guide
+├── .gitignore               # Git ignore rules
+└── README.md                # This file
 ```
 
 ---
@@ -191,29 +275,40 @@ ib-trading-platform/
 
 ## 🐛 Troubleshooting
 
+### **Orders Stuck in "PendingSubmit"**
+
+**Solution:**
+1. ❌ **Read-Only API must be OFF** in TWS/Gateway settings (most common issue!)
+2. 🔄 **Restart TWS/Gateway** after changing settings
+3. ✅ **Confirm paper trading dialog** on first connection
+4. ⏰ **Test during trading hours** (15:30-22:00 CET for US markets)
+5. 🧪 Run `python test_order.py` for diagnosis
+6. 🐛 Enable `DEBUG_ORDERS = True` in config.py
+
 ### **"Not connected to IB Gateway"**
 
 **Solution:**
-- Check IB Gateway is running
-- Verify port in `config.py` matches IB Gateway settings
-- Check API is enabled in IB Gateway settings
-- Try restarting IB Gateway
+- Check IB Gateway/TWS is running
+- Verify port in `config.py` matches your mode
+- Check API is enabled in IB settings
+- Try different connection mode
+- Run `python test_order.py` to diagnose
 
 ### **"No data available"**
 
 **Solution:**
 - Check market is open (9:30-16:00 ET)
 - Verify symbol is correct (use all caps: AAPL)
-- Check you have market data subscription for that symbol
-- Try delayed data (free) vs real-time (subscription)
+- Check market data subscription
+- Try delayed data (free) vs real-time
 
-### **Orders not filling**
+### **Orders not showing in TWS**
 
 **Solution:**
-- Check you're using Paper Trading account
-- Verify market is open
-- Check buying power is sufficient
-- Look for error messages in console
+- Order must reach `Submitted` or `PreSubmitted` status
+- Outside trading hours shows `PreSubmitted` (normal)
+- Check TWS message log for details
+- Enable `DEBUG_ORDERS = True` for full logs
 
 ### **"Module not found" errors**
 
@@ -225,6 +320,10 @@ pip install -r requirements.txt
 ---
 
 ## 📚 Documentation
+
+### **This Project:**
+- [Connection Modes Guide](CONNECTION_MODES.md) - Complete setup for all modes
+- [Test Script Usage](test_order.py) - Diagnostic tool
 
 ### **ib_async (API Library):**
 - [Official Documentation](https://ib-api-reloaded.github.io/ib_async/)
@@ -294,6 +393,24 @@ Contributions welcome!
 - **Interactive Brokers** - API and trading infrastructure
 - **Plotly/Dash** - Beautiful data visualization
 - **Community** - All contributors and testers
+
+---
+
+## 📝 Changelog
+
+### v1.5.0 (Current)
+- ✅ Multiple connection modes (TWS/Gateway, Paper/Live)
+- ✅ Runtime connection mode switching
+- ✅ Comprehensive debug logging
+- ✅ Test script for diagnostics
+- ✅ Improved order placement (working approach from tests)
+- ✅ Detailed error reporting with IB API messages
+- ✅ Connection modes documentation
+
+### v1.0.0
+- ✅ Initial release
+- ✅ Basic trading functionality
+- ✅ Real-time data and charts
 
 ---
 
