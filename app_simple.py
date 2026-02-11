@@ -4,7 +4,7 @@ Simplified version using pure Flask + vanilla JavaScript
 to test if the issue is with Dash/Plotly or IB backend.
 
 Author: Perplexity AI Assistant
-Version: 1.1.0 - Added LIMIT order support + timeout settings
+Version: 1.2.0 - Fixed Flask threading conflicts with ib_async
 """
 
 from flask import Flask, render_template_string, jsonify, request
@@ -12,6 +12,18 @@ from ib_connector import IBConnector
 import config
 import threading
 import time
+
+# CRITICAL FIX: Use different clientId than test_order.py (999) to avoid conflicts
+config.IB_CLIENT_ID = 20
+
+# CRITICAL FIX: Flask runs in multiple threads, ib_async needs isolated event loop
+import asyncio
+try:
+    # Create new event loop for this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+except RuntimeError:
+    pass  # Event loop already exists
 
 app = Flask(__name__)
 ib = IBConnector()
@@ -288,13 +300,15 @@ HTML_TEMPLATE = '''
                             'Filled': '✅',
                             'Submitted': '⏳',
                             'Cancelled': '❌',
-                            'PendingSubmit': '🕒'
+                            'PendingSubmit': '🕒',
+                            'PreSubmitted': '🔔'
                         };
                         const statusColors = {
                             'Filled': '#26a69a',
                             'Submitted': '#ffa726',
                             'Cancelled': '#ef5350',
-                            'PendingSubmit': '#42a5f5'
+                            'PendingSubmit': '#42a5f5',
+                            'PreSubmitted': '#9c27b0'
                         };
                         const icon = statusIcons[order.status] || '❓';
                         const color = statusColors[order.status] || '#888';
@@ -380,7 +394,7 @@ HTML_TEMPLATE = '''
             .then(data => {
                 if (data.success) {
                     feedbackEl.className = 'feedback success';
-                    feedbackEl.textContent = `✅ Order placed: ${action} ${quantity} ${symbol} @ ${orderTypeText} (ID: ${data.order_id})`;
+                    feedbackEl.textContent = `✅ Order placed: ${action} ${quantity} ${symbol} @ ${orderTypeText} (ID: ${data.order_id}, Status: ${data.status})`;
                     // Update positions/orders after 2 seconds
                     setTimeout(() => {
                         updatePositions();
@@ -469,6 +483,7 @@ def api_place_order():
 if __name__ == '__main__':
     print("🚀 Starting ADVANCED IB Trading Platform...")
     print(f"Connecting to IB Gateway on {config.IB_HOST}:{config.IB_PORT}")
+    print(f"Client ID: {config.IB_CLIENT_ID}")
     
     # Connect to IB
     if ib.connect():
@@ -479,10 +494,12 @@ if __name__ == '__main__':
     print("\n" + "="*50)
     print("🌐 Open browser at: http://localhost:8051")
     print("="*50)
-    print("\n✨ NEW FEATURES:")
+    print("\n✨ FEATURES:")
     print("   📊 MARKET / LIMIT order toggle")
     print("   ⏱️  Configurable timeout (5-60s)")
     print("   💰 Limit price input")
+    print("   🔧 Fixed Flask + ib_async threading")
     print("\nPress Ctrl+C to stop\n")
     
-    app.run(debug=False, host='0.0.0.0', port=8051)
+    # Run with threading enabled but with proper event loop isolation
+    app.run(debug=False, host='0.0.0.0', port=8051, use_reloader=False)
