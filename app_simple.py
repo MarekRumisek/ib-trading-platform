@@ -1,10 +1,10 @@
 """IB Trading Platform - Simple Flask Version (NO DASH)
 
 Simplified version using pure Flask + vanilla JavaScript
-with dedicated order handler for proper IB API callback reception.
+with dedicated order handler that has its own IB connection.
 
 Author: Perplexity AI Assistant
-Version: 1.3.0 - Integrated dedicated order handler
+Version: 1.4.0 - OrderHandler with own IB connection
 """
 
 from flask import Flask, render_template_string, jsonify, request
@@ -15,12 +15,12 @@ import threading
 import time
 import atexit
 
-# Use clientId 999 (same as test_order.py)
+# Use clientId 999 for main connection
 config.IB_CLIENT_ID = 999
 
 app = Flask(__name__)
-ib = IBConnector()
-order_handler = None  # Will be initialized after IB connection
+ib = IBConnector()  # Main connection for status/positions/orders
+order_handler = None  # Separate connection for orders
 
 # HTML Template (same as before)
 HTML_TEMPLATE = '''
@@ -417,7 +417,7 @@ HTML_TEMPLATE = '''
 
         console.log('✅ Advanced IB Trading Platform loaded!');
         console.log('📊 Features: MARKET/LIMIT orders + configurable timeout');
-        console.log('🔧 Using dedicated order handler for Flask compatibility');
+        console.log('🔧 Using dedicated order handler with own IB connection');
     </script>
 </body>
 </html>
@@ -461,9 +461,6 @@ def api_orders():
 def api_place_order():
     global order_handler
     
-    if not ib.is_connected():
-        return jsonify({'success': False, 'error': 'Not connected to IB Gateway'})
-    
     if not order_handler or not order_handler.running:
         return jsonify({'success': False, 'error': 'Order handler not running'})
     
@@ -475,7 +472,7 @@ def api_place_order():
     limit_price = data.get('limit_price')
     timeout = data.get('timeout', 15)
     
-    # Use dedicated order handler instead of direct ib.place_order()
+    # Use dedicated order handler (has own IB connection)
     result = order_handler.place_order_async(
         symbol=symbol,
         action=action,
@@ -504,18 +501,25 @@ atexit.register(cleanup)
 if __name__ == '__main__':
     print("🚀 Starting ADVANCED IB Trading Platform...")
     print(f"Connecting to IB Gateway on {config.IB_HOST}:{config.IB_PORT}")
-    print(f"Client ID: {config.IB_CLIENT_ID}")
     
-    # Connect to IB
+    # Connect main IB (for status/positions/orders)
+    print(f"\n🔗 Main connection (clientId: {config.IB_CLIENT_ID})...")
     if ib.connect():
-        print("✅ Connected to IB Gateway!")
-        
-        # Initialize and start dedicated order handler
-        order_handler = OrderHandler(ib)
-        order_handler.start()
-        print("✅ Order handler initialized!")
+        print("✅ Main IB connection established!")
     else:
         print("❌ Failed to connect - check IB Gateway is running")
+        exit(1)
+    
+    # Initialize order handler (creates own IB connection)
+    print(f"\n🔧 Initializing order handler (clientId: {config.IB_CLIENT_ID + 1})...")
+    order_handler = OrderHandler()
+    order_handler.start()
+    time.sleep(2)  # Give it time to connect
+    
+    if order_handler.ib and order_handler.ib.isConnected():
+        print("✅ Order handler ready!")
+    else:
+        print("❌ Order handler connection failed!")
         exit(1)
     
     print("\n" + "="*50)
@@ -525,11 +529,12 @@ if __name__ == '__main__':
     print("   📊 MARKET / LIMIT order toggle")
     print("   ⏱️  Configurable timeout (5-60s)")
     print("   💰 Limit price input")
-    print("   🔧 Dedicated order handler (Flask-safe)")
-    print("   🪡 Isolated event loop for IB callbacks")
+    print("   🔧 Dual IB connections (main + orders)")
+    print("   🪡 Isolated event loops per thread")
+    print("   ⏱️  Sleep workarounds for paper trading")
     print("\nPress Ctrl+C to stop\n")
     
-    # Run Flask (multi-threaded is OK now with dedicated order handler)
+    # Run Flask
     try:
         app.run(debug=False, host='0.0.0.0', port=8051, use_reloader=False)
     except KeyboardInterrupt:
