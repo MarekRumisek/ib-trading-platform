@@ -8,6 +8,26 @@
 
 ---
 
+## ⚠️ CRITICAL: Architecture Notice
+
+**🔴 FOR DEVELOPERS & AI ASSISTANTS:**
+
+This project uses a **specific threading architecture** to solve Flask + ib_async compatibility issues. Orders were getting stuck in `PendingSubmit` until we implemented the current design.
+
+**📚 READ BEFORE MAKING CHANGES:** [ARCHITECTURE.md](ARCHITECTURE.md)
+
+Key points:
+- ✅ **Dual IB Connections**: Main (read-only) + OrderHandler (write-only)
+- ✅ **Dedicated Thread**: OrderHandler runs in own thread with own event loop
+- ✅ **Sleep Workarounds**: Critical for paper trading order validation
+- ❌ **DO NOT** share IB connection between Flask threads
+- ❌ **DO NOT** place orders directly in Flask routes
+- ❌ **DO NOT** remove sleep workarounds
+
+**If orders stop working, check [ARCHITECTURE.md](ARCHITECTURE.md) first!**
+
+---
+
 ## ✨ Features
 
 ### ✅ **Working & Production-Ready:**
@@ -24,6 +44,7 @@
 - 🐛 **Debug Mode** - Comprehensive order and connection logging
 - 🎨 **Dark Theme UI** - Professional, responsive design
 - 🔄 **Auto-Updates** - Real-time price and position updates
+- 🧵 **Thread-Safe Orders** - Dedicated OrderHandler for Flask compatibility
 
 ---
 
@@ -237,14 +258,22 @@ Quick reference:
 ```
 ib-trading-platform/
 ├── app.py                    # Main Dash application
-├── ib_connector.py           # IB API wrapper with debug logging
+├── app_simple.py             # Flask version with OrderHandler
+├── ib_connector.py           # IB API wrapper (read operations)
+├── order_handler.py          # Dedicated order thread (write operations)
 ├── config.py                 # Configuration + connection modes
 ├── test_order.py             # Order testing script
 ├── requirements.txt          # Python dependencies
+├── ARCHITECTURE.md           # 🔴 CRITICAL: Threading design docs
 ├── CONNECTION_MODES.md       # Connection modes guide
 ├── .gitignore               # Git ignore rules
 └── README.md                # This file
 ```
+
+**🔴 Important Files:**
+- **ARCHITECTURE.md** - Explains why dual connections & threading is critical
+- **order_handler.py** - Dedicated thread for order placement (DO NOT MODIFY without reading ARCHITECTURE.md)
+- **app_simple.py** - Flask app using OrderHandler pattern
 
 ---
 
@@ -277,13 +306,17 @@ ib-trading-platform/
 
 ### **Orders Stuck in "PendingSubmit"**
 
-**Solution:**
+**🔴 FIRST: Read [ARCHITECTURE.md](ARCHITECTURE.md)**
+
+Common causes:
 1. ❌ **Read-Only API must be OFF** in TWS/Gateway settings (most common issue!)
 2. 🔄 **Restart TWS/Gateway** after changing settings
 3. ✅ **Confirm paper trading dialog** on first connection
 4. ⏰ **Test during trading hours** (15:30-22:00 CET for US markets)
-5. 🧪 Run `python test_order.py` for diagnosis
-6. 🐛 Enable `DEBUG_ORDERS = True` in config.py
+5. 🧵 **OrderHandler not running** - Check logs for "Order handler connected"
+6. 🔧 **Sleep workarounds removed** - Restore ib.sleep() + time.sleep() calls
+7. 🧪 Run `python test_order.py` for diagnosis
+8. 🐛 Enable `DEBUG_ORDERS = True` in config.py
 
 ### **"Not connected to IB Gateway"**
 
@@ -322,6 +355,7 @@ pip install -r requirements.txt
 ## 📚 Documentation
 
 ### **This Project:**
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - 🔴 **READ FIRST** - Critical threading design
 - [Connection Modes Guide](CONNECTION_MODES.md) - Complete setup for all modes
 - [Test Script Usage](test_order.py) - Diagnostic tool
 
@@ -364,6 +398,8 @@ MIT License - Free to use and modify
 
 Contributions welcome!
 
+**🔴 IMPORTANT: Read [ARCHITECTURE.md](ARCHITECTURE.md) before modifying threading or order placement code!**
+
 1. Fork the repository
 2. Create feature branch (`git checkout -b feature/amazing-feature`)
 3. Commit changes (`git commit -m 'Add amazing feature'`)
@@ -372,7 +408,7 @@ Contributions welcome!
 
 **Focus areas:**
 - AI/ML integration
-- Advanced order types
+- Advanced order types (must use OrderHandler!)
 - Custom indicators
 - UI/UX improvements
 - Bug fixes
@@ -406,6 +442,8 @@ Contributions welcome!
 - ✅ Improved order placement (working approach from tests)
 - ✅ Detailed error reporting with IB API messages
 - ✅ Connection modes documentation
+- ✅ **CRITICAL: OrderHandler with dedicated threading** (fixes PendingSubmit issues)
+- ✅ **Architecture documentation** for future development
 
 ### v1.0.0
 - ✅ Initial release
