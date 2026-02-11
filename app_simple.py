@@ -1,34 +1,28 @@
 """IB Trading Platform - Simple Flask Version (NO DASH)
 
 Simplified version using pure Flask + vanilla JavaScript
-to test if the issue is with Dash/Plotly or IB backend.
+with dedicated order handler for proper IB API callback reception.
 
 Author: Perplexity AI Assistant
-Version: 1.2.0 - Fixed Flask threading conflicts with ib_async
+Version: 1.3.0 - Integrated dedicated order handler
 """
 
 from flask import Flask, render_template_string, jsonify, request
 from ib_connector import IBConnector
+from order_handler import OrderHandler
 import config
 import threading
 import time
+import atexit
 
-# TEST: Use same clientId as test_order.py (999) to see if that's the issue
+# Use clientId 999 (same as test_order.py)
 config.IB_CLIENT_ID = 999
-
-# CRITICAL FIX: Flask runs in multiple threads, ib_async needs isolated event loop
-import asyncio
-try:
-    # Create new event loop for this thread
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-except RuntimeError:
-    pass  # Event loop already exists
 
 app = Flask(__name__)
 ib = IBConnector()
+order_handler = None  # Will be initialized after IB connection
 
-# HTML Template (embedded)
+# HTML Template (same as before)
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html>
@@ -423,6 +417,7 @@ HTML_TEMPLATE = '''
 
         console.log('✅ Advanced IB Trading Platform loaded!');
         console.log('📊 Features: MARKET/LIMIT orders + configurable timeout');
+        console.log('🔧 Using dedicated order handler for Flask compatibility');
     </script>
 </body>
 </html>
@@ -464,8 +459,13 @@ def api_orders():
 
 @app.route('/api/place_order', methods=['POST'])
 def api_place_order():
+    global order_handler
+    
     if not ib.is_connected():
         return jsonify({'success': False, 'error': 'Not connected to IB Gateway'})
+    
+    if not order_handler or not order_handler.running:
+        return jsonify({'success': False, 'error': 'Order handler not running'})
     
     data = request.json
     symbol = data.get('symbol')
@@ -475,8 +475,29 @@ def api_place_order():
     limit_price = data.get('limit_price')
     timeout = data.get('timeout', 15)
     
-    result = ib.place_order(symbol, action, quantity, order_type, limit_price, timeout)
+    # Use dedicated order handler instead of direct ib.place_order()
+    result = order_handler.place_order_async(
+        symbol=symbol,
+        action=action,
+        quantity=quantity,
+        order_type=order_type,
+        limit_price=limit_price,
+        timeout=timeout
+    )
+    
     return jsonify(result)
+
+# ========== CLEANUP ==========
+
+def cleanup():
+    """Cleanup on app shutdown."""
+    global order_handler
+    if order_handler:
+        order_handler.stop()
+    if ib.is_connected():
+        ib.disconnect()
+
+atexit.register(cleanup)
 
 # ========== RUN ==========
 
@@ -488,8 +509,14 @@ if __name__ == '__main__':
     # Connect to IB
     if ib.connect():
         print("✅ Connected to IB Gateway!")
+        
+        # Initialize and start dedicated order handler
+        order_handler = OrderHandler(ib)
+        order_handler.start()
+        print("✅ Order handler initialized!")
     else:
         print("❌ Failed to connect - check IB Gateway is running")
+        exit(1)
     
     print("\n" + "="*50)
     print("🌐 Open browser at: http://localhost:8051")
@@ -498,9 +525,13 @@ if __name__ == '__main__':
     print("   📊 MARKET / LIMIT order toggle")
     print("   ⏱️  Configurable timeout (5-60s)")
     print("   💰 Limit price input")
-    print("   🔧 Fixed Flask + ib_async threading")
-    print("   🧪 TEST: Using clientId 999 (same as test_order.py)")
+    print("   🔧 Dedicated order handler (Flask-safe)")
+    print("   🪡 Isolated event loop for IB callbacks")
     print("\nPress Ctrl+C to stop\n")
     
-    # Run with threading enabled but with proper event loop isolation
-    app.run(debug=False, host='0.0.0.0', port=8051, use_reloader=False)
+    # Run Flask (multi-threaded is OK now with dedicated order handler)
+    try:
+        app.run(debug=False, host='0.0.0.0', port=8051, use_reloader=False)
+    except KeyboardInterrupt:
+        print("\n🛑 Shutting down...")
+        cleanup()
