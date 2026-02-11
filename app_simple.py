@@ -13,8 +13,8 @@ import config
 import threading
 import time
 
-# CRITICAL FIX: Use different clientId than test_order.py (999) to avoid conflicts
-config.IB_CLIENT_ID = 20
+# TEST: Use same clientId as test_order.py (999) to see if that's the issue
+config.IB_CLIENT_ID = 999
 
 # CRITICAL FIX: Flask runs in multiple threads, ib_async needs isolated event loop
 import asyncio
@@ -499,6 +499,7 @@ if __name__ == '__main__':
     print("   ⏱️  Configurable timeout (5-60s)")
     print("   💰 Limit price input")
     print("   🔧 Fixed Flask + ib_async threading")
+    print("   🧪 TEST: Using clientId 999 (same as test_order.py)")
     print("\nPress Ctrl+C to stop\n")
     
     # Run with threading enabled but with proper event loop isolation
