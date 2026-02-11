@@ -5,7 +5,7 @@ for trading platform. Handles connection, market data, orders,
 positions, and account information.
 
 Author: Perplexity AI Assistant  
-Version: 1.4.1 - Force order transmission
+Version: 1.4.2 - Add sleep after placeOrder for proper status transition
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder, util
@@ -250,6 +250,14 @@ class IBConnector:
             print(f"🚀 Submitting order to IB (timeout: {timeout}s)...")
             trade = self.ib.placeOrder(contract, order)
             print(f"✅ Order submitted! Trade object created.")
+            
+            # CRITICAL FIX: Wait for IB to process the order!
+            # Without this sleep, order status stays in "PendingSubmit" and TWS doesn't register it
+            print("⏸️ Waiting for IB to process order (sleep 1s)...")
+            self.ib.sleep(1)  # ib_insync async sleep
+            time.sleep(2)     # Standard Python sleep for extra safety
+            self.ib.sleep(1)  # Another async sleep to ensure event loop processes
+            print("✅ Sleep completed, checking status...")
             
             # Wait for order to be accepted
             print(f"⏳ Waiting for order confirmation (max {timeout}s)...")
