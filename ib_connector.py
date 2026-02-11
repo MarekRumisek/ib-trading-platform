@@ -5,7 +5,7 @@ for trading platform. Handles connection, market data, orders,
 positions, and account information.
 
 Author: Perplexity AI Assistant  
-Version: 1.4.2 - Add sleep after placeOrder for proper status transition
+Version: 1.5.0 - Working order placement with debug logging
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder, util
@@ -26,6 +26,20 @@ class IBConnector:
     def connect(self):
         """Connect to IB Gateway or TWS"""
         try:
+            if config.DEBUG_CONNECTION:
+                print("="*60)
+                print(f"📡 CONNECTING TO IB")
+                print("="*60)
+                print(f"Mode: {config.CONNECTION_LABEL}")
+                print(f"Host: {config.IB_HOST}")
+                print(f"Port: {config.IB_PORT}")
+                print(f"Client ID: {config.IB_CLIENT_ID}")
+                
+                if config.is_live_trading():
+                    print("\n⚠️" * 20)
+                    print("⚠️  LIVE TRADING MODE - REAL MONEY!")
+                    print("⚠️" * 20 + "\n")
+            
             self.ib.connect(
                 config.IB_HOST,
                 config.IB_PORT,
@@ -40,16 +54,24 @@ class IBConnector:
                 self.account_id = accounts[0]
             
             # Load executions (fills) from last 24 hours
-            print("📝 Loading executions from IB (last 24h)...")
+            if config.DEBUG_CONNECTION:
+                print("📝 Loading executions from IB (last 24h)...")
             try:
                 fills = self.ib.reqExecutions()
                 self.executions = fills
-                print(f"✅ Loaded {len(fills)} execution(s) from IB")
+                if config.DEBUG_CONNECTION:
+                    print(f"✅ Loaded {len(fills)} execution(s) from IB")
             except Exception as e:
                 print(f"⚠️ Could not load executions: {e}")
-                
-            print(f"✅ Connected to IB Gateway")
-            print(f"💼 Account: {self.account_id}")
+            
+            if config.DEBUG_CONNECTION:
+                print(f"\n✅ Connected successfully!")
+                print(f"💼 Account: {self.account_id}")
+                print("="*60 + "\n")
+            else:
+                print(f"✅ Connected to IB ({config.CONNECTION_LABEL})")
+                print(f"💼 Account: {self.account_id}")
+            
             return True
             
         except Exception as e:
@@ -62,7 +84,7 @@ class IBConnector:
         if self.connected:
             self.ib.disconnect()
             self.connected = False
-            print("🔌 Disconnected from IB Gateway")
+            print("🔌 Disconnected from IB")
     
     def is_connected(self):
         """Check if connected to IB"""
@@ -207,8 +229,10 @@ class IBConnector:
             print(f"❌ Error getting ticker for contract {contract.symbol}: {e}")
             return None
     
-    def place_order(self, symbol, action, quantity, order_type='MARKET', limit_price=None, timeout=15):
+    def place_order(self, symbol, action, quantity, order_type='MARKET', limit_price=None, timeout=None):
         """Place an order (MARKET or LIMIT)
+        
+        Uses the proven approach from test_order.py that successfully worked.
         
         Args:
             symbol: Stock symbol (e.g. 'AAPL')
@@ -216,101 +240,151 @@ class IBConnector:
             quantity: Number of shares
             order_type: 'MARKET' or 'LIMIT'
             limit_price: Limit price (required for LIMIT orders)
-            timeout: Seconds to wait for order confirmation
+            timeout: Seconds to wait for order confirmation (default from config)
             
         Returns:
-            dict: {'success': bool, 'order_id': int, 'error': str}
+            dict: {'success': bool, 'order_id': int, 'status': str, 'error': str}
         """
         if not self.is_connected():
             return {'success': False, 'error': 'Not connected to IB'}
         
+        if timeout is None:
+            timeout = config.ORDER_TIMEOUT
+        
         try:
-            print(f"📤 Placing order: {action} {quantity} {symbol} @ {order_type}...")
+            if config.DEBUG_ORDERS:
+                print("\n" + "="*60)
+                print("🚀 PLACING ORDER")
+                print("="*60)
             
-            # Create contract (NO qualifyContracts needed for basic stocks!)
+            print(f"📤 Order: {action} {quantity} {symbol} @ {order_type}")
+            
+            # Create contract
             contract = Stock(symbol, 'SMART', 'USD')
-            print(f"📝 Contract created: {symbol} @ SMART/USD")
+            if config.DEBUG_ORDERS:
+                print(f"📝 Contract: {symbol} @ SMART/USD")
             
             # Create order based on type
             if order_type == 'LIMIT':
                 if not limit_price:
                     return {'success': False, 'error': 'Limit price required for LIMIT orders'}
                 order = LimitOrder(action, quantity, limit_price)
-                print(f"📨 Limit order created: {action} {quantity} @ ${limit_price:.2f}")
+                if config.DEBUG_ORDERS:
+                    print(f"📨 Limit order: {action} {quantity} @ ${limit_price:.2f}")
             else:
                 order = MarketOrder(action, quantity)
-                print(f"📨 Market order created: {action} {quantity} shares")
+                if config.DEBUG_ORDERS:
+                    print(f"📨 Market order: {action} {quantity} shares")
             
-            # CRITICAL: Force order transmission
-            order.transmit = True  # Force immediate transmission!
-            order.outsideRth = True  # Allow paper trading outside RTH
-            print("⚙️ Order flags: transmit=True, outsideRth=True")
+            # Set order flags (proven working from test script)
+            order.transmit = True
+            order.outsideRth = True
             
-            # Place order
-            print(f"🚀 Submitting order to IB (timeout: {timeout}s)...")
+            if config.DEBUG_ORDERS:
+                print(f"⚙️ Flags: transmit=True, outsideRth=True")
+                print(f"\n🚀 Submitting to IB (timeout: {timeout}s)...")
+            
+            # Place order (NO sleep before checking - this is what worked!)
             trade = self.ib.placeOrder(contract, order)
-            print(f"✅ Order submitted! Trade object created.")
             
-            # CRITICAL FIX: Wait for IB to process the order!
-            # Without this sleep, order status stays in "PendingSubmit" and TWS doesn't register it
-            print("⏸️ Waiting for IB to process order (sleep 1s)...")
-            self.ib.sleep(1)  # ib_insync async sleep
-            time.sleep(2)     # Standard Python sleep for extra safety
-            self.ib.sleep(1)  # Another async sleep to ensure event loop processes
-            print("✅ Sleep completed, checking status...")
+            if config.DEBUG_ORDERS:
+                print(f"✅ Order submitted! Order ID: {trade.order.orderId if trade.order else 'N/A'}")
+                print(f"\n⏳ Monitoring status...\n")
             
-            # Wait for order to be accepted
-            print(f"⏳ Waiting for order confirmation (max {timeout}s)...")
+            # Monitor order status (approach from working test script)
             start_time = time.time()
             last_status = None
+            iteration = 0
             
             while time.time() - start_time < timeout:
-                self.ib.sleep(0.5)
+                self.ib.sleep(1)  # Check every second
+                iteration += 1
                 
                 current_status = trade.orderStatus.status
+                
+                # Show status changes
                 if current_status != last_status:
-                    print(f"📊 Status update: {current_status}")
+                    if config.DEBUG_ORDERS:
+                        print(f"[{iteration:2d}s] 📊 Status: {last_status or 'None'} → {current_status}")
                     last_status = current_status
+                elif config.DEBUG_ORDERS:
+                    print(f"[{iteration:2d}s] Status: {current_status}")
                 
-                # Check if order is in a final/accepted state
+                # Check for messages/errors in trade log (CRITICAL for debugging!)
+                if trade.log and config.DEBUG_ORDERS:
+                    for entry in trade.log:
+                        if entry.message and entry.message.strip():
+                            # Show warnings and errors
+                            if entry.errorCode and entry.errorCode != 0:
+                                if entry.errorCode >= 2000:  # Warnings
+                                    print(f"       ⚠️ Warning {entry.errorCode}: {entry.message}")
+                                else:  # Errors
+                                    print(f"       ❌ Error {entry.errorCode}: {entry.message}")
+                
+                # Success states (from working test script)
                 if current_status in ['Submitted', 'Filled', 'PreSubmitted']:
+                    if config.DEBUG_ORDERS:
+                        print(f"\n🎉 SUCCESS! Order reached: {current_status}")
                     break
-                    
-                # Check for immediate rejection
-                if current_status in ['Cancelled', 'ApiCancelled', 'Inactive']:
-                    print(f"❌ Order rejected/cancelled: {current_status}")
-                    break
-            
-            # Check final status
-            final_status = trade.orderStatus.status
-            
-            if final_status in ['Submitted', 'Filled', 'PreSubmitted']:
-                print(f"✅ Order SUCCESSFUL!")
-                print(f"📋 Order ID: {trade.order.orderId}")
-                print(f"📊 Final Status: {final_status}")
                 
+                # Failure states
+                if current_status in ['Cancelled', 'Inactive', 'ApiCancelled']:
+                    if config.DEBUG_ORDERS:
+                        print(f"\n❌ FAILED! Order status: {current_status}")
+                    break
+            
+            # Final status check
+            final_status = trade.orderStatus.status
+            order_id = trade.order.orderId if trade.order else None
+            
+            if config.DEBUG_ORDERS:
+                print("\n" + "="*60)
+                print("📊 FINAL RESULTS")
+                print("="*60)
+                print(f"Final Status: {final_status}")
+                print(f"Order ID: {order_id}")
+                print(f"Filled: {trade.orderStatus.filled}")
+                print(f"Remaining: {trade.orderStatus.remaining}")
+                print("="*60 + "\n")
+            
+            # Determine success
+            if final_status in ['Submitted', 'Filled', 'PreSubmitted']:
                 return {
                     'success': True,
-                    'order_id': trade.order.orderId,
+                    'order_id': order_id,
                     'status': final_status,
+                    'filled': trade.orderStatus.filled,
+                    'remaining': trade.orderStatus.remaining,
                     'error': None
                 }
             else:
-                error_msg = f"Order not confirmed after {timeout}s. Final status: {final_status}"
-                print(f"⚠️ {error_msg}")
-                
-                # Try to get more details
-                if hasattr(trade, 'log') and trade.log:
+                # Collect error messages from log
+                error_messages = []
+                if trade.log:
                     for entry in trade.log:
-                        print(f"   Log: {entry}")
+                        if entry.errorCode and entry.errorCode < 2000:  # Actual errors
+                            error_messages.append(f"Error {entry.errorCode}: {entry.message}")
                 
-                return {'success': False, 'error': error_msg}
+                error_msg = f"Order failed with status: {final_status}"
+                if error_messages:
+                    error_msg += "\n" + "\n".join(error_messages)
+                
+                if config.DEBUG_ORDERS:
+                    print(f"❌ {error_msg}")
+                
+                return {
+                    'success': False,
+                    'order_id': order_id,
+                    'status': final_status,
+                    'error': error_msg
+                }
             
         except Exception as e:
             error_msg = str(e)
             print(f"❌ Order FAILED with exception: {error_msg}")
-            import traceback
-            traceback.print_exc()
+            if config.DEBUG_ORDERS:
+                import traceback
+                traceback.print_exc()
             return {'success': False, 'error': error_msg}
     
     # Legacy method for backward compatibility
