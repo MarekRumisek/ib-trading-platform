@@ -1,55 +1,207 @@
 """IB API Connector using ib_async
 
-Wrapper for Interactive Brokers API with simplified interface
-for trading platform. Handles connection, market data, orders,
-positions, and account information.
+Version: 2.1.0 - _HistWorker architektura
 
-Author: Perplexity AI Assistant
-Version: 2.0.3 - nest_asyncio fix for Flask/Dash threading + Lock
+ARCHITEKTURA:
+  self.ib          (clientId=1) -- HLAVNI spojeni
+                                    buy/sell, positions, ticker, account
+                                    NEDOTKNOUT SE!
+
+  _HistWorker      (clientId=2) -- DEDIKOVANÉ vlakno pro hist. data
+                                    bezi v SEPARATNM threadu se svym event
+                                    loop - Flask worker threadu se nikdy
+                                    netka asyncio loopy hist. spojeni
+
+PROC:
+  ib_async pouziva asyncio event loop. Flask/Dash spousti callbacky
+  v ruznych worker threadech. Kazdy thread ma prazdny asyncio loop.
+  Kdyz Flask worker zavola ib.reqHistoricalData(), ceka na odpoved
+  na spatnem loopu -> FREEZE navzdy.
+
+  Reseni: _HistWorker bezi v dedicovanem threadu kde je jen JEDINY
+  volajici. Ten thread si spravuje vlastni IB spojeni a vlastni loop.
+  Flask workery jen posleji request do fronty a cekaji na vysledek.
+  Hlavni self.ib pro trading NENI NIKDY zasazen.
 """
-
-# =============================================================
-# KRITICKA OPRAVA: nest_asyncio
-# =============================================================
-# ib_async (ib_insync fork) pouziva asyncio event loop.
-# Flask/Dash spousti Python callbacky v ruznych worker threadech.
-# Kazdy thread ma svuj vlastni (prazdny) event loop.
-# Kdyz reqHistoricalData() zavolani loop.run_until_complete()
-# z worker threadu, dostane spatny loop -> ZAMRZNE navzdy.
-#
-# nest_asyncio patchi asyncio tak, ze dovoluje vnorene
-# run_until_complete() na uz bezicim loopu.
-# Timto se vsechny ib_async volani provedou na SPRAVNEM
-# (hlavnim) event loopu, bez ohledu ze ktereho threadu volame.
-# =============================================================
-import nest_asyncio
-nest_asyncio.apply()
-# =============================================================
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder, util
 from datetime import datetime
 import config
 import time
 import threading
+import queue
 
+
+# ================================================================
+# _HistWorker - ZCELA ODDELENY worker pro historicka data
+# ================================================================
+
+class _HistWorker:
+    """Dedikované vlakno se svym IB spojenim POUZE pro hist. data.
+
+    Hlavni self.ib (trading) se nikdy netka!
+
+    Pouziti:
+        worker = _HistWorker(host, port, clientId=2)
+        bars = worker.fetch('AAPL', '1 D', '5 mins')  # thread-safe
+    """
+
+    def __init__(self, host, port, client_id):
+        self._host = host
+        self._port = port
+        self._client_id = client_id
+        self._queue = queue.Queue()
+        self._ib = None
+        self._contracts = {}
+
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name=f'IB-Hist-Worker-cid{client_id}'
+        )
+        self._thread.start()
+        print(f"[HIST] Worker thread spusten (clientId={client_id})")
+
+    # ------ verejne API ------
+
+    def fetch(self, symbol, duration='1 D', bar_size='5 mins', timeout=25):
+        """Ziskej historicka data. Blokuje volajici thread max timeout sekund.
+        Vraci list dictu nebo [] pri chybe / timeoutu.
+        """
+        result = []
+        done = threading.Event()
+        self._queue.put((symbol, duration, bar_size, result, done))
+        done.wait(timeout=timeout)
+        return result
+
+    def stop(self):
+        self._queue.put(None)
+
+    # ------ privatni ------
+
+    def _run(self):
+        """Hlavni smycka worker threadu.
+
+        Bezi v dedicovanem threadu - ib_async automaticky
+        vytvori vlastni asyncio event loop pro tento thread.
+        Zadny konflikt s Flask worker thready ani s hlavnim self.ib.
+        """
+        while True:
+            item = self._queue.get()
+            if item is None:
+                break
+            symbol, duration, bar_size, result, done = item
+            try:
+                self._ensure_connected()
+                bars = self._do_fetch(symbol, duration, bar_size)
+                result.extend(bars)
+            except Exception as e:
+                print(f"[HIST] Worker chyba pro {symbol}: {e}")
+                self._ib = None  # vynuc reconnect pri pristim requestu
+            finally:
+                done.set()
+
+    def _ensure_connected(self):
+        if self._ib and self._ib.isConnected():
+            return
+        print(f"[HIST] Pripojuji hist. spojeni (clientId={self._client_id})...")
+        self._ib = IB()
+        self._ib.connect(
+            self._host,
+            self._port,
+            clientId=self._client_id,
+            timeout=10
+        )
+        self._ib.reqMarketDataType(4)
+        self._contracts = {}
+        print(f"[HIST] Hist. spojeni OK (clientId={self._client_id})")
+
+    def _do_fetch(self, symbol, duration, bar_size):
+        if symbol not in self._contracts:
+            contract = Stock(symbol, 'SMART', 'USD')
+            self._ib.qualifyContracts(contract)
+            self._contracts[symbol] = contract
+            print(f"[HIST] Qualified {symbol} (conId={contract.conId})")
+
+        contract = self._contracts[symbol]
+        print(f"[HIST] reqHistoricalData {symbol} | {duration} | {bar_size}")
+
+        bars = self._ib.reqHistoricalData(
+            contract,
+            endDateTime='',
+            durationStr=duration,
+            barSizeSetting=bar_size,
+            whatToShow='TRADES',
+            useRTH=True,
+            formatDate=1,
+            timeout=15
+        )
+
+        result = []
+        for bar in bars:
+            result.append({
+                'time':   _bar_date_to_unix(bar.date),
+                'open':   bar.open,
+                'high':   bar.high,
+                'low':    bar.low,
+                'close':  bar.close,
+                'volume': bar.volume
+            })
+
+        print(f"[HIST] Hotovo: {len(result)} baru pro {symbol}")
+        return result
+
+
+def _bar_date_to_unix(bar_date):
+    """Preved IB bar.date na Unix timestamp (int)."""
+    if hasattr(bar_date, 'timestamp'):
+        return int(bar_date.timestamp())
+    if isinstance(bar_date, str):
+        clean = bar_date.split(' US/')[0].split(' America/')[0].strip()
+        if len(clean) == 8:
+            dt = datetime.strptime(clean, '%Y%m%d')
+        else:
+            dt = datetime.strptime(clean, '%Y%m%d %H:%M:%S')
+        return int(dt.timestamp())
+    return int(datetime.now().timestamp())
+
+
+# ================================================================
+# IBConnector
+# ================================================================
 
 class IBConnector:
-    """Interactive Brokers API connector"""
+    """Interactive Brokers API connector.
+
+    self.ib        = hlavni spojeni (clientId=IB_CLIENT_ID)
+                     buy/sell / positions / ticker / account
+                     NEDOTKNOUT SE!
+
+    _hist_worker   = separatni worker (clientId=IB_CLIENT_ID+1)
+                     POUZE historicka data
+    """
 
     def __init__(self):
+        # === HLAVNI IB SPOJENI (trading) ===
         self.ib = IB()
         self.connected = False
         self.account_id = None
-        self.tickers = {}     # Cache ticker subscriptions (key = symbol or conId)
-        self.contracts = {}   # Cache qualified contracts (key = symbol string)
-        self.executions = []  # Store executions from IB
+        self.tickers = {}
+        self.contracts = {}
+        self.executions = []
 
-        # Lock: zabrání souběžným voláním get_historical_data z více threadů
-        # (ib_async není thread-safe pro souběžné hist. dotazy)
-        self._hist_lock = threading.Lock()
+        # === HIST WORKER ===
+        self._hist_worker = _HistWorker(
+            host=config.IB_HOST,
+            port=config.IB_PORT,
+            client_id=config.IB_CLIENT_ID + 1
+        )
+
+    # ================================================================
+    # CONNECT / DISCONNECT
+    # ================================================================
 
     def connect(self):
-        """Connect to IB Gateway or TWS"""
         try:
             if config.DEBUG_CONNECTION:
                 print("=" * 60)
@@ -59,7 +211,6 @@ class IBConnector:
                 print(f"Host: {config.IB_HOST}")
                 print(f"Port: {config.IB_PORT}")
                 print(f"Client ID: {config.IB_CLIENT_ID}")
-
                 if config.is_live_trading():
                     print("\n\u26a0\ufe0f" * 20)
                     print("\u26a0\ufe0f  LIVE TRADING MODE - REAL MONEY!")
@@ -77,31 +228,25 @@ class IBConnector:
             if accounts:
                 self.account_id = accounts[0]
 
-            # -------------------------------------------------------
-            # DULEZITE: reqMarketDataType(4) = Delayed Frozen
-            # -------------------------------------------------------
             self.ib.reqMarketDataType(4)
             if config.DEBUG_CONNECTION:
-                print("\U0001f4e1 Market data type: Delayed Frozen (4)")
+                print("\U0001f4e1 Market data: Delayed Frozen (4)")
 
-            if config.DEBUG_CONNECTION:
-                print("\U0001f4dd Loading executions from IB (last 24h)...")
             try:
                 fills = self.ib.reqExecutions()
                 self.executions = fills
                 if config.DEBUG_CONNECTION:
-                    print(f"\u2705 Loaded {len(fills)} execution(s) from IB")
+                    print(f"\u2705 Loaded {len(fills)} execution(s)")
             except Exception as e:
-                print(f"\u26a0\ufe0f Could not load executions: {e}")
+                print(f"\u26a0\ufe0f Executions: {e}")
 
             if config.DEBUG_CONNECTION:
-                print(f"\n\u2705 Connected successfully!")
+                print(f"\n\u2705 Connected!")
                 print(f"\U0001f4bc Account: {self.account_id}")
                 print("=" * 60 + "\n")
             else:
                 print(f"\u2705 Connected to IB ({config.CONNECTION_LABEL})")
                 print(f"\U0001f4bc Account: {self.account_id}")
-
             return True
 
         except Exception as e:
@@ -110,37 +255,44 @@ class IBConnector:
             return False
 
     def disconnect(self):
-        """Disconnect from IB"""
         if self.connected:
             self.ib.disconnect()
             self.connected = False
             print("\U0001f50c Disconnected from IB")
 
     def is_connected(self):
-        """Check if connected to IB"""
         return self.connected and self.ib.isConnected()
 
     def _get_qualified_contract(self, symbol):
-        """Return a qualified Stock contract (cached after first call)."""
         if symbol not in self.contracts:
             contract = Stock(symbol, 'SMART', 'USD')
             self.ib.qualifyContracts(contract)
             self.contracts[symbol] = contract
-            print(f"\u2705 Qualified contract for {symbol} (conId={contract.conId})")
+            print(f"\u2705 Qualified {symbol} (conId={contract.conId})")
         return self.contracts[symbol]
 
+    # ================================================================
+    # HISTORICKA DATA - pres _HistWorker
+    # ================================================================
+
+    def get_historical_data(self, symbol, duration='1 D', bar_size='5 mins'):
+        """Historicka data pres _HistWorker - ODDELENE od tradingu."""
+        if not self.is_connected():
+            print("[HIST] Hlavni spojeni neni aktivni")
+            return []
+        return self._hist_worker.fetch(symbol, duration, bar_size)
+
+    # ================================================================
+    # ACCOUNT INFO
+    # ================================================================
+
     def get_account_info(self):
-        """Get account information"""
         if not self.is_connected():
             return {}
         try:
             account_values = self.ib.accountValues()
-            info = {
-                'account_id': self.account_id,
-                'net_liquidation': 0,
-                'buying_power': 0,
-                'cash_balance': 0
-            }
+            info = {'account_id': self.account_id,
+                    'net_liquidation': 0, 'buying_power': 0, 'cash_balance': 0}
             for av in account_values:
                 if av.tag == 'NetLiquidation' and av.currency == 'USD':
                     info['net_liquidation'] = float(av.value)
@@ -150,67 +302,14 @@ class IBConnector:
                     info['cash_balance'] = float(av.value)
             return info
         except Exception as e:
-            print(f"\u274c Error getting account info: {e}")
+            print(f"\u274c Error account info: {e}")
             return {}
 
-    def get_historical_data(self, symbol, duration='1 D', bar_size='5 mins'):
-        """Get historical OHLCV bars for Lightweight Charts.
-        Returns list of dicts with Unix timestamp 'time' (int).
-
-        Poznamka: _hist_lock zajistuje, ze z vice Dash/Flask threadu
-        nikdy nevola IB zaroven - ib_async neni thread-safe pro
-        soubeha hist. dotazy.
-        """
-        if not self.is_connected():
-            print("[HIST] Not connected, returning []")
-            return []
-
-        with self._hist_lock:
-            try:
-                print(f"[HIST] Requesting {symbol} | {duration} | {bar_size}")
-                contract = self._get_qualified_contract(symbol)
-                bars = self.ib.reqHistoricalData(
-                    contract,
-                    endDateTime='',
-                    durationStr=duration,
-                    barSizeSetting=bar_size,
-                    whatToShow='TRADES',
-                    useRTH=True,
-                    formatDate=1,
-                    timeout=15
-                )
-                result = []
-                for bar in bars:
-                    result.append({
-                        'time':   self._bar_date_to_unix(bar.date),
-                        'open':   bar.open,
-                        'high':   bar.high,
-                        'low':    bar.low,
-                        'close':  bar.close,
-                        'volume': bar.volume
-                    })
-                print(f"[HIST] Got {len(result)} bars for {symbol}")
-                return result
-            except Exception as e:
-                print(f"\u274c [HIST] Error for {symbol}: {e}")
-                return []
-
-    @staticmethod
-    def _bar_date_to_unix(bar_date):
-        """Convert IB bar.date string to Unix timestamp int."""
-        if hasattr(bar_date, 'timestamp'):
-            return int(bar_date.timestamp())
-        if isinstance(bar_date, str):
-            clean = bar_date.split(' US/')[0].split(' America/')[0].strip()
-            if len(clean) == 8:
-                dt = datetime.strptime(clean, '%Y%m%d')
-            else:
-                dt = datetime.strptime(clean, '%Y%m%d %H:%M:%S')
-            return int(dt.timestamp())
-        return int(datetime.now().timestamp())
+    # ================================================================
+    # TICKER
+    # ================================================================
 
     def get_ticker(self, symbol):
-        """Get real-time (or delayed) ticker data for a symbol."""
         if not self.is_connected():
             return None
         try:
@@ -229,11 +328,10 @@ class IBConnector:
                 'volume': ticker.volume if ticker.volume == ticker.volume else 0
             }
         except Exception as e:
-            print(f"\u274c Error getting ticker for {symbol}: {e}")
+            print(f"\u274c Error ticker {symbol}: {e}")
             return None
 
     def get_ticker_for_contract(self, contract):
-        """Get real-time ticker for a qualified contract (from position)."""
         if not self.is_connected():
             return None
         try:
@@ -252,12 +350,15 @@ class IBConnector:
                 'volume': ticker.volume if ticker.volume == ticker.volume else 0
             }
         except Exception as e:
-            print(f"\u274c Error getting ticker for contract {contract.symbol}: {e}")
+            print(f"\u274c Error ticker contract: {e}")
             return None
+
+    # ================================================================
+    # OBJEDNAVKY - NEZMENENO (hlavni self.ib)
+    # ================================================================
 
     def place_order(self, symbol, action, quantity, order_type='MARKET',
                     limit_price=None, timeout=None):
-        """Place an order (MARKET or LIMIT)."""
         if not self.is_connected():
             return {'success': False, 'error': 'Not connected to IB'}
         if timeout is None:
@@ -287,8 +388,16 @@ class IBConnector:
                 current_status = trade.orderStatus.status
                 if current_status != last_status:
                     if config.DEBUG_ORDERS:
-                        print(f"[{iteration:2d}s] Status: {last_status or 'None'} -> {current_status}")
+                        print(f"[{iteration:2d}s] {last_status or 'None'} -> {current_status}")
                     last_status = current_status
+                if trade.log and config.DEBUG_ORDERS:
+                    for entry in trade.log:
+                        if entry.message and entry.message.strip():
+                            if entry.errorCode and entry.errorCode != 0:
+                                if entry.errorCode >= 2000:
+                                    print(f"       \u26a0\ufe0f {entry.errorCode}: {entry.message}")
+                                else:
+                                    print(f"       \u274c {entry.errorCode}: {entry.message}")
                 if current_status in ['Submitted', 'Filled', 'PreSubmitted']:
                     break
                 if current_status in ['Cancelled', 'Inactive', 'ApiCancelled']:
@@ -296,30 +405,32 @@ class IBConnector:
             final_status = trade.orderStatus.status
             order_id = trade.order.orderId if trade.order else None
             if final_status in ['Submitted', 'Filled', 'PreSubmitted']:
-                return {
-                    'success': True, 'order_id': order_id,
-                    'status': final_status,
-                    'filled': trade.orderStatus.filled,
-                    'remaining': trade.orderStatus.remaining,
-                    'error': None
-                }
+                return {'success': True, 'order_id': order_id,
+                        'status': final_status,
+                        'filled': trade.orderStatus.filled,
+                        'remaining': trade.orderStatus.remaining,
+                        'error': None}
             else:
-                error_messages = []
+                msgs = []
                 if trade.log:
-                    for entry in trade.log:
-                        if entry.errorCode and entry.errorCode < 2000:
-                            error_messages.append(f"Error {entry.errorCode}: {entry.message}")
-                error_msg = f"Order failed with status: {final_status}"
-                if error_messages:
-                    error_msg += "\n" + "\n".join(error_messages)
+                    for e in trade.log:
+                        if e.errorCode and e.errorCode < 2000:
+                            msgs.append(f"Error {e.errorCode}: {e.message}")
+                err = f"Order failed: {final_status}"
+                if msgs:
+                    err += "\n" + "\n".join(msgs)
                 return {'success': False, 'order_id': order_id,
-                        'status': final_status, 'error': error_msg}
+                        'status': final_status, 'error': err}
         except Exception as e:
             print(f"\u274c Order FAILED: {e}")
             return {'success': False, 'error': str(e)}
 
     def place_market_order(self, symbol, action, quantity):
         return self.place_order(symbol, action, quantity, 'MARKET')
+
+    # ================================================================
+    # POZICE
+    # ================================================================
 
     def get_positions(self):
         if not self.is_connected():
@@ -329,27 +440,24 @@ class IBConnector:
             result = []
             for pos in positions:
                 ticker = self.get_ticker_for_contract(pos.contract)
-                current_price = (
-                    ticker['last'] if ticker and ticker['last'] > 0 else pos.avgCost
-                )
-                market_value = pos.position * current_price
-                cost_basis   = pos.position * pos.avgCost
-                unrealized_pnl = market_value - cost_basis
-                unrealized_pnl_pct = (
-                    (unrealized_pnl / abs(cost_basis) * 100) if cost_basis != 0 else 0
-                )
+                cp = (ticker['last'] if ticker and ticker['last'] > 0
+                      else pos.avgCost)
+                mv = pos.position * cp
+                cb = pos.position * pos.avgCost
+                upnl = mv - cb
+                upnl_pct = (upnl / abs(cb) * 100) if cb != 0 else 0
                 result.append({
-                    'symbol':             pos.contract.symbol,
-                    'position':           pos.position,
-                    'avg_cost':           pos.avgCost,
-                    'market_price':       current_price,
-                    'market_value':       market_value,
-                    'unrealized_pnl':     unrealized_pnl,
-                    'unrealized_pnl_pct': unrealized_pnl_pct
+                    'symbol': pos.contract.symbol,
+                    'position': pos.position,
+                    'avg_cost': pos.avgCost,
+                    'market_price': cp,
+                    'market_value': mv,
+                    'unrealized_pnl': upnl,
+                    'unrealized_pnl_pct': upnl_pct
                 })
             return result
         except Exception as e:
-            print(f"\u274c Error getting positions: {e}")
+            print(f"\u274c Error positions: {e}")
             return []
 
     def get_recent_orders(self, limit=10):
@@ -358,40 +466,36 @@ class IBConnector:
         try:
             result = []
             for fill in self.executions[-limit:]:
-                exec_data = fill.execution
+                ed = fill.execution
                 result.append({
-                    'time': (
-                        exec_data.time.strftime('%H:%M')
-                        if hasattr(exec_data.time, 'strftime')
-                        else str(exec_data.time)[:5]
-                    ),
+                    'time': (ed.time.strftime('%H:%M')
+                             if hasattr(ed.time, 'strftime')
+                             else str(ed.time)[:5]),
                     'symbol':   fill.contract.symbol,
-                    'action':   exec_data.side,
-                    'quantity': exec_data.shares,
-                    'price':    f"${exec_data.price:.2f}",
+                    'action':   ed.side,
+                    'quantity': ed.shares,
+                    'price':    f"${ed.price:.2f}",
                     'status':   'Filled'
                 })
             trades = self.ib.trades()
             for trade in trades:
-                order  = trade.order
-                status = trade.orderStatus
-                if status.status == 'Filled':
+                o = trade.order
+                s = trade.orderStatus
+                if s.status == 'Filled':
                     continue
-                price = (
-                    "Market" if order.orderType == 'MKT'
-                    else f"Limit ${order.lmtPrice:.2f}"
-                )
+                price = ("Market" if o.orderType == 'MKT'
+                         else f"Limit ${o.lmtPrice:.2f}")
                 result.append({
                     'time':     datetime.now().strftime('%H:%M'),
                     'symbol':   trade.contract.symbol,
-                    'action':   order.action,
-                    'quantity': order.totalQuantity,
+                    'action':   o.action,
+                    'quantity': o.totalQuantity,
                     'price':    price,
-                    'status':   status.status
+                    'status':   s.status
                 })
             return result[::-1][-limit:]
         except Exception as e:
-            print(f"\u274c Error getting orders: {e}")
+            print(f"\u274c Error orders: {e}")
             return []
 
     def __del__(self):
