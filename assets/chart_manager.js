@@ -1,14 +1,13 @@
 /**
- * IB Trading Platform - Lightweight Charts Manager v2.0.4
+ * IB Trading Platform - Lightweight Charts Manager v2.0.5
  * =========================================================
- * v2.0.4 - In-page debug panel support, testChart() for fake data testing
- * v2.0.3 - Visible placeholder, heavy console.log
- * v2.0.2 - offsetWidth fix, retry until width>0, chart.resize()
+ * v2.0.5 - window.lwcDebug exposed globally so clientside_callback
+ *          can also write to the debug panel
  */
 (function () {
     'use strict';
 
-    var VERSION         = 'v2.0.4';
+    var VERSION         = 'v2.0.5';
     var TICK_POLL_MS    = 1000;
     var CHART_BG        = '#1e1e2e';
     var GRID_COLOR      = '#3d3d4a';
@@ -30,28 +29,25 @@
     var initAttempts    = 0;
 
     // =================================================================
-    // Debug logger - pise do konzole I do #debug-log-area na strance
+    // GLOBALNI debug logger
+    // Pise do konzole I do #debug-log-area na strance.
+    // Exposed jako window.lwcDebug aby ho mohly volat i clientside_callback.
     // =================================================================
     function writeDebug(type, msg) {
         var ts   = new Date().toLocaleTimeString('cs-CZ');
         var line = '[' + ts + '] [' + type + '] ' + msg + '\n';
-        // 1. Browser console
-        if (type === 'ERR') {
-            console.error('[LWC] ' + msg);
-        } else if (type === 'WARN') {
-            console.warn('[LWC] ' + msg);
-        } else {
-            console.log('[LWC] ' + msg);
-        }
-        // 2. In-page debug panel (ak existuje)
+        if (type === 'ERR')  { console.error('[LWC] ' + msg); }
+        else if (type === 'WARN') { console.warn('[LWC] ' + msg); }
+        else                 { console.log('[LWC] ' + msg); }
         var area = document.getElementById('debug-log-area');
-        if (area) {
-            area.value = line + area.value;  // nejnovejsi nahore
-        }
+        if (area) { area.value = line + area.value; }
     }
 
+    // Zpristupni globalne - pouziva i clientside_callback
+    window.lwcDebug = writeDebug;
+
     // =================================================================
-    // Zobraz placeholder v kontejneru grafu
+    // Placeholder v kontejneru grafu
     // =================================================================
     function showPlaceholder(msg) {
         var c = document.getElementById('lwc-container');
@@ -71,26 +67,26 @@
         container = document.getElementById('lwc-container');
 
         if (!container) {
-            writeDebug('INIT', 'Pokus ' + initAttempts + ': div #lwc-container nenalezen, cekam...');
+            writeDebug('INIT', 'Pokus ' + initAttempts + ': #lwc-container nenalezen, cekam...');
             setTimeout(initChart, 200);
             return;
         }
 
         var w = container.offsetWidth;
         if (w === 0) {
-            writeDebug('INIT', 'Pokus ' + initAttempts + ': div existuje ale sirka=0, cekam...');
+            writeDebug('INIT', 'Pokus ' + initAttempts + ': sirka=0, cekam...');
             showPlaceholder('Cekam na vykreslovani... (pokus ' + initAttempts + ')');
             setTimeout(initChart, 200);
             return;
         }
 
         if (typeof LightweightCharts === 'undefined') {
-            writeDebug('ERR', 'LightweightCharts knihovna NENI NACTENA! Zkontroluj CDN v app.py');
+            writeDebug('ERR', 'LightweightCharts NENI NACTENA! Zkontroluj CDN v app.py');
             showPlaceholder('CHYBA: Lightweight Charts CDN se nenactlo!');
             return;
         }
 
-        writeDebug('INIT', 'Zacinam vytvorit graf. Sirka=' + w + 'px, Vyska=' + CHART_HEIGHT + 'px');
+        writeDebug('INIT', 'Vytvarim graf ' + w + 'x' + CHART_HEIGHT + 'px');
         showPlaceholder('Inicializuji graf...');
 
         try {
@@ -99,62 +95,48 @@
             chart = LightweightCharts.createChart(container, {
                 width:  w,
                 height: CHART_HEIGHT,
-                layout: {
-                    background: { color: CHART_BG },
-                    textColor:  TEXT_COLOR
-                },
-                grid: {
-                    vertLines: { color: GRID_COLOR },
-                    horzLines: { color: GRID_COLOR }
-                },
+                layout: { background: { color: CHART_BG }, textColor: TEXT_COLOR },
+                grid:   { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
                 crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
                 rightPriceScale: { borderColor: GRID_COLOR },
-                timeScale: {
-                    borderColor:    GRID_COLOR,
-                    timeVisible:    true,
-                    secondsVisible: false
-                }
+                timeScale: { borderColor: GRID_COLOR, timeVisible: true, secondsVisible: false }
             });
 
             candleSeries = chart.addCandlestickSeries({
-                upColor:       UP_COLOR,
-                downColor:     DOWN_COLOR,
+                upColor: UP_COLOR, downColor: DOWN_COLOR,
                 borderVisible: false,
-                wickUpColor:   UP_COLOR,
-                wickDownColor: DOWN_COLOR
+                wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR
             });
 
             volumeSeries = chart.addHistogramSeries({
-                color:        '#667eea',
-                priceFormat:  { type: 'volume' },
-                priceScaleId: 'volume',
-                scaleMargins: { top: 0.85, bottom: 0 }
+                color: '#667eea', priceFormat: { type: 'volume' },
+                priceScaleId: 'volume', scaleMargins: { top: 0.85, bottom: 0 }
             });
 
             window.addEventListener('resize', function () {
                 if (chart && container) {
                     chart.resize(container.offsetWidth, CHART_HEIGHT);
-                    writeDebug('RESIZE', 'Graf zmenen na ' + container.offsetWidth + 'px');
                 }
             });
 
-            writeDebug('INIT', 'HOTOVO! Graf inicializovan. Klikni Load Chart nebo Test Chart.');
+            writeDebug('INIT', 'Graf HOTOV. Klikni Load Chart (IB data) nebo Test Chart (fake).');
 
         } catch (e) {
             writeDebug('ERR', 'createChart selhal: ' + e.message);
-            showPlaceholder('CHYBA pri tvorbe grafu: ' + e.message);
+            showPlaceholder('CHYBA: ' + e.message);
         }
     }
 
     // =================================================================
-    // 2. loadData
+    // 2. loadData - vola se z clientside_callback
     // =================================================================
     function loadData(storeData) {
-        writeDebug('DATA', 'loadData() zavolano. symbol=' + (storeData && storeData.symbol) +
-                   ' baru=' + (storeData && storeData.bars ? storeData.bars.length : 0));
+        writeDebug('DATA', 'loadData() zavolano. symbol=' +
+            (storeData && storeData.symbol) +
+            ' | baru=' + (storeData && storeData.bars ? storeData.bars.length : 'N/A'));
 
         if (!chart || !candleSeries) {
-            writeDebug('DATA', 'Graf jeste neni ready, zkusim znovu za 300ms...');
+            writeDebug('DATA', 'Graf jeste neni ready, retry za 300ms...');
             setTimeout(function () { loadData(storeData); }, 300);
             return;
         }
@@ -163,17 +145,28 @@
         var symbol = storeData.symbol || '?';
 
         if (bars.length === 0) {
-            writeDebug('WARN', 'Zadne bary pro ' + symbol + ' - trh zavreny nebo IB timeout');
-            showPlaceholder('Zadna data pro ' + symbol + '. Trh je mozna zavreny.');
+            writeDebug('WARN', 'ZADNE BARY pro ' + symbol + ' - trh zavreny nebo IB timeout');
+            showPlaceholder('Zadna data pro ' + symbol);
             return;
         }
 
         bars.sort(function (a, b) { return a.time - b.time; });
 
-        writeDebug('DATA', 'Prvni bar: time=' + bars[0].time +
-                   ' open=' + bars[0].open + ' close=' + bars[0].close);
+        // Zkontroluj format prvniho baru
+        var b0 = bars[0];
+        writeDebug('DATA', 'Prvni bar: time=' + b0.time + ' (' + typeof b0.time + ')' +
+            ' open=' + b0.open + ' high=' + b0.high +
+            ' low=' + b0.low + ' close=' + b0.close);
         writeDebug('DATA', 'Posledni: time=' + bars[bars.length-1].time +
-                   ' close=' + bars[bars.length-1].close);
+            ' close=' + bars[bars.length-1].close);
+
+        // Zkontroluj ze time je cislo, ne retezec
+        if (typeof b0.time !== 'number') {
+            writeDebug('ERR', 'PROBLEM: time je ' + typeof b0.time + ' misto number! Lighthouse Charts odmitne data.');
+        }
+        if (b0.time < 1000000000 || b0.time > 9999999999) {
+            writeDebug('WARN', 'Podezrely timestamp: ' + b0.time + ' (cekame 10-ciferny Unix timestamp)');
+        }
 
         try {
             candleSeries.setData(bars.map(function (b) {
@@ -183,7 +176,7 @@
             volumeSeries.setData(bars.map(function (b) {
                 return {
                     time:  b.time,
-                    value: b.volume,
+                    value: b.volume || 0,
                     color: b.close >= b.open ? UP_COLOR + '88' : DOWN_COLOR + '88'
                 };
             }));
@@ -195,7 +188,7 @@
             currentSymbol = symbol;
 
             chart.timeScale().fitContent();
-            writeDebug('DATA', 'OK! Vykresleno ' + bars.length + ' svicek pro ' + symbol);
+            writeDebug('DATA', 'USPECH: Vykresleno ' + bars.length + ' svicek pro ' + symbol);
             startTickPolling(symbol);
 
         } catch (e) {
@@ -204,23 +197,21 @@
     }
 
     // =================================================================
-    // 3. testChart - 100 vymyslenych svicek (test LWC bez IB)
-    // Pokud toto funguje -> LWC OK, problem je v Python->Dash->JS pipeline
-    // Pokud toto NEFUNGUJE -> problem je v LWC nebo kontejneru
+    // 3. testChart - 100 fake svicek
     // =================================================================
     function testChart() {
-        writeDebug('TEST', '--- Spoustim TEST CHART s 100 vymyslenymi svickami ---');
+        writeDebug('TEST', '=== TEST CHART START - 100 fake svicek ===');
         var bars  = [];
         var now   = Math.floor(Date.now() / 1000);
         var price = 200;
         for (var i = 99; i >= 0; i--) {
-            var t      = now - i * 300;           // 5-minutove svicky
+            var t     = now - i * 300;
             var change = (Math.random() - 0.47) * 3;
-            var open   = price;
-            price      = Math.max(10, price + change);
-            var close  = price;
-            var high   = Math.max(open, close) + Math.random() * 1.5;
-            var low    = Math.min(open, close) - Math.random() * 1.5;
+            var open  = price;
+            price     = Math.max(10, price + change);
+            var close = price;
+            var high  = Math.max(open, close) + Math.random() * 1.5;
+            var low   = Math.min(open, close) - Math.random() * 1.5;
             bars.push({
                 time: t, open: open, high: high,
                 low: low, close: close,
@@ -235,7 +226,7 @@
     // =================================================================
     function startTickPolling(symbol) {
         if (tickTimer) { clearInterval(tickTimer); }
-        writeDebug('TICK', 'Zacina polling pro ' + symbol + ' kazdych ' + TICK_POLL_MS + 'ms');
+        writeDebug('TICK', 'Polling pro ' + symbol + ' kazdych ' + TICK_POLL_MS + 'ms');
         tickTimer = setInterval(function () { pollTick(symbol); }, TICK_POLL_MS);
     }
 
@@ -258,19 +249,15 @@
     }
 
     // =================================================================
-    // 5 + 6. Indicator API
+    // 5. Indicator API
     // =================================================================
     function addIndicator(name, type, data, options) {
         if (!chart) { writeDebug('WARN', 'Graf neni ready pro indikator: ' + name); return; }
         if (indicatorSeries[name]) { chart.removeSeries(indicatorSeries[name]); }
         var series;
-        if (type === 'histogram') {
-            series = chart.addHistogramSeries(options || {});
-        } else if (type === 'area') {
-            series = chart.addAreaSeries(options || {});
-        } else {
-            series = chart.addLineSeries(options || {});
-        }
+        if (type === 'histogram') { series = chart.addHistogramSeries(options || {}); }
+        else if (type === 'area') { series = chart.addAreaSeries(options || {}); }
+        else                      { series = chart.addLineSeries(options || {}); }
         series.setData(data);
         indicatorSeries[name] = series;
         writeDebug('IND', 'Pridano: ' + name + ' (' + type + ')');
@@ -292,7 +279,7 @@
         removeIndicator: removeIndicator
     };
 
-    writeDebug('INIT', 'Script nacteny ' + VERSION + ', spoustim initChart smycku...');
+    writeDebug('INIT', '=== LWC Manager ' + VERSION + ' nacteny, spoustim initChart ===');
     setTimeout(initChart, 300);
 
 }());

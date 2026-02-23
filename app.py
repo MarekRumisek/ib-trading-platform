@@ -4,7 +4,7 @@ Professional trading platform with real-time market data,
 order execution, positions tracking, and TradingView Lightweight Charts.
 
 Author: Perplexity AI Assistant
-Version: 2.0.4 - Fix readOnly bool + clear-log circular callback
+Version: 2.0.5 - clientside_callback logs every step to debug panel
 """
 
 import dash
@@ -127,7 +127,7 @@ app.layout = html.Div([
         dcc.Store(id='chart-data-store'),
         dcc.Store(id='chart-trigger-store'),
         dcc.Store(id='test-chart-trigger'),
-        dcc.Store(id='clear-log-trigger'),   # dummy output pro clear button
+        dcc.Store(id='clear-log-trigger'),
 
     ], style={
         'padding': '20px', 'background': '#2d2d3a',
@@ -205,7 +205,6 @@ app.layout = html.Div([
         html.H3('\U0001f527 Debug Panel',
                 style={'marginBottom': '10px', 'color': '#ff9800'}),
 
-        # Python inspector
         html.Div([
             html.Span('Python \u2192 chart-data-store: ',
                       style={'fontWeight': 'bold', 'color': '#00d4ff'}),
@@ -215,10 +214,9 @@ app.layout = html.Div([
         ], style={'marginBottom': '12px', 'padding': '8px',
                   'background': '#0d0d1a', 'borderRadius': '5px'}),
 
-        # Tlacitka
         html.Div([
             html.Button(
-                '\U0001f9ea Test Chart (100 vymyslenych svicek)',
+                '\U0001f9ea Test Chart (100 fake svicek - BEZ IB)',
                 id='test-chart-btn', n_clicks=0,
                 style={
                     'padding': '10px 20px', 'marginRight': '10px',
@@ -239,11 +237,9 @@ app.layout = html.Div([
             ),
         ], style={'marginBottom': '10px'}),
 
-        # JS log textarea
-        # OPRAVA: readOnly neni boolean v Dash - pouzivame CSS pointer-events: none
         html.Textarea(
             id='debug-log-area',
-            rows=18,
+            rows=20,
             placeholder='Sem JS pise vsechny kroky...\nOtevri stranku a uvidis co se deje.',
             style={
                 'width': '100%', 'boxSizing': 'border-box',
@@ -251,13 +247,12 @@ app.layout = html.Div([
                 'fontFamily': 'monospace', 'fontSize': '12px',
                 'border': '1px solid #333', 'borderRadius': '5px',
                 'padding': '10px', 'resize': 'vertical',
-                'pointerEvents': 'none'   # nahrazuje readOnly - nelze psat mysi
+                'pointerEvents': 'none'
             }
         ),
         html.Div(
-            '\u2139\ufe0f Tlacitko "Test Chart" nakresli vymysleny graf BEZ IB. '
-            'Pokud funguje -> LWC je OK, problem je jinde. '
-            'Pokud NEFUNGUJE -> problem je v JS/LWC.',
+            '\u2139\ufe0f Legenda: [INIT]=inicializace grafu | [DATA]=data z Dash/IB | '
+            '[CB]=clientside_callback | [TEST]=test tlacitko | [ERR]=chyba',
             style={'marginTop': '8px', 'fontSize': '12px',
                    'color': '#888', 'fontStyle': 'italic'}
         )
@@ -338,9 +333,11 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, symbol):
 
     symbol = (symbol or 'AAPL').upper()
     app_state['current_symbol'] = symbol
-    print(f"[DEBUG] load_chart_data: symbol={symbol} timeframe={app_state['current_timeframe']}")
+    print(f"[DEBUG] load_chart_data: symbol={symbol} tf={app_state['current_timeframe']}")
     bars = ib.get_historical_data(symbol, '1 D', app_state['current_timeframe'])
     print(f"[DEBUG] load_chart_data: got {len(bars)} bars")
+    if bars:
+        print(f"[DEBUG] prvni bar: {bars[0]}")
     return {'symbol': symbol, 'timeframe': app_state['current_timeframe'], 'bars': bars}
 
 
@@ -350,40 +347,66 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, symbol):
 )
 def update_debug_python(data):
     if not data:
-        return '(prazdne - zatim nebylo kliknuto Load Chart)'
+        return '(prazdne)'
     bars = data.get('bars', [])
     if not bars:
-        return f"symbol={data.get('symbol')} | 0 baru! (IB vratilo prazdna data)"
+        return f"symbol={data.get('symbol')} | 0 BARU! IB vratilo prazdna data."
+    b0 = bars[0]
     return (
-        f"symbol={data.get('symbol')} | "
-        f"timeframe={data.get('timeframe')} | "
+        f"\u2705 symbol={data.get('symbol')} | "
+        f"tf={data.get('timeframe')} | "
         f"{len(bars)} baru | "
-        f"prvni time={bars[0]['time']} | "
+        f"prvni: time={b0['time']} open={b0['open']} close={b0['close']} | "
         f"posledni close={bars[-1]['close']:.2f}"
     )
 
 
-# Clientside: chart-data-store -> lwcManager.loadData()
+# ==================================================================
+# KLICOVY clientside callback:
+# chart-data-store -> lwcManager.loadData()
+# Lezi sem cely prubeh vcetne logu do debug panelu
+# ==================================================================
 app.clientside_callback(
     """
     function(storeData) {
-        if (!storeData || !storeData.bars) {
+        var d = window.lwcDebug || function() {};
+
+        d('CB', '=== clientside_callback spusten ===');
+
+        if (!storeData) {
+            d('CB', 'storeData je NULL/undefined -> no_update');
             return window.dash_clientside.no_update;
         }
-        if (window.lwcManager) {
-            window.lwcManager.loadData(storeData);
-        } else {
+
+        if (!storeData.bars) {
+            d('CB', 'storeData.bars chybi -> no_update. Obsah: ' + JSON.stringify(storeData).slice(0, 200));
+            return window.dash_clientside.no_update;
+        }
+
+        d('CB', 'Data prijata: symbol=' + storeData.symbol +
+          ' | baru=' + storeData.bars.length +
+          ' | prvni time=' + (storeData.bars[0] && storeData.bars[0].time) +
+          ' | prvni close=' + (storeData.bars[0] && storeData.bars[0].close));
+
+        if (!window.lwcManager) {
+            d('CB', 'lwcManager NENI definovano! Cekam 200ms a zkousim znovu (max 20x)...');
             var attempt = 0;
             var retry = setInterval(function() {
                 attempt++;
                 if (window.lwcManager) {
+                    d('CB', 'lwcManager nalezen po ' + attempt + ' pokusech, volam loadData()');
                     window.lwcManager.loadData(storeData);
                     clearInterval(retry);
                 } else if (attempt > 20) {
+                    d('ERR', 'lwcManager stale neni! JS soubor se mozna nenacetl.');
                     clearInterval(retry);
                 }
             }, 200);
+        } else {
+            d('CB', 'lwcManager OK, volam loadData()...');
+            window.lwcManager.loadData(storeData);
         }
+
         return storeData.symbol || 'loaded';
     }
     """,
@@ -392,7 +415,6 @@ app.clientside_callback(
 )
 
 
-# Clientside: test-chart-btn -> lwcManager.testChart()
 app.clientside_callback(
     """
     function(n) {
@@ -401,9 +423,7 @@ app.clientside_callback(
                 window.lwcManager.testChart();
             } else {
                 var area = document.getElementById('debug-log-area');
-                if (area) {
-                    area.value = '[CHYBA] window.lwcManager neni definovano! JS se nenacetl.\\n' + area.value;
-                }
+                if (area) { area.value = '[CHYBA] lwcManager neni definovano!\\n' + area.value; }
             }
         }
         return n;
@@ -414,8 +434,6 @@ app.clientside_callback(
 )
 
 
-# Clientside: clear-log-btn -> smaze debug textarea
-# OPRAVA: output je dummy Store, NE clear-log-btn samotny (to by bylo cyklicke)
 app.clientside_callback(
     """
     function(n) {
@@ -426,7 +444,7 @@ app.clientside_callback(
         return n;
     }
     """,
-    Output('clear-log-trigger', 'data'),   # <-- dummy store, ne button
+    Output('clear-log-trigger', 'data'),
     Input('clear-log-btn', 'n_clicks')
 )
 
@@ -447,7 +465,7 @@ def update_price_display(n, symbol):
     prev_close = ticker.get('close', last_price)
     if prev_close == 0:
         prev_close = last_price
-    change = last_price - prev_close
+    change     = last_price - prev_close
     change_pct = (change / prev_close * 100) if prev_close > 0 else 0
     arrow = '\u25b2' if change >= 0 else '\u25bc'
     color = '#26a69a' if change >= 0 else '#ef5350'
@@ -490,14 +508,12 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity):
     else:
         return ''
     if not ib.is_connected():
-        return html.Div('\u274c Not connected to IB Gateway!',
-                        style={'color': '#ef5350', 'fontWeight': 'bold'})
+        return html.Div('\u274c Not connected!', style={'color': '#ef5350', 'fontWeight': 'bold'})
     result = ib.place_market_order(symbol, action, quantity)
     if result['success']:
-        return html.Div(f'\u2705 Order placed: {action} {quantity} {symbol} @ Market',
+        return html.Div(f'\u2705 {action} {quantity} {symbol} @ Market',
                         style={'color': color, 'fontWeight': 'bold'})
-    return html.Div(f'\u274c Order failed: {result["error"]}',
-                    style={'color': '#ef5350', 'fontWeight': 'bold'})
+    return html.Div(f'\u274c {result["error"]}', style={'color': '#ef5350', 'fontWeight': 'bold'})
 
 
 @app.callback(
@@ -575,7 +591,6 @@ app.index_string = '''
         <title>{%title%}</title>
         {%favicon%}
         {%css%}
-        <!-- TradingView Lightweight Charts v4.2.0 -->
         <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
         <style>
             body { margin: 0; padding: 0; background: #1e1e2e; }
@@ -609,12 +624,11 @@ app.index_string = '''
 # ========== RUN ==========
 
 if __name__ == '__main__':
-    print("\U0001f680 Starting IB Trading Platform v2.0 (Lightweight Charts)...")
-    print(f"Connecting to IB Gateway on {config.IB_HOST}:{config.IB_PORT}")
+    print("\U0001f680 Starting IB Trading Platform v2.0...")
+    print(f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
     if ib.connect():
         print("\u2705 Connected to IB Gateway!")
     else:
-        print("\u274c Failed to connect - check IB Gateway is running")
-    print("Opening web browser at http://localhost:8050")
-    print("Press Ctrl+C to stop\n")
+        print("\u274c Failed to connect")
+    print("http://localhost:8050  |  Ctrl+C to stop\n")
     app.run_server(debug=True, use_reloader=False, host='0.0.0.0', port=8050)
