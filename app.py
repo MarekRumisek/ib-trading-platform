@@ -4,19 +4,16 @@ Professional trading platform with real-time market data,
 order execution, positions tracking, and TradingView Lightweight Charts.
 
 Author: Perplexity AI Assistant
-Version: 2.0.1 - Fix LWC v4 pin + IB contract qualify
+Version: 2.0.2 - Fix chart rendering (Store output + offsetWidth)
 """
 
 import dash
 from dash import dcc, html, Input, Output, State
 from datetime import datetime
-import pandas as pd
-import time
 from flask import jsonify
 from ib_connector import IBConnector
 import config
 
-# Initialize Dash app with local serving
 app = dash.Dash(
     __name__,
     title="IB Trading Platform",
@@ -25,29 +22,19 @@ app = dash.Dash(
     serve_locally=True
 )
 
-# Initialize IB connector
 ib = IBConnector()
-
-# Flask server reference (needed for /api/* endpoints)
 server = app.server
 
-# ---- Flask API: real-time tick endpoint (polled by chart_manager.js every 1s) ----
+
 @server.route('/api/tick/<symbol>')
 def get_tick(symbol):
-    """Returns latest price as JSON for Lightweight Charts JS polling.
-    Called by chart_manager.js setInterval every TICK_POLL_INTERVAL_MS.
-    """
     ticker = ib.get_ticker(symbol.upper())
     if not ticker:
         return jsonify({'error': 'no data'}), 404
     price = ticker['last'] if ticker['last'] > 0 else ticker['close']
-    return jsonify({
-        'time': int(datetime.now().timestamp()),
-        'price': price
-    })
+    return jsonify({'time': int(datetime.now().timestamp()), 'price': price})
 
 
-# Global state
 app_state = {
     'current_symbol': 'AAPL',
     'current_timeframe': '5 mins',
@@ -65,11 +52,10 @@ app.layout = html.Div([
     ], style={
         'padding': '20px',
         'background': 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-        'borderRadius': '10px',
-        'marginBottom': '20px'
+        'borderRadius': '10px', 'marginBottom': '20px'
     }),
 
-    # Account info bar
+    # Account bar
     html.Div([
         html.Div([
             html.Span("\U0001f4bc Account: ", style={'fontWeight': 'bold'}),
@@ -84,25 +70,20 @@ app.layout = html.Div([
             html.Span(id='buying-power', children='$0.00')
         ], style={'display': 'inline-block'})
     ], style={
-        'padding': '15px',
-        'background': '#2d2d3a',
-        'borderRadius': '8px',
-        'marginBottom': '20px',
-        'fontSize': '16px'
+        'padding': '15px', 'background': '#2d2d3a',
+        'borderRadius': '8px', 'marginBottom': '20px', 'fontSize': '16px'
     }),
 
-    # Symbol & Price info
+    # Symbol + price bar
     html.Div([
         html.Div([
             html.Label('Symbol:', style={'marginRight': '10px', 'fontWeight': 'bold'}),
             dcc.Input(
-                id='symbol-input',
-                type='text',
-                value='AAPL',
+                id='symbol-input', type='text', value='AAPL',
                 style={
-                    'width': '150px', 'padding': '8px',
-                    'borderRadius': '5px', 'border': '2px solid #667eea',
-                    'background': '#1e1e2e', 'color': 'white', 'fontSize': '16px'
+                    'width': '150px', 'padding': '8px', 'borderRadius': '5px',
+                    'border': '2px solid #667eea', 'background': '#1e1e2e',
+                    'color': 'white', 'fontSize': '16px'
                 }
             ),
             html.Button(
@@ -138,21 +119,24 @@ app.layout = html.Div([
             html.Button('1D',  id='tf-1d',  n_clicks=0, className='tf-btn'),
         ], style={'marginBottom': '10px'}),
 
-        # Lightweight Charts container
+        # Lightweight Charts canvas target
         html.Div(
             id='lwc-container',
-            style={'width': '100%', 'height': '500px', 'position': 'relative'}
+            style={'width': '100%', 'height': '500px', 'position': 'relative',
+                   'background': '#1e1e2e'}
         ),
 
-        # dcc.Store: Python -> JavaScript data bridge
+        # Bridge: Python writes OHLCV here, JS reads it
         dcc.Store(id='chart-data-store'),
+        # Dummy store: clientside_callback writes here to confirm JS was called
+        dcc.Store(id='chart-trigger-store'),
 
     ], style={
         'padding': '20px', 'background': '#2d2d3a',
         'borderRadius': '8px', 'marginBottom': '20px'
     }),
 
-    # Order Entry Panel
+    # Order panel
     html.Div([
         html.H3('\U0001f4e4 Order Entry', style={'marginBottom': '15px'}),
         html.Div([
@@ -198,7 +182,7 @@ app.layout = html.Div([
         'borderRadius': '8px', 'marginBottom': '20px'
     }),
 
-    # Positions Panel
+    # Positions
     html.Div([
         html.H3('\U0001f4ca Open Positions (Real-time P&L)', style={'marginBottom': '15px'}),
         html.Div(id='positions-table')
@@ -207,7 +191,7 @@ app.layout = html.Div([
         'borderRadius': '8px', 'marginBottom': '20px'
     }),
 
-    # Order History
+    # Orders
     html.Div([
         html.H3('\U0001f4cb Recent Orders', style={'marginBottom': '15px'}),
         html.Div(id='orders-table')
@@ -216,11 +200,9 @@ app.layout = html.Div([
         'borderRadius': '8px', 'marginBottom': '20px'
     }),
 
-    # Intervals
-    dcc.Interval(id='price-update-interval',      interval=1000, n_intervals=0),
-    dcc.Interval(id='positions-update-interval',  interval=2000, n_intervals=0),
-    dcc.Interval(id='connection-check-interval',  interval=5000, n_intervals=0),
-
+    dcc.Interval(id='price-update-interval',     interval=1000, n_intervals=0),
+    dcc.Interval(id='positions-update-interval', interval=2000, n_intervals=0),
+    dcc.Interval(id='connection-check-interval', interval=5000, n_intervals=0),
     html.Div(id='hidden-state', style={'display': 'none'})
 
 ], style={
@@ -257,14 +239,15 @@ def update_connection_status(n):
 def update_account_info(n):
     if not ib.is_connected():
         return 'Not Connected', '$0.00', '$0.00'
-    account_data = ib.get_account_info()
+    d = ib.get_account_info()
     return (
-        account_data.get('account_id', 'N/A'),
-        f"${account_data.get('net_liquidation', 0):,.2f}",
-        f"${account_data.get('buying_power', 0):,.2f}"
+        d.get('account_id', 'N/A'),
+        f"${d.get('net_liquidation', 0):,.2f}",
+        f"${d.get('buying_power', 0):,.2f}"
     )
 
 
+# --- Chart data: Python fetches IB bars → dcc.Store → JS renders chart ---
 @app.callback(
     Output('chart-data-store', 'data'),
     [Input('load-chart-btn', 'n_clicks'),
@@ -279,43 +262,41 @@ def update_account_info(n):
 def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, symbol):
     ctx = dash.callback_context
     if ctx.triggered:
-        button_id = ctx.triggered[0]['prop_id'].split('.')[0]
-        timeframe_map = {
-            'tf-1m':  '1 min',
-            'tf-5m':  '5 mins',
-            'tf-15m': '15 mins',
-            'tf-30m': '30 mins',
-            'tf-1h':  '1 hour',
-            'tf-1d':  '1 day'
+        btn = ctx.triggered[0]['prop_id'].split('.')[0]
+        tf_map = {
+            'tf-1m': '1 min', 'tf-5m': '5 mins', 'tf-15m': '15 mins',
+            'tf-30m': '30 mins', 'tf-1h': '1 hour', 'tf-1d': '1 day'
         }
-        app_state['current_timeframe'] = timeframe_map.get(
-            button_id, app_state['current_timeframe']
-        )
+        app_state['current_timeframe'] = tf_map.get(btn, app_state['current_timeframe'])
 
     symbol = (symbol or 'AAPL').upper()
     app_state['current_symbol'] = symbol
-
     bars = ib.get_historical_data(symbol, '1 D', app_state['current_timeframe'])
 
-    return {
-        'symbol': symbol,
-        'timeframe': app_state['current_timeframe'],
-        'bars': bars
-    }
+    return {'symbol': symbol, 'timeframe': app_state['current_timeframe'], 'bars': bars}
 
 
+# --- Clientside callback: Store changes → JS lwcManager.loadData() ---
+# Output goes to a dummy dcc.Store (not an HTML attribute - avoids Dash silent failure)
 app.clientside_callback(
     """
     function(storeData) {
-        if (storeData && storeData.bars && window.lwcManager) {
-            window.lwcManager.loadData(storeData);
+        if (!storeData || !storeData.bars) {
+            return window.dash_clientside.no_update;
         }
-        return window.dash_clientside.no_update;
+        if (window.lwcManager) {
+            window.lwcManager.loadData(storeData);
+        } else {
+            // Chart not ready yet - retry after a short delay
+            setTimeout(function() {
+                if (window.lwcManager) { window.lwcManager.loadData(storeData); }
+            }, 500);
+        }
+        return storeData.symbol;
     }
     """,
-    Output('lwc-container', 'data-loaded'),
-    Input('chart-data-store', 'data'),
-    prevent_initial_call=True
+    Output('chart-trigger-store', 'data'),
+    Input('chart-data-store', 'data')
 )
 
 
@@ -331,7 +312,6 @@ def update_price_display(n, symbol):
     ticker = ib.get_ticker(symbol)
     if not ticker:
         return 'Last: $0.00', ' \u25b2 +$0.00 (+0.00%)'
-
     last_price = ticker.get('last', 0)
     prev_close = ticker.get('close', last_price)
     change = last_price - prev_close
@@ -339,13 +319,10 @@ def update_price_display(n, symbol):
     arrow = '\u25b2' if change >= 0 else '\u25bc'
     color = '#26a69a' if change >= 0 else '#ef5350'
     sign  = '+' if change >= 0 else ''
-
     return (
         f'Last: ${last_price:.2f}',
-        html.Span(
-            f' {arrow} {sign}${change:.2f} ({sign}{change_pct:.2f}%)',
-            style={'color': color}
-        )
+        html.Span(f' {arrow} {sign}${change:.2f} ({sign}{change_pct:.2f}%)',
+                  style={'color': color})
     )
 
 
@@ -359,9 +336,8 @@ def update_quantity(q1, q5, q10, q25, q100):
     ctx = dash.callback_context
     if not ctx.triggered:
         return 1
-    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
-    return {'qty-1': 1, 'qty-5': 5, 'qty-10': 10,
-            'qty-25': 25, 'qty-100': 100}.get(button_id, 1)
+    btn = ctx.triggered[0]['prop_id'].split('.')[0]
+    return {'qty-1': 1, 'qty-5': 5, 'qty-10': 10, 'qty-25': 25, 'qty-100': 100}.get(btn, 1)
 
 
 @app.callback(
@@ -373,29 +349,22 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity):
     ctx = dash.callback_context
     if not ctx.triggered:
         return ''
-    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
-
-    if button_id == 'buy-btn' and buy_clicks > 0:
+    btn = ctx.triggered[0]['prop_id'].split('.')[0]
+    if btn == 'buy-btn' and buy_clicks > 0:
         action, color = 'BUY', '#26a69a'
-    elif button_id == 'sell-btn' and sell_clicks > 0:
+    elif btn == 'sell-btn' and sell_clicks > 0:
         action, color = 'SELL', '#ef5350'
     else:
         return ''
-
     if not ib.is_connected():
         return html.Div('\u274c Not connected to IB Gateway!',
                         style={'color': '#ef5350', 'fontWeight': 'bold'})
-
     result = ib.place_market_order(symbol, action, quantity)
     if result['success']:
-        return html.Div(
-            f'\u2705 Order placed: {action} {quantity} {symbol} @ Market',
-            style={'color': color, 'fontWeight': 'bold'}
-        )
-    return html.Div(
-        f'\u274c Order failed: {result["error"]}',
-        style={'color': '#ef5350', 'fontWeight': 'bold'}
-    )
+        return html.Div(f'\u2705 Order placed: {action} {quantity} {symbol} @ Market',
+                        style={'color': color, 'fontWeight': 'bold'})
+    return html.Div(f'\u274c Order failed: {result["error"]}',
+                    style={'color': '#ef5350', 'fontWeight': 'bold'})
 
 
 @app.callback(
@@ -408,7 +377,6 @@ def update_positions_table(n):
     positions = ib.get_positions()
     if not positions:
         return html.Div('No open positions', style={'color': '#888'})
-
     rows = []
     for pos in positions:
         pnl_color = '#26a69a' if pos['unrealized_pnl'] >= 0 else '#ef5350'
@@ -419,10 +387,8 @@ def update_positions_table(n):
             html.Td(abs(pos['position'])),
             html.Td(f"${pos['avg_cost']:.2f}"),
             html.Td(f"${pos['market_value']:.2f}"),
-            html.Td(
-                f"${pos['unrealized_pnl']:.2f} ({pos['unrealized_pnl_pct']:.2f}%)",
-                style={'color': pnl_color, 'fontWeight': 'bold'}
-            )
+            html.Td(f"${pos['unrealized_pnl']:.2f} ({pos['unrealized_pnl_pct']:.2f}%)",
+                    style={'color': pnl_color, 'fontWeight': 'bold'})
         ]))
     return html.Table([
         html.Thead(html.Tr([
@@ -443,12 +409,10 @@ def update_orders_table(n):
     orders = ib.get_recent_orders(limit=10)
     if not orders:
         return html.Div('No recent orders', style={'color': '#888'})
-
-    status_icons   = {'Filled': '\u2705', 'Submitted': '\u23f3',
-                      'Cancelled': '\u274c', 'PendingSubmit': '\U0001f552'}
-    status_colors  = {'Filled': '#26a69a', 'Submitted': '#ffa726',
-                      'Cancelled': '#ef5350', 'PendingSubmit': '#42a5f5'}
-
+    status_icons  = {'Filled': '\u2705', 'Submitted': '\u23f3',
+                     'Cancelled': '\u274c', 'PendingSubmit': '\U0001f552'}
+    status_colors = {'Filled': '#26a69a', 'Submitted': '#ffa726',
+                     'Cancelled': '#ef5350', 'PendingSubmit': '#42a5f5'}
     rows = []
     for order in orders:
         icon  = status_icons.get(order['status'], '\u2754')
@@ -462,8 +426,7 @@ def update_orders_table(n):
         ]))
     return html.Table([
         html.Thead(html.Tr([
-            html.Th('Time'), html.Th('Order'),
-            html.Th('Price'), html.Th('Status')
+            html.Th('Time'), html.Th('Order'), html.Th('Price'), html.Th('Status')
         ])),
         html.Tbody(rows)
     ], style={'width': '100%', 'borderCollapse': 'collapse'})
@@ -483,6 +446,8 @@ app.index_string = '''
         <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
         <style>
             body { margin: 0; padding: 0; background: #1e1e2e; }
+            #lwc-container { display: block; width: 100%; height: 500px; }
+            #lwc-container > * { display: block; }
             .tf-btn, .qty-btn {
                 padding: 8px 15px; margin: 0 5px;
                 background: #2d2d3a; border: 2px solid #667eea;
@@ -514,13 +479,10 @@ app.index_string = '''
 if __name__ == '__main__':
     print("\U0001f680 Starting IB Trading Platform v2.0 (Lightweight Charts)...")
     print(f"Connecting to IB Gateway on {config.IB_HOST}:{config.IB_PORT}")
-
     if ib.connect():
         print("\u2705 Connected to IB Gateway!")
     else:
         print("\u274c Failed to connect - check IB Gateway is running")
-
     print("Opening web browser at http://localhost:8050")
     print("Press Ctrl+C to stop\n")
-
     app.run_server(debug=True, use_reloader=False, host='0.0.0.0', port=8050)
