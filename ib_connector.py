@@ -1,18 +1,24 @@
 """IB API Connector using ib_async
 
-Version: 2.4.0 - _TickSubscriber diagnostics + bid/ask price fallback
+Version: 2.5.0 - _TickSubscriber REWRITE: asyncio.run() + connectAsync
+
+ROOT CAUSE FIX:
+  Predchozi implementace pouzivala ib.sleep() z background threadu.
+  ib.sleep() FUNGUJE POUZE z hlavniho threadu (synchronni kontext).
+  V background threadu MUSI byt:
+    - asyncio.run(self._async_run())    <- spravna event loop
+    - await ib.connectAsync()           <- async connect
+    - await asyncio.sleep()             <- spravne yieldi event loopu
+    - ticker.updateEvent += handler     <- okamzite updaty bez pollingu
+
+ZDROJ: ib_async README + GitHub issue #229
+  https://github.com/ib-api-reloaded/ib_async
+  https://github.com/erdewit/ib_insync/issues/229
 
 ARCHITEKTURA:
   self.ib          (clientId=1) -- hlavni spojeni: orders, account, positions
   _HistWorker      (clientId=2) -- hist. data, fresh conn per request
-  _TickSubscriber  (clientId=3) -- streaming tick data, bezi porad
-
-PRICE EXTRACTION ORDER:
-  1. ticker.last   (posledni obchod)
-  2. ticker.close  (predchozi close)
-  3. ticker.bid    (aktualni nabidka)
-  4. ticker.ask    (aktualni pozadavek)
-  -> midpoint bid/ask jako posledni moznost
+  _TickSubscriber  (clientId=3) -- streaming tick data, asyncio.run()
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder
@@ -25,15 +31,17 @@ import asyncio
 
 
 # ================================================================
-# _TickSubscriber - Streaming delayed market data (clientId=3)
+# _TickSubscriber - Proper async streaming (clientId=3)
 # ================================================================
 
 class _TickSubscriber:
-    """Dedikované vlakno pro STREAMING market data.
+    """Streaming market data pres dedicovany asyncio event loop.
 
-    reqMarketDataType(3) = Delayed streaming.
-    Price fallback: last -> close -> bid -> ask -> midpoint.
-    Diagnostika: get_raw_data(symbol) vrati vsechna pole z IB tickeru.
+    SPRAVNY PATTERN pro background thread:
+      asyncio.run(_async_run()) -> fresh event loop
+      await ib.connectAsync()  -> async connect
+      await asyncio.sleep(1)   -> yields event loop, IB reader zpracuje data
+      ticker.updateEvent       -> okamzite notifikace pri zmene ceny
     """
 
     def __init__(self, host, port, client_id):
@@ -45,8 +53,8 @@ class _TickSubscriber:
         self._pending: set    = set()  # symboly cekajici na subscribe
         self._lock            = threading.Lock()
         self._connected: bool = False
-        self._iterations: int = 0      # pocet dokoncených sleep(1.0) cyklu
-        self._mdt: int        = 0      # aktual. reqMarketDataType
+        self._iterations: int = 0
+        self._mdt: int        = 0
 
         self._thread = threading.Thread(
             target=self._run, daemon=True,
@@ -55,7 +63,7 @@ class _TickSubscriber:
         self._thread.start()
         print(f"[TICK-SUB] Worker spusten (clientId={client_id})")
 
-    # --- verejne API ---
+    # --- verejne API (thread-safe) ---
 
     def get_price(self, symbol: str) -> float:
         return float(self._latest.get(symbol.upper(), {}).get('price', 0.0))
@@ -68,59 +76,53 @@ class _TickSubscriber:
 
     def get_raw_data(self, symbol: str) -> dict:
         """Diagnostika - vsechna surova pole z ib_async Tickeru."""
-        sym = symbol.upper()
+        sym    = symbol.upper()
         ticker = self._tickers.get(sym)
         if not ticker:
             return {
                 'error': 'not_subscribed',
                 'subscribed': list(self._tickers.keys()),
-                'pending': list(self._pending)
+                'pending':    list(self._pending)
             }
 
         def safe(v):
-            if v is None: return None
             try:
+                if v is None: return None
                 if isinstance(v, float) and v != v: return 'NaN'
                 return v
             except Exception:
                 return str(v)
 
         fields = {
-            'last':       safe(ticker.last),
-            'lastSize':   safe(ticker.lastSize),
-            'prevLast':   safe(getattr(ticker, 'prevLast', None)),
-            'close':      safe(ticker.close),
-            'bid':        safe(ticker.bid),
-            'ask':        safe(ticker.ask),
-            'bidSize':    safe(ticker.bidSize),
-            'askSize':    safe(ticker.askSize),
-            'open':       safe(ticker.open),
-            'high':       safe(ticker.high),
-            'low':        safe(ticker.low),
-            'volume':     safe(ticker.volume),
-            'vwap':       safe(getattr(ticker, 'vwap', None)),
-            'halted':     safe(getattr(ticker, 'halted', None)),
-            'rtTime':     safe(getattr(ticker, 'rtTime', None)),
+            'last':     safe(ticker.last),
+            'lastSize': safe(ticker.lastSize),
+            'close':    safe(ticker.close),
+            'bid':      safe(ticker.bid),
+            'ask':      safe(ticker.ask),
+            'bidSize':  safe(ticker.bidSize),
+            'askSize':  safe(ticker.askSize),
+            'open':     safe(ticker.open),
+            'high':     safe(ticker.high),
+            'low':      safe(ticker.low),
+            'volume':   safe(ticker.volume),
+            'vwap':     safe(getattr(ticker, 'vwap', None)),
+            'halted':   safe(getattr(ticker, 'halted', None)),
         }
-
-        # Vypocitana midpoint hodnota
         try:
-            b = ticker.bid
-            a = ticker.ask
+            b, a = ticker.bid, ticker.ask
             if b and a and b == b and a == a and b > 0 and a > 0:
                 fields['_midpoint'] = round((b + a) / 2, 4)
             else:
                 fields['_midpoint'] = 0
         except Exception:
             fields['_midpoint'] = 0
-
         return fields
 
     def subscribe(self, symbol: str):
+        """Pozadej streaming subscription (zpracuje se v _async_run loop)."""
         with self._lock:
             self._pending.add(symbol.upper())
 
-    # --- diagnosticke gettery ---
     @property
     def is_connected(self) -> bool:
         return self._connected
@@ -133,22 +135,14 @@ class _TickSubscriber:
     def subscribed_symbols(self) -> list:
         return list(self._tickers.keys())
 
-    # --- privatni ---
+    # --- cena: last -> close -> bid -> ask -> midpoint ---
 
     @staticmethod
     def _extract_price(t) -> float:
-        """Zkusi last -> close -> bid -> ask -> midpoint."""
-        nan = float('nan')
-        candidates = [
-            getattr(t, 'last',  nan),
-            getattr(t, 'close', nan),
-            getattr(t, 'bid',   nan),
-            getattr(t, 'ask',   nan),
-        ]
-        for c in candidates:
-            if c is not None and c == c and c > 0:
-                return float(c)
-        # midpoint
+        for attr in ('last', 'close', 'bid', 'ask'):
+            v = getattr(t, attr, None)
+            if v is not None and v == v and v > 0:
+                return float(v)
         try:
             b, a = t.bid, t.ask
             if b == b and a == a and b > 0 and a > 0:
@@ -157,89 +151,122 @@ class _TickSubscriber:
             pass
         return 0.0
 
+    # ----------------------------------------------------------------
+    # Privatni - background thread entry
+    # ----------------------------------------------------------------
+
     def _run(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        """Background thread - spusti asyncio.run() s vlastnim event loopu."""
+        # KLICOVE: asyncio.run() vytvori NOVY, CISTY event loop pro tento thread.
+        # Uvnitr _async_run() pak veskery IO (IB socket reader) bezi spravne.
+        asyncio.run(self._async_run())
 
+    async def _async_run(self):
+        """Hlavni async smycka - bezi uvnitr asyncio.run()."""
         while True:
-            ib = None
-            self._connected = False
             try:
-                ib = IB()
-                print(f"[TICK-SUB] Connecting clientId={self._client_id}...")
-                ib.connect(self._host, self._port,
-                           clientId=self._client_id, timeout=10)
-
-                # Zkus type 3 (streaming), fallback na type 4 pri chybe
-                try:
-                    ib.reqMarketDataType(3)
-                    self._mdt = 3
-                    print("[TICK-SUB] OK - reqMarketDataType(3) = Delayed STREAMING")
-                except Exception as e:
-                    ib.reqMarketDataType(4)
-                    self._mdt = 4
-                    print(f"[TICK-SUB] WARN: type 3 selhal ({e}), pouzivam type 4")
-
-                self._connected = True
-                tickers_local: dict = {}  # sym -> ib_async Ticker
-                self._tickers = tickers_local  # sdileny odkaz
-
-                while ib.isConnected():
-                    # Zpracuj nove pending subscriptions
-                    with self._lock:
-                        new_syms = list(self._pending - set(tickers_local.keys()))
-                        self._pending.clear()
-
-                    for sym in new_syms:
-                        try:
-                            contract = Stock(sym, 'SMART', 'USD')
-                            ib.qualifyContracts(contract)
-                            ticker = ib.reqMktData(contract, '', False, False)
-                            tickers_local[sym] = ticker
-                            print(f"[TICK-SUB] Subscribed: {sym}")
-                        except Exception as e:
-                            print(f"[TICK-SUB] Subscribe error {sym}: {e}")
-                            with self._lock:
-                                self._pending.add(sym)
-
-                    # Event loop - zpracuje prichozi streaming data
-                    ib.sleep(1.0)
-                    self._iterations += 1
-
-                    # Uloz hodnoty - prioritni poradi: last, close, bid, ask, mid
-                    for sym, t in tickers_local.items():
-                        nan = float('nan')
-                        last   = t.last   if t.last   == t.last   else 0.0
-                        close  = t.close  if t.close  == t.close  else 0.0
-                        bid    = t.bid    if t.bid    == t.bid    else 0.0
-                        ask    = t.ask    if t.ask    == t.ask    else 0.0
-                        vol    = t.volume if t.volume == t.volume else 0
-                        price  = self._extract_price(t)
-
-                        self._latest[sym] = {
-                            'price':      price,
-                            'last':       last,
-                            'close':      close,
-                            'bid':        bid,
-                            'ask':        ask,
-                            'volume':     int(vol) if vol else 0,
-                            'mdt':        self._mdt,
-                            'iterations': self._iterations,
-                            'ts':         time.time()
-                        }
-
+                await self._connect_and_stream()
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
-                print(f"[TICK-SUB] Chyba: {e}")
-            finally:
-                self._connected = False
-                self._tickers   = {}
-                try:
-                    if ib and ib.isConnected():
-                        ib.disconnect()
-                except Exception:
-                    pass
-                print("[TICK-SUB] Reconnecting in 10s...")
-                time.sleep(10)
+                print(f"[TICK-SUB] Chyba v _connect_and_stream: {e}")
+            self._connected = False
+            self._tickers   = {}
+            print("[TICK-SUB] Reconnecting in 10s...")
+            await asyncio.sleep(10)  # await! ne time.sleep()
+
+    async def _connect_and_stream(self):
+        """Jedno spojeni + streaming loop."""
+        ib = IB()
+        try:
+            print(f"[TICK-SUB] connectAsync clientId={self._client_id}...")
+
+            # KLICOVE: connectAsync() - ne synchronni connect()
+            await ib.connectAsync(
+                self._host, self._port,
+                clientId=self._client_id
+            )
+
+            # Typ 3 = Delayed STREAMING (aggiorna continuamente)
+            ib.reqMarketDataType(3)
+            self._mdt       = 3
+            self._connected = True
+            print("[TICK-SUB] OK - reqMarketDataType(3) = Delayed STREAMING")
+
+            tickers_local: dict = {}
+            self._tickers = tickers_local  # sdileny odkaz pro diagnostiku
+
+            while ib.isConnected():
+                # Zpracuj nove pending subscriptions
+                with self._lock:
+                    new_syms = list(self._pending - set(tickers_local.keys()))
+                    self._pending.clear()
+
+                for sym in new_syms:
+                    try:
+                        contract = Stock(sym, 'SMART', 'USD')
+                        # qualifyContractsAsync - async verze
+                        await ib.qualifyContractsAsync(contract)
+                        ticker = ib.reqMktData(contract, '', False, False)
+                        tickers_local[sym] = ticker
+
+                        # EVENT-DRIVEN update: okamzita notifikace pri zmene
+                        # Pouzij closure abychom zachytili sym
+                        def make_handler(s):
+                            def on_update(t):
+                                price = _TickSubscriber._extract_price(t)
+                                if price > 0:
+                                    existing = self._latest.get(s, {})
+                                    self._latest[s] = {
+                                        'price':  price,
+                                        'last':   t.last   if t.last  == t.last  else 0.0,
+                                        'close':  t.close  if t.close == t.close else 0.0,
+                                        'bid':    t.bid    if t.bid   == t.bid   else 0.0,
+                                        'ask':    t.ask    if t.ask   == t.ask   else 0.0,
+                                        'volume': int(t.volume) if t.volume == t.volume and t.volume else 0,
+                                        'mdt':    self._mdt,
+                                        'iterations': self._iterations,
+                                        'ts':     time.time()
+                                    }
+                            return on_update
+                        ticker.updateEvent += make_handler(sym)
+                        print(f"[TICK-SUB] Subscribed: {sym} (conId={contract.conId})")
+
+                    except Exception as e:
+                        print(f"[TICK-SUB] Subscribe error {sym}: {e}")
+                        with self._lock:
+                            self._pending.add(sym)  # retry
+
+                # KLICOVE: await asyncio.sleep() - spravne yields event loopu
+                # IB socket reader zpracuje prichozi streaming data BEHEM tohoto volani
+                await asyncio.sleep(1.0)
+                self._iterations += 1
+
+                # Fallback poll: doplnit data i pro ticker ktery nevyvolal updateEvent
+                for sym, t in tickers_local.items():
+                    if sym not in self._latest or self._latest[sym].get('price', 0) <= 0:
+                        price = self._extract_price(t)
+                        if price > 0:
+                            self._latest[sym] = {
+                                'price':  price,
+                                'last':   t.last   if t.last  == t.last  else 0.0,
+                                'close':  t.close  if t.close == t.close else 0.0,
+                                'bid':    t.bid    if t.bid   == t.bid   else 0.0,
+                                'ask':    t.ask    if t.ask   == t.ask   else 0.0,
+                                'volume': int(t.volume) if t.volume == t.volume and t.volume else 0,
+                                'mdt':    self._mdt,
+                                'iterations': self._iterations,
+                                'ts':     time.time()
+                            }
+
+        finally:
+            self._connected = False
+            self._tickers   = {}
+            try:
+                if ib.isConnected():
+                    ib.disconnect()
+            except Exception:
+                pass
 
 
 # ================================================================
@@ -394,10 +421,6 @@ class IBConnector:
             self.contracts[symbol] = contract
         return self.contracts[symbol]
 
-    # ----------------------------------------------------------------
-    # TICKER - pres _TickSubscriber
-    # ----------------------------------------------------------------
-
     def get_ticker(self, symbol):
         if not self.is_connected(): return None
         sym = symbol.upper()
@@ -412,18 +435,10 @@ class IBConnector:
         self._tick_sub.subscribe(sym)
         return self._tick_sub.get_price(sym)
 
-    # ----------------------------------------------------------------
-    # HISTORICKA DATA
-    # ----------------------------------------------------------------
-
     def get_historical_data(self, symbol, duration='1 D', bar_size='5 mins'):
         if not self.is_connected(): return []
         self._tick_sub.subscribe(symbol.upper())
         return self._hist_worker.fetch(symbol, duration, bar_size)
-
-    # ----------------------------------------------------------------
-    # ACCOUNT
-    # ----------------------------------------------------------------
 
     def get_account_info(self):
         if not self.is_connected(): return {}
@@ -439,12 +454,7 @@ class IBConnector:
                     info['cash_balance'] = float(av.value)
             return info
         except Exception as e:
-            print(f"\u274c account info: {e}")
-            return {}
-
-    # ----------------------------------------------------------------
-    # ORDERS
-    # ----------------------------------------------------------------
+            print(f"\u274c account info: {e}"); return {}
 
     def place_order(self, symbol, action, quantity, order_type='MARKET',
                     limit_price=None, timeout=None):
@@ -482,10 +492,6 @@ class IBConnector:
 
     def place_market_order(self, symbol, action, quantity):
         return self.place_order(symbol, action, quantity, 'MARKET')
-
-    # ----------------------------------------------------------------
-    # POSITIONS
-    # ----------------------------------------------------------------
 
     def get_positions(self):
         if not self.is_connected(): return []
