@@ -1,9 +1,9 @@
 """IB Trading Platform - Main Dash Application with Lightweight Charts
 
-Version: 2.0.8
-  - TF buttony: aktivni CSS stav (clientside, okamzite)
-  - duration_map: spravna delka dat pro kazdy timeframe
-  - debug log pro kliknuti TF buttonu
+Version: 2.0.9
+  - Loading indikator nad grafem (okamzita vizualni zpetna vazba)
+  - Fix: chart-data-store callback kontroluje bars.length > 0
+  - _HistWorker: fresh connection + drain queue (viz ib_connector.py)
 """
 
 import dash
@@ -13,7 +13,6 @@ from flask import jsonify
 from ib_connector import IBConnector
 import config
 import time
-import threading
 
 app = dash.Dash(
     __name__,
@@ -31,17 +30,13 @@ _cb_status = {
     'bars': None, 'error': None, 'ts': None,
 }
 
-# ================================================================
-# TIMEFRAME -> DURATION MAP
-# IB ma limity: 1min max 1D, 5min max 1W, 1day max 1Y apod.
-# ================================================================
 DURATION_MAP = {
-    '1 min':   '1 D',    # ~390 svicek (cely den)
-    '5 mins':  '2 D',    # ~156 svicek (2 dny)
-    '15 mins': '5 D',    # ~130 svicek (tyden)
-    '30 mins': '10 D',   # ~130 svicek (2 tydny)
-    '1 hour':  '1 M',    # ~170 svicek (mesic)
-    '1 day':   '6 M',    # ~126 svicek (6 mesicu)
+    '1 min':   '1 D',
+    '5 mins':  '2 D',
+    '15 mins': '5 D',
+    '30 mins': '10 D',
+    '1 hour':  '1 M',
+    '1 day':   '6 M',
 }
 
 
@@ -64,7 +59,6 @@ def api_diag():
         'connected': ib.is_connected(),
         'account_id': ib.account_id,
         'cached_contracts': list(ib.contracts.keys()),
-        'cached_tickers': len(ib.tickers),
         'cb_status': _cb_status,
         'app_state': app_state,
         'time': datetime.now().strftime('%H:%M:%S')
@@ -169,7 +163,7 @@ app.layout = html.Div([
 
     # Chart panel
     html.Div([
-        # TF buttony - className se meni clientside okamzite
+        # TF buttony
         html.Div([
             html.Button('1m',  id='tf-1m',  n_clicks=0, className='tf-btn'),
             html.Button('5m',  id='tf-5m',  n_clicks=0, className='tf-btn tf-active'),
@@ -177,6 +171,19 @@ app.layout = html.Div([
             html.Button('30m', id='tf-30m', n_clicks=0, className='tf-btn'),
             html.Button('1h',  id='tf-1h',  n_clicks=0, className='tf-btn'),
             html.Button('1D',  id='tf-1d',  n_clicks=0, className='tf-btn'),
+
+            # Loading indikator - okamzity vizualni feedback
+            html.Span(
+                id='chart-loading-indicator',
+                children='',
+                style={
+                    'marginLeft': '20px',
+                    'fontSize': '13px',
+                    'color': '#ffa726',
+                    'fontStyle': 'italic',
+                    'verticalAlign': 'middle'
+                }
+            )
         ], style={'marginBottom': '10px'}),
 
         html.Div(
@@ -194,7 +201,6 @@ app.layout = html.Div([
         dcc.Store(id='diag1-trigger'),
         dcc.Store(id='diag2-trigger'),
         dcc.Store(id='diag3-trigger'),
-        # Aktivni TF - sleduje ktery button je aktivni
         dcc.Store(id='active-tf-store', data='tf-5m'),
 
     ], style={
@@ -280,39 +286,33 @@ app.layout = html.Div([
             html.Button('1\ufe0f\u20e3 IB Spojeni', id='diag1-btn', n_clicks=0,
                         style={'padding': '10px 16px', 'marginRight': '8px',
                                'background': '#1565c0', 'border': 'none',
-                               'borderRadius': '5px', 'color': 'white',
-                               'cursor': 'pointer', 'fontWeight': 'bold'}),
+                               'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
             html.Button('2\ufe0f\u20e3 Hist. data AAPL', id='diag2-btn', n_clicks=0,
                         style={'padding': '10px 16px', 'marginRight': '8px',
                                'background': '#6a1599', 'border': 'none',
-                               'borderRadius': '5px', 'color': 'white',
-                               'cursor': 'pointer', 'fontWeight': 'bold'}),
+                               'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
             html.Button('3\ufe0f\u20e3 Nakreslit z API', id='diag3-btn', n_clicks=0,
-                        style={'padding': '10px 16px', 'marginRight': '8px',
-                               'background': '#1b5e20', 'border': 'none',
-                               'borderRadius': '5px', 'color': 'white',
-                               'cursor': 'pointer', 'fontWeight': 'bold'}),
+                        style={'padding': '10px 16px', 'background': '#1b5e20',
+                               'border': 'none', 'borderRadius': '5px',
+                               'color': 'white', 'cursor': 'pointer'}),
         ], style={'marginBottom': '12px', 'padding': '10px',
                   'background': '#0d1a2e', 'borderRadius': '5px',
                   'border': '1px solid #1565c0'}),
         html.Div([
-            html.Button('\U0001f9ea Test Chart (fake)', id='test-chart-btn', n_clicks=0,
+            html.Button('\U0001f9ea Test Chart', id='test-chart-btn', n_clicks=0,
                         style={'padding': '10px 20px', 'marginRight': '10px',
                                'background': '#ff9800', 'border': 'none',
-                               'borderRadius': '5px', 'color': 'black',
-                               'cursor': 'pointer', 'fontWeight': 'bold'}),
-            html.Button('\U0001f4cb Zkopirovat log', id='copy-log-btn', n_clicks=0,
+                               'borderRadius': '5px', 'color': 'black', 'cursor': 'pointer'}),
+            html.Button('\U0001f4cb Zkopirovat', id='copy-log-btn', n_clicks=0,
                         style={'padding': '10px 20px', 'marginRight': '10px',
                                'background': '#26a69a', 'border': 'none',
-                               'borderRadius': '5px', 'color': 'white',
-                               'cursor': 'pointer', 'fontWeight': 'bold'}),
-            html.Button('\U0001f5d1 Smazat log', id='clear-log-btn', n_clicks=0,
+                               'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
+            html.Button('\U0001f5d1 Smazat', id='clear-log-btn', n_clicks=0,
                         style={'padding': '10px 20px', 'background': '#555',
                                'border': 'none', 'borderRadius': '5px',
                                'color': 'white', 'cursor': 'pointer'}),
             html.Span(id='copy-status',
-                      style={'marginLeft': '10px', 'color': '#26a69a',
-                             'fontSize': '13px', 'fontStyle': 'italic'})
+                      style={'marginLeft': '10px', 'color': '#26a69a', 'fontSize': '13px'})
         ], style={'marginBottom': '10px'}),
         html.Textarea(
             id='debug-log-area', rows=22,
@@ -324,8 +324,7 @@ app.layout = html.Div([
                    'padding': '10px', 'resize': 'vertical'}
         ),
         html.Div('[INIT] [BTN] [CB] [TF] [API] [DATA] [ERR]',
-                 style={'marginTop': '8px', 'fontSize': '12px',
-                        'color': '#888', 'fontStyle': 'italic'})
+                 style={'marginTop': '8px', 'fontSize': '12px', 'color': '#888'})
     ], style={'padding': '20px', 'background': '#1a1a2e',
               'borderRadius': '8px', 'marginBottom': '20px',
               'border': '2px solid #ff9800'}),
@@ -444,8 +443,7 @@ def update_debug_python(data):
                 f"| 0 BARU (trh zavreny nebo IB timeout)")
     b0 = bars[0]
     return (f"\u2705 {data.get('symbol')} | {data.get('timeframe')} "
-            f"| {len(bars)} baru "
-            f"| close[0]={b0['close']} close[-1]={bars[-1]['close']:.2f}")
+            f"| {len(bars)} baru | close[0]={b0['close']} close[-1]={bars[-1]['close']:.2f}")
 
 
 # ========== CLIENTSIDE CALLBACKS ==========
@@ -465,8 +463,35 @@ app.clientside_callback(
 
 
 # ================================================================
+# LOADING INDIKATOR - okamzita zpetna vazba pri kliknuti
+# Zobrazi se ihned po kliknuti, zmizi kdyz data dorazí
+# ================================================================
+app.clientside_callback(
+    """
+    function(n1m, n5m, n15m, n30m, n1h, n1d, nLoad) {
+        var ctx = window.dash_clientside.callback_context;
+        if (!ctx || !ctx.triggered || ctx.triggered.length === 0)
+            return '';
+        var tid = ctx.triggered_id || ctx.triggered[0].prop_id.split('.')[0];
+        var labels = {
+            'tf-1m': '1m', 'tf-5m': '5m', 'tf-15m': '15m',
+            'tf-30m': '30m', 'tf-1h': '1h', 'tf-1d': '1D',
+            'load-chart-btn': 'Load'
+        };
+        var lbl = labels[tid] || tid;
+        return '\u23f3 Na\u010d\u00edt\u00e1m ' + lbl + '\u2026';
+    }
+    """,
+    Output('chart-loading-indicator', 'children'),
+    [Input('tf-1m', 'n_clicks'), Input('tf-5m', 'n_clicks'),
+     Input('tf-15m', 'n_clicks'), Input('tf-30m', 'n_clicks'),
+     Input('tf-1h', 'n_clicks'), Input('tf-1d', 'n_clicks'),
+     Input('load-chart-btn', 'n_clicks')]
+)
+
+
+# ================================================================
 # TF BUTTONY - aktivni stav (okamzite, bez cekani na Python)
-# Krok 1: klik -> uloz aktivni ID do store + log
 # ================================================================
 app.clientside_callback(
     """
@@ -474,15 +499,12 @@ app.clientside_callback(
         var ctx = window.dash_clientside.callback_context;
         if (!ctx || !ctx.triggered || ctx.triggered.length === 0)
             return window.dash_clientside.no_update;
-
         var tid = ctx.triggered_id || ctx.triggered[0].prop_id.split('.')[0];
-        var labels = {
-            'tf-1m': '1m', 'tf-5m': '5m', 'tf-15m': '15m',
-            'tf-30m': '30m', 'tf-1h': '1h', 'tf-1d': '1D'
-        };
-        if (window.lwcDebug)
-            window.lwcDebug('TF', 'Zmen timeframe -> ' + (labels[tid] || tid)
-                + ' (cekam na Python/IB data...)');
+        if (window.lwcDebug) {
+            var labels = {'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m',
+                          'tf-30m':'30m','tf-1h':'1h','tf-1d':'1D'};
+            window.lwcDebug('TF', 'Zmen -> ' + (labels[tid]||tid) + ' (cekam na IB...)');
+        }
         return tid;
     }
     """,
@@ -493,14 +515,10 @@ app.clientside_callback(
 )
 
 
-# ================================================================
-# TF BUTTONY - CSS aktivni stav
-# Krok 2: store zmena -> okamzita aktualizace vsech className
-# ================================================================
 app.clientside_callback(
     """
     function(activeTf) {
-        var ids = ['tf-1m', 'tf-5m', 'tf-15m', 'tf-30m', 'tf-1h', 'tf-1d'];
+        var ids = ['tf-1m','tf-5m','tf-15m','tf-30m','tf-1h','tf-1d'];
         return ids.map(function(id) {
             return id === activeTf ? 'tf-btn tf-active' : 'tf-btn';
         });
@@ -516,25 +534,45 @@ app.clientside_callback(
 )
 
 
-# ---- chart-data-store -> lwcManager ----
+# ---- chart-data-store -> lwcManager + skryj loading ----
 app.clientside_callback(
     """
     function(storeData) {
         var d = window.lwcDebug || function() {};
         d('CB', '=== Dash clientside callback spusten ===');
-        if (!storeData) { d('CB', 'storeData NULL -> no_update'); return window.dash_clientside.no_update; }
-        if (!storeData.bars) { d('CB', 'bars chybi'); return window.dash_clientside.no_update; }
-        d('CB', 'symbol=' + storeData.symbol + ' baru=' + storeData.bars.length
-          + ' time[0]=' + (storeData.bars[0] && storeData.bars[0].time)
-          + ' close[0]=' + (storeData.bars[0] && storeData.bars[0].close));
+
+        // Skryj loading indikator - data dorazila (i kdyz prazdna)
+        var li = document.getElementById('chart-loading-indicator');
+        if (li) li.textContent = '';
+
+        if (!storeData) {
+            d('CB', 'storeData NULL -> no_update');
+            return window.dash_clientside.no_update;
+        }
+        if (!storeData.bars || storeData.bars.length === 0) {
+            d('CB', 'bars prazdne (0) -> no_update (trh zavreny?)');
+            return window.dash_clientside.no_update;
+        }
+
+        d('CB', 'symbol=' + storeData.symbol
+          + ' tf=' + storeData.timeframe
+          + ' baru=' + storeData.bars.length
+          + ' time[0]=' + storeData.bars[0].time
+          + ' close[0]=' + storeData.bars[0].close);
+
         if (window.lwcManager) {
             d('CB', 'volam lwcManager.loadData()');
             window.lwcManager.loadData(storeData);
         } else {
             var a = 0, r = setInterval(function() {
                 a++;
-                if (window.lwcManager) { window.lwcManager.loadData(storeData); clearInterval(r); }
-                else if (a > 20) { d('ERR', 'lwcManager nenalezen!'); clearInterval(r); }
+                if (window.lwcManager) {
+                    window.lwcManager.loadData(storeData);
+                    clearInterval(r);
+                } else if (a > 20) {
+                    d('ERR', 'lwcManager nenalezen!');
+                    clearInterval(r);
+                }
             }, 200);
         }
         return storeData.symbol || 'ok';
@@ -545,7 +583,7 @@ app.clientside_callback(
 )
 
 
-# ---- Diagnostika 1 ----
+# ---- Diagnostika ----
 app.clientside_callback(
     """
     function(n) {
@@ -554,12 +592,11 @@ app.clientside_callback(
         d('API', '=== TEST 1: IB spojeni ===');
         fetch('/api/diag').then(function(r){return r.json();}).then(function(j){
             d('API', 'connected=' + j.connected + ' account=' + j.account_id
-              + ' tf=' + (j.app_state && j.app_state.current_timeframe)
-              + ' symbol=' + (j.app_state && j.app_state.current_symbol));
+              + ' tf=' + (j.app_state && j.app_state.current_timeframe));
             d('API', 'cb_status.step=' + (j.cb_status && j.cb_status.step)
               + ' bars=' + (j.cb_status && j.cb_status.bars));
-            if (!j.connected) d('ERR', 'IB NENI PRIPOJENO!');
-            else d('API', 'TEST 1 OK');
+            if (!j.connected) d('ERR','IB NENI PRIPOJENO!');
+            else d('API','TEST 1 OK');
         }).catch(function(e){ d('ERR','FETCH FAIL: '+e); });
         return n;
     }
@@ -568,15 +605,13 @@ app.clientside_callback(
     Input('diag1-btn', 'n_clicks')
 )
 
-
-# ---- Diagnostika 2 ----
 app.clientside_callback(
     """
     function(n) {
         if (n < 1) return n;
         var d = window.lwcDebug || function() {};
-        d('API', '=== TEST 2: Historicka data /api/test-hist/AAPL ===');
-        d('API', 'Posilam... (5-15s)');
+        d('API', '=== TEST 2: Historicka data ===');
+        d('API', 'Posilam...');
         var t0 = Date.now();
         fetch('/api/test-hist/AAPL').then(function(r){return r.json();}).then(function(j){
             var el = ((Date.now()-t0)/1000).toFixed(1);
@@ -590,8 +625,6 @@ app.clientside_callback(
     Input('diag2-btn', 'n_clicks')
 )
 
-
-# ---- Diagnostika 3 ----
 app.clientside_callback(
     """
     function(n) {
@@ -610,7 +643,6 @@ app.clientside_callback(
     Output('diag3-trigger', 'data'),
     Input('diag3-btn', 'n_clicks')
 )
-
 
 app.clientside_callback(
     """function(n){if(n>0&&window.lwcManager)window.lwcManager.testChart();return n;}""",
@@ -813,7 +845,7 @@ app.index_string = '''
 # ========== RUN ==========
 
 if __name__ == '__main__':
-    print("\U0001f680 Starting IB Trading Platform v2.0.8...")
+    print("\U0001f680 Starting IB Trading Platform v2.0.9...")
     print(f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
     if ib.connect():
         print("\u2705 Connected to IB Gateway!")

@@ -1,35 +1,33 @@
 """IB API Connector using ib_async
 
-Version: 2.1.0 - _HistWorker architektura
+Version: 2.2.0 - _HistWorker fresh-connection architektura
 
 ARCHITEKTURA:
-  self.ib          (clientId=1) -- HLAVNI spojeni
-                                    buy/sell, positions, ticker, account
-                                    NEDOTKNOUT SE!
+  self.ib        (clientId=1) -- HLAVNI spojeni
+                                  buy/sell, positions, ticker, account
+                                  NEDOTKNOUT SE!
 
-  _HistWorker      (clientId=2) -- DEDIKOVANÉ vlakno pro hist. data
-                                    bezi v SEPARATNM threadu se svym event
-                                    loop - Flask worker threadu se nikdy
-                                    netka asyncio loopy hist. spojeni
+  _HistWorker    (clientId=2) -- DEDIKOVANÉ vlakno POUZE pro hist. data
 
-PROC:
-  ib_async pouziva asyncio event loop. Flask/Dash spousti callbacky
-  v ruznych worker threadech. Kazdy thread ma prazdny asyncio loop.
-  Kdyz Flask worker zavola ib.reqHistoricalData(), ceka na odpoved
-  na spatnem loopu -> FREEZE navzdy.
+PROC FRESH CONNECTION:
+  ib_async si pamatuje stav event loopu po prvnim reqHistoricalData.
+  Pri druhem volani z jineho threadu loop neni ready -> FREEZE.
+  Reseni: VZDY vytvorit novou IB() instanci na dedicovanem threadu
+  (stejny princip jako debug.py - zarucene funguje).
 
-  Reseni: _HistWorker bezi v dedicovanem threadu kde je jen JEDINY
-  volajici. Ten thread si spravuje vlastni IB spojeni a vlastni loop.
-  Flask workery jen posleji request do fronty a cekaji na vysledek.
-  Hlavni self.ib pro trading NENI NIKDY zasazen.
+DRAIN QUEUE:
+  Kdyz user klikne 1m -> 5m -> 15m rychle za sebou,
+  worker zpracuje jen POSLEDNI request. Starsi vrati prazdny
+  vysledek okamzite -> Dash callback se odblokovani rychle.
 """
 
-from ib_async import IB, Stock, MarketOrder, LimitOrder, util
+from ib_async import IB, Stock, MarketOrder, LimitOrder
 from datetime import datetime
 import config
 import time
 import threading
 import queue
+import asyncio
 
 
 # ================================================================
@@ -37,13 +35,11 @@ import queue
 # ================================================================
 
 class _HistWorker:
-    """Dedikované vlakno se svym IB spojenim POUZE pro hist. data.
+    """Dedikované vlakno, fresh IB spojeni na kazdy request.
 
-    Hlavni self.ib (trading) se nikdy netka!
-
-    Pouziti:
-        worker = _HistWorker(host, port, clientId=2)
-        bars = worker.fetch('AAPL', '1 D', '5 mins')  # thread-safe
+    - Hlavni self.ib (trading) NIKDY nedotycen
+    - Fresh IB() = zadny state carryover z predchoziho requestu
+    - Drain queue = jen posledni klik se zpracuje
     """
 
     def __init__(self, host, port, client_id):
@@ -51,8 +47,6 @@ class _HistWorker:
         self._port = port
         self._client_id = client_id
         self._queue = queue.Queue()
-        self._ib = None
-        self._contracts = {}
 
         self._thread = threading.Thread(
             target=self._run,
@@ -64,9 +58,9 @@ class _HistWorker:
 
     # ------ verejne API ------
 
-    def fetch(self, symbol, duration='1 D', bar_size='5 mins', timeout=25):
-        """Ziskej historicka data. Blokuje volajici thread max timeout sekund.
-        Vraci list dictu nebo [] pri chybe / timeoutu.
+    def fetch(self, symbol, duration='1 D', bar_size='5 mins', timeout=15):
+        """Thread-safe. Blokuje max timeout sekund.
+        Vraci list OHLCV dictu nebo [] pri chybe / timeoutu.
         """
         result = []
         done = threading.Event()
@@ -80,76 +74,97 @@ class _HistWorker:
     # ------ privatni ------
 
     def _run(self):
-        """Hlavni smycka worker threadu.
+        """Worker smycka - bezi v dedicovanem threadu.
 
-        Bezi v dedicovanem threadu - ib_async automaticky
-        vytvori vlastni asyncio event loop pro tento thread.
-        Zadny konflikt s Flask worker thready ani s hlavnim self.ib.
+        Explicitne nastavi vlastni event loop aby Python 3.10+
+        nevracel deprecated loop nebo RuntimeError.
         """
+        # Dedikovaný event loop pro tento thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
         while True:
+            # Cekej na prvni polozku
             item = self._queue.get()
             if item is None:
                 break
-            symbol, duration, bar_size, result, done = item
+
+            # === DRAIN QUEUE: zpracuj jen NEJNOVEJSI request ===
+            # Kdyz user klikl 1m->5m->15m rychle, preskoc starsi.
+            # Starsim nastav done okamzite (vrati prazdny list).
+            latest = item
+            while not self._queue.empty():
+                try:
+                    newer = self._queue.get_nowait()
+                    if newer is None:               # stop sentinel
+                        _, _, _, _, old_done = latest
+                        old_done.set()
+                        return
+                    _, _, _, _, skip_done = latest  # preskoc predchozi
+                    skip_done.set()                 # okamzite odblokovani
+                    latest = newer
+                except queue.Empty:
+                    break
+
+            symbol, duration, bar_size, result, done = latest
             try:
-                self._ensure_connected()
-                bars = self._do_fetch(symbol, duration, bar_size)
+                bars = self._fetch_fresh(symbol, duration, bar_size)
                 result.extend(bars)
             except Exception as e:
-                print(f"[HIST] Worker chyba pro {symbol}: {e}")
-                self._ib = None  # vynuc reconnect pri pristim requestu
+                print(f"[HIST] Chyba pro {symbol}: {e}")
             finally:
                 done.set()
 
-    def _ensure_connected(self):
-        if self._ib and self._ib.isConnected():
-            return
-        print(f"[HIST] Pripojuji hist. spojeni (clientId={self._client_id})...")
-        self._ib = IB()
-        self._ib.connect(
-            self._host,
-            self._port,
-            clientId=self._client_id,
-            timeout=10
-        )
-        self._ib.reqMarketDataType(4)
-        self._contracts = {}
-        print(f"[HIST] Hist. spojeni OK (clientId={self._client_id})")
+    def _fetch_fresh(self, symbol, duration, bar_size):
+        """Fresh IB() instance na kazdy request.
 
-    def _do_fetch(self, symbol, duration, bar_size):
-        if symbol not in self._contracts:
+        Stejny princip jako debug.py:
+        - nove vlakno + novy IB() = zarucenej vlastni event loop
+        - zadny state z predchoziho reqHistoricalData
+        """
+        ib = IB()
+        try:
+            print(f"[HIST] Connecting clientId={self._client_id}...")
+            ib.connect(self._host, self._port,
+                       clientId=self._client_id, timeout=10)
+            ib.reqMarketDataType(4)
+
             contract = Stock(symbol, 'SMART', 'USD')
-            self._ib.qualifyContracts(contract)
-            self._contracts[symbol] = contract
+            ib.qualifyContracts(contract)
             print(f"[HIST] Qualified {symbol} (conId={contract.conId})")
 
-        contract = self._contracts[symbol]
-        print(f"[HIST] reqHistoricalData {symbol} | {duration} | {bar_size}")
+            print(f"[HIST] reqHistoricalData {symbol} | {duration} | {bar_size}")
+            bars = ib.reqHistoricalData(
+                contract,
+                endDateTime='',
+                durationStr=duration,
+                barSizeSetting=bar_size,
+                whatToShow='TRADES',
+                useRTH=True,
+                formatDate=1,
+                timeout=12
+            )
 
-        bars = self._ib.reqHistoricalData(
-            contract,
-            endDateTime='',
-            durationStr=duration,
-            barSizeSetting=bar_size,
-            whatToShow='TRADES',
-            useRTH=True,
-            formatDate=1,
-            timeout=15
-        )
+            result = []
+            for b in bars:
+                result.append({
+                    'time':   _bar_date_to_unix(b.date),
+                    'open':   b.open,
+                    'high':   b.high,
+                    'low':    b.low,
+                    'close':  b.close,
+                    'volume': b.volume
+                })
 
-        result = []
-        for bar in bars:
-            result.append({
-                'time':   _bar_date_to_unix(bar.date),
-                'open':   bar.open,
-                'high':   bar.high,
-                'low':    bar.low,
-                'close':  bar.close,
-                'volume': bar.volume
-            })
+            print(f"[HIST] OK: {len(result)} baru pro {symbol}")
+            return result
 
-        print(f"[HIST] Hotovo: {len(result)} baru pro {symbol}")
-        return result
+        finally:
+            try:
+                ib.disconnect()
+                print(f"[HIST] Disconnected clientId={self._client_id}")
+            except Exception:
+                pass
 
 
 def _bar_date_to_unix(bar_date):
@@ -178,11 +193,10 @@ class IBConnector:
                      NEDOTKNOUT SE!
 
     _hist_worker   = separatni worker (clientId=IB_CLIENT_ID+1)
-                     POUZE historicka data
+                     POUZE historicka data - fresh connection per request
     """
 
     def __init__(self):
-        # === HLAVNI IB SPOJENI (trading) ===
         self.ib = IB()
         self.connected = False
         self.account_id = None
@@ -190,7 +204,6 @@ class IBConnector:
         self.contracts = {}
         self.executions = []
 
-        # === HIST WORKER ===
         self._hist_worker = _HistWorker(
             host=config.IB_HOST,
             port=config.IB_PORT,
@@ -229,14 +242,10 @@ class IBConnector:
                 self.account_id = accounts[0]
 
             self.ib.reqMarketDataType(4)
-            if config.DEBUG_CONNECTION:
-                print("\U0001f4e1 Market data: Delayed Frozen (4)")
 
             try:
                 fills = self.ib.reqExecutions()
                 self.executions = fills
-                if config.DEBUG_CONNECTION:
-                    print(f"\u2705 Loaded {len(fills)} execution(s)")
             except Exception as e:
                 print(f"\u26a0\ufe0f Executions: {e}")
 
@@ -268,15 +277,16 @@ class IBConnector:
             contract = Stock(symbol, 'SMART', 'USD')
             self.ib.qualifyContracts(contract)
             self.contracts[symbol] = contract
-            print(f"\u2705 Qualified {symbol} (conId={contract.conId})")
         return self.contracts[symbol]
 
     # ================================================================
-    # HISTORICKA DATA - pres _HistWorker
+    # HISTORICKA DATA - pres _HistWorker (ODDELENE od tradingu)
     # ================================================================
 
     def get_historical_data(self, symbol, duration='1 D', bar_size='5 mins'):
-        """Historicka data pres _HistWorker - ODDELENE od tradingu."""
+        """Pres _HistWorker (fresh connection, samostatny thread).
+        Hlavni self.ib pro trading NIKDY nedotycen.
+        """
         if not self.is_connected():
             print("[HIST] Hlavni spojeni neni aktivni")
             return []
@@ -447,12 +457,12 @@ class IBConnector:
                 upnl = mv - cb
                 upnl_pct = (upnl / abs(cb) * 100) if cb != 0 else 0
                 result.append({
-                    'symbol': pos.contract.symbol,
-                    'position': pos.position,
-                    'avg_cost': pos.avgCost,
-                    'market_price': cp,
-                    'market_value': mv,
-                    'unrealized_pnl': upnl,
+                    'symbol':             pos.contract.symbol,
+                    'position':           pos.position,
+                    'avg_cost':           pos.avgCost,
+                    'market_price':       cp,
+                    'market_value':       mv,
+                    'unrealized_pnl':     upnl,
                     'unrealized_pnl_pct': upnl_pct
                 })
             return result
