@@ -4,7 +4,7 @@ Professional trading platform with real-time market data,
 order execution, positions tracking, and TradingView Lightweight Charts.
 
 Author: Perplexity AI Assistant
-Version: 2.0.0 - Lightweight Charts Integration
+Version: 2.0.1 - Fix LWC v4 pin + IB contract qualify
 """
 
 import dash
@@ -138,16 +138,13 @@ app.layout = html.Div([
             html.Button('1D',  id='tf-1d',  n_clicks=0, className='tf-btn'),
         ], style={'marginBottom': '10px'}),
 
-        # --- Lightweight Charts container (replaces dcc.Graph) ---
-        # chart_manager.js attaches LWC chart to this div
+        # Lightweight Charts container
         html.Div(
             id='lwc-container',
             style={'width': '100%', 'height': '500px', 'position': 'relative'}
         ),
 
-        # dcc.Store: Python → JavaScript data bridge
-        # Python callback writes OHLCV JSON here;
-        # clientside_callback passes it to window.lwcManager.loadData()
+        # dcc.Store: Python -> JavaScript data bridge
         dcc.Store(id='chart-data-store'),
 
     ], style={
@@ -235,7 +232,6 @@ app.layout = html.Div([
 
 # ========== CALLBACKS ==========
 
-# Connection status
 @app.callback(
     Output('connection-status', 'children'),
     Input('connection-check-interval', 'n_intervals')
@@ -252,7 +248,6 @@ def update_connection_status(n):
     ])
 
 
-# Account info
 @app.callback(
     [Output('account-id', 'children'),
      Output('account-balance', 'children'),
@@ -270,9 +265,6 @@ def update_account_info(n):
     )
 
 
-# ---- Chart data callback ----------------------------------------
-# Python fetches IB historical bars → serialises to JSON → dcc.Store
-# chart_manager.js picks up the Store change via clientside_callback
 @app.callback(
     Output('chart-data-store', 'data'),
     [Input('load-chart-btn', 'n_clicks'),
@@ -285,9 +277,6 @@ def update_account_info(n):
     State('symbol-input', 'value')
 )
 def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, symbol):
-    """Fetches OHLCV bars from IB and stores as JSON.
-    JavaScript chart_manager.js will render the Lightweight Chart.
-    """
     ctx = dash.callback_context
     if ctx.triggered:
         button_id = ctx.triggered[0]['prop_id'].split('.')[0]
@@ -306,19 +295,15 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, symbol):
     symbol = (symbol or 'AAPL').upper()
     app_state['current_symbol'] = symbol
 
-    bars = ib.get_historical_data(
-        symbol, '1 D', app_state['current_timeframe']
-    )
+    bars = ib.get_historical_data(symbol, '1 D', app_state['current_timeframe'])
 
     return {
         'symbol': symbol,
         'timeframe': app_state['current_timeframe'],
-        'bars': bars  # Each bar already has Unix timestamp from ib_connector
+        'bars': bars
     }
 
 
-# ---- Clientside callback: Store → Lightweight Charts render -------
-# Runs purely in the browser (zero round-trip to Python)
 app.clientside_callback(
     """
     function(storeData) {
@@ -334,7 +319,6 @@ app.clientside_callback(
 )
 
 
-# Price display (top bar)
 @app.callback(
     [Output('price-display', 'children'),
      Output('price-change-display', 'children')],
@@ -365,7 +349,6 @@ def update_price_display(n, symbol):
     )
 
 
-# Quantity quick-select buttons
 @app.callback(
     Output('qty-custom', 'value'),
     [Input('qty-1', 'n_clicks'), Input('qty-5', 'n_clicks'),
@@ -381,7 +364,6 @@ def update_quantity(q1, q5, q10, q25, q100):
             'qty-25': 25, 'qty-100': 100}.get(button_id, 1)
 
 
-# Place order
 @app.callback(
     Output('order-feedback', 'children'),
     [Input('buy-btn', 'n_clicks'), Input('sell-btn', 'n_clicks')],
@@ -416,7 +398,6 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity):
     )
 
 
-# Positions table
 @app.callback(
     Output('positions-table', 'children'),
     Input('positions-update-interval', 'n_intervals')
@@ -452,7 +433,6 @@ def update_positions_table(n):
     ], style={'width': '100%', 'borderCollapse': 'collapse'})
 
 
-# Orders table
 @app.callback(
     Output('orders-table', 'children'),
     Input('positions-update-interval', 'n_intervals')
@@ -489,7 +469,7 @@ def update_orders_table(n):
     ], style={'width': '100%', 'borderCollapse': 'collapse'})
 
 
-# ========== HTML TEMPLATE (CSS + LWC CDN) ==========
+# ========== HTML TEMPLATE ==========
 
 app.index_string = '''
 <!DOCTYPE html>
@@ -499,8 +479,8 @@ app.index_string = '''
         <title>{%title%}</title>
         {%favicon%}
         {%css%}
-        <!-- TradingView Lightweight Charts -->
-        <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+        <!-- TradingView Lightweight Charts v4.2.0 (pinned - v5 renamed all APIs) -->
+        <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
         <style>
             body { margin: 0; padding: 0; background: #1e1e2e; }
             .tf-btn, .qty-btn {

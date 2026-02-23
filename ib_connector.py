@@ -5,7 +5,7 @@ for trading platform. Handles connection, market data, orders,
 positions, and account information.
 
 Author: Perplexity AI Assistant
-Version: 2.0.0 - Unix timestamp support for Lightweight Charts
+Version: 2.0.1 - qualifyContracts() fix + Unix timestamps for LWC
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder, util
@@ -21,7 +21,8 @@ class IBConnector:
         self.ib = IB()
         self.connected = False
         self.account_id = None
-        self.tickers = {}     # Cache for ticker objects (key = conId or symbol)
+        self.tickers = {}     # Cache ticker subscriptions (key = symbol string)
+        self.contracts = {}   # Cache qualified contracts (key = symbol string)
         self.executions = []  # Store executions from IB
 
     def connect(self):
@@ -89,6 +90,22 @@ class IBConnector:
         """Check if connected to IB"""
         return self.connected and self.ib.isConnected()
 
+    def _get_qualified_contract(self, symbol):
+        """Return a qualified Stock contract for symbol (cached after first call).
+
+        WHY: ib_async requires contracts to have a conId (a unique number from IB)
+        before it can use them for market data or historical data requests.
+        Stock('AAPL', 'SMART', 'USD') creates a 'bare' contract with NO conId.
+        qualifyContracts() sends a quick request to IB which fills in the conId.
+        We cache the result so we only call IB once per symbol per session.
+        """
+        if symbol not in self.contracts:
+            contract = Stock(symbol, 'SMART', 'USD')
+            self.ib.qualifyContracts(contract)   # <-- fills in conId
+            self.contracts[symbol] = contract
+            print(f"\u2705 Qualified contract for {symbol} (conId={contract.conId})")
+        return self.contracts[symbol]
+
     def get_account_info(self):
         """Get account information"""
         if not self.is_connected():
@@ -113,20 +130,18 @@ class IBConnector:
             print(f"\u274c Error getting account info: {e}")
             return {}
 
-    # ------------------------------------------------------------------
-    # CHANGED in v2.0: bar.date is now converted to Unix timestamp (int)
-    # Lightweight Charts requires integer Unix timestamps, not strings.
-    # ------------------------------------------------------------------
     def get_historical_data(self, symbol, duration='1 D', bar_size='5 mins'):
         """Get historical OHLCV bars for Lightweight Charts.
 
-        Returns bars with 'time' as Unix timestamp (integer seconds).
-        Lightweight Charts requires this format - strings are NOT accepted.
+        Returns bars with 'time' as Unix timestamp (int seconds).
+        Lightweight Charts requires integers, not date strings.
         """
         if not self.is_connected():
             return []
         try:
-            contract = Stock(symbol, 'SMART', 'USD')
+            # Use qualified contract (has conId) - required by ib_async
+            contract = self._get_qualified_contract(symbol)
+
             bars = self.ib.reqHistoricalData(
                 contract,
                 endDateTime='',
@@ -134,7 +149,7 @@ class IBConnector:
                 barSizeSetting=bar_size,
                 whatToShow='TRADES',
                 useRTH=True,
-                formatDate=1,  # IB returns date as string (e.g. "20240101 09:30:00")
+                formatDate=1,
                 timeout=15
             )
 
@@ -161,39 +176,34 @@ class IBConnector:
     def _bar_date_to_unix(bar_date):
         """Convert IB bar.date to Unix timestamp (int).
 
-        IB returns dates as strings in several formats:
+        IB returns dates as strings:
         - Intraday: '20240101 09:30:00' or '20240101 09:30:00 US/Eastern'
         - Daily:    '20240101'
-        - Might also arrive as a datetime object (formatDate=2 mode).
         """
         if hasattr(bar_date, 'timestamp'):
-            # Already a datetime object
             return int(bar_date.timestamp())
 
         if isinstance(bar_date, str):
-            # Strip optional timezone suffix (e.g. ' US/Eastern')
             clean = bar_date.split(' US/')[0].split(' America/')[0].strip()
-            if len(clean) == 8:  # Daily: '20240101'
+            if len(clean) == 8:
                 dt = datetime.strptime(clean, '%Y%m%d')
-            else:                 # Intraday: '20240101 09:30:00'
+            else:
                 dt = datetime.strptime(clean, '%Y%m%d %H:%M:%S')
             return int(dt.timestamp())
 
-        # Fallback: current time (should not normally happen)
         return int(datetime.now().timestamp())
 
     def get_ticker(self, symbol):
-        """Get real-time ticker data for a symbol.
-
-        Note: For positions use get_ticker_for_contract() instead.
-        """
+        """Get real-time ticker data for a symbol."""
         if not self.is_connected():
             return None
         try:
             if symbol in self.tickers:
+                # Already subscribed - just read the cached ticker object
                 ticker = self.tickers[symbol]
             else:
-                contract = Stock(symbol, 'SMART', 'USD')
+                # First time: qualify contract, then subscribe to market data
+                contract = self._get_qualified_contract(symbol)
                 ticker = self.ib.reqMktData(contract, '', False, False)
                 self.tickers[symbol] = ticker
 
