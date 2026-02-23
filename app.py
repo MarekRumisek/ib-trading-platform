@@ -1,10 +1,10 @@
 """IB Trading Platform - Main Dash Application with Lightweight Charts
 
-Professional trading platform with real-time market data,
-order execution, positions tracking, and TradingView Lightweight Charts.
-
-Author: Perplexity AI Assistant
-Version: 2.0.6 - textarea selectable, copy btn, immediate click log
+Version: 2.0.7 - Kompletni diagnostika
+  - Flask API /api/diag, /api/test-hist, /api/cb-status
+  - 3 diagnosticka tlacitka v debug panelu (bypass Dash)
+  - Globalni _cb_status tracker pro sledovani stavu callbacku
+  - Intervaly zpomaleny (10s/30s) aby neblokovalyDash queue
 """
 
 import dash
@@ -13,6 +13,8 @@ from datetime import datetime
 from flask import jsonify
 from ib_connector import IBConnector
 import config
+import time
+import threading
 
 app = dash.Dash(
     __name__,
@@ -25,6 +27,24 @@ app = dash.Dash(
 ib = IBConnector()
 server = app.server
 
+# ================================================================
+# GLOBALNI STATUS TRACKER - sleduje stav Python callbacku
+# aktualizuje se behem load_chart_data
+# citelny pres /api/cb-status (nezavisle na Dash)
+# ================================================================
+_cb_status = {
+    'step': 'idle',
+    'symbol': None,
+    'tf': None,
+    'bars': None,
+    'error': None,
+    'ts': None,
+}
+
+
+# ================================================================
+# FLASK API ENDPOINTY - testovatelne primo z prohlizece / JS
+# ================================================================
 
 @server.route('/api/tick/<symbol>')
 def get_tick(symbol):
@@ -34,6 +54,52 @@ def get_tick(symbol):
     price = ticker['last'] if ticker['last'] > 0 else ticker['close']
     return jsonify({'time': int(datetime.now().timestamp()), 'price': price})
 
+
+@server.route('/api/diag')
+def api_diag():
+    """Diagnostika pripojeni - volej z JS nebo prohlizece."""
+    return jsonify({
+        'connected': ib.is_connected(),
+        'account_id': ib.account_id,
+        'cached_contracts': list(ib.contracts.keys()),
+        'cached_tickers': len(ib.tickers),
+        'cb_status': _cb_status,
+        'time': datetime.now().strftime('%H:%M:%S')
+    })
+
+
+@server.route('/api/test-hist/<symbol>')
+def api_test_hist(symbol):
+    """Primo testuje get_historical_data() - bypass Dash callbacku."""
+    t0 = time.time()
+    try:
+        if not ib.is_connected():
+            return jsonify({'ok': False, 'error': 'NOT CONNECTED',
+                            'elapsed': 0})
+        bars = ib.get_historical_data(symbol.upper(), '1 D', '5 mins')
+        elapsed = round(time.time() - t0, 2)
+        if bars:
+            return jsonify({
+                'ok': True,
+                'bars': len(bars),
+                'elapsed': elapsed,
+                'first': bars[0],
+                'last': bars[-1]
+            })
+        return jsonify({'ok': False, 'error': 'EMPTY - 0 bars',
+                        'elapsed': elapsed})
+    except Exception as e:
+        elapsed = round(time.time() - t0, 2)
+        return jsonify({'ok': False, 'error': str(e), 'elapsed': elapsed})
+
+
+@server.route('/api/cb-status')
+def api_cb_status():
+    """Vraci aktualni stav load_chart_data callbacku."""
+    return jsonify(_cb_status)
+
+
+# ================================================================
 
 app_state = {
     'current_symbol': 'AAPL',
@@ -129,7 +195,10 @@ app.layout = html.Div([
         dcc.Store(id='test-chart-trigger'),
         dcc.Store(id='clear-log-trigger'),
         dcc.Store(id='copy-log-trigger'),
-        dcc.Store(id='load-click-log'),   # okamzity log kliknuti tlacitka
+        dcc.Store(id='load-click-log'),
+        dcc.Store(id='diag1-trigger'),
+        dcc.Store(id='diag2-trigger'),
+        dcc.Store(id='diag3-trigger'),
 
     ], style={
         'padding': '20px', 'background': '#2d2d3a',
@@ -207,9 +276,9 @@ app.layout = html.Div([
         html.H3('\U0001f527 Debug Panel',
                 style={'marginBottom': '10px', 'color': '#ff9800'}),
 
-        # Python inspector
+        # Python callback status
         html.Div([
-            html.Span('Python \u2192 chart-data-store: ',
+            html.Span('Python callback: ',
                       style={'fontWeight': 'bold', 'color': '#00d4ff'}),
             html.Span(id='debug-python-info',
                       children='(ceka na Load Chart...)',
@@ -217,7 +286,46 @@ app.layout = html.Div([
         ], style={'marginBottom': '12px', 'padding': '8px',
                   'background': '#0d0d1a', 'borderRadius': '5px'}),
 
-        # Tlacitka
+        # ---- DIAGNOSTICKA TLACITKA (bypass Dash, volaji Flask API primo) ----
+        html.Div([
+            html.Div('\U0001f9ea Diagnostika (nezavisla na Dash callbacks):',
+                     style={'color': '#ff9800', 'fontWeight': 'bold',
+                            'marginBottom': '8px', 'fontSize': '13px'}),
+            html.Button(
+                '1\ufe0f\u20e3 Test: IB Spojeni',
+                id='diag1-btn', n_clicks=0,
+                style={
+                    'padding': '10px 16px', 'marginRight': '8px',
+                    'background': '#1565c0', 'border': 'none',
+                    'borderRadius': '5px', 'color': 'white',
+                    'cursor': 'pointer', 'fontWeight': 'bold', 'fontSize': '13px'
+                }
+            ),
+            html.Button(
+                '2\ufe0f\u20e3 Test: Historicka data AAPL',
+                id='diag2-btn', n_clicks=0,
+                style={
+                    'padding': '10px 16px', 'marginRight': '8px',
+                    'background': '#6a1599', 'border': 'none',
+                    'borderRadius': '5px', 'color': 'white',
+                    'cursor': 'pointer', 'fontWeight': 'bold', 'fontSize': '13px'
+                }
+            ),
+            html.Button(
+                '3\ufe0f\u20e3 Nakreslit z API (bypass Dash)',
+                id='diag3-btn', n_clicks=0,
+                style={
+                    'padding': '10px 16px', 'marginRight': '8px',
+                    'background': '#1b5e20', 'border': 'none',
+                    'borderRadius': '5px', 'color': 'white',
+                    'cursor': 'pointer', 'fontWeight': 'bold', 'fontSize': '13px'
+                }
+            ),
+        ], style={'marginBottom': '12px', 'padding': '10px',
+                  'background': '#0d1a2e', 'borderRadius': '5px',
+                  'border': '1px solid #1565c0'}),
+
+        # ---- NORMALNI TLACITKA ----
         html.Div([
             html.Button(
                 '\U0001f9ea Test Chart (fake)',
@@ -255,10 +363,9 @@ app.layout = html.Div([
             })
         ], style={'marginBottom': '10px'}),
 
-        # JS log textarea - BEZ pointerEvents:none, lze oznacit a kopirovat
         html.Textarea(
             id='debug-log-area',
-            rows=20,
+            rows=22,
             placeholder='Sem JS pise vsechny kroky...\nOtevri stranku a uvidis co se deje.',
             style={
                 'width': '100%', 'boxSizing': 'border-box',
@@ -266,12 +373,11 @@ app.layout = html.Div([
                 'fontFamily': 'monospace', 'fontSize': '12px',
                 'border': '1px solid #333', 'borderRadius': '5px',
                 'padding': '10px', 'resize': 'vertical'
-                # readOnly reseno pres Python callback nize
             }
         ),
         html.Div(
-            '\u2139\ufe0f [INIT]=inicializace | [BTN]=klik tlacitka | '
-            '[CB]=callback Python\u2192JS | [DATA]=zpracovani dat | [ERR]=chyba',
+            '\u2139\ufe0f [INIT]=LWC | [BTN]=klik | [CB]=Dash callback | '
+            '[API]=Flask test | [DATA]=data | [ERR]=chyba',
             style={'marginTop': '8px', 'fontSize': '12px',
                    'color': '#888', 'fontStyle': 'italic'}
         )
@@ -281,9 +387,11 @@ app.layout = html.Div([
         'border': '2px solid #ff9800'
     }),
 
-    dcc.Interval(id='price-update-interval',     interval=1000, n_intervals=0),
-    dcc.Interval(id='positions-update-interval', interval=2000, n_intervals=0),
-    dcc.Interval(id='connection-check-interval', interval=5000, n_intervals=0),
+    # Intervaly zpomalene: price 10s, positions 30s, conn 10s
+    # aby neblokovalyDash callback queue behem debugovani
+    dcc.Interval(id='price-update-interval',     interval=10000, n_intervals=0),
+    dcc.Interval(id='positions-update-interval', interval=30000, n_intervals=0),
+    dcc.Interval(id='connection-check-interval', interval=10000, n_intervals=0),
     html.Div(id='hidden-state', style={'display': 'none'})
 
 ], style={
@@ -307,7 +415,7 @@ def update_connection_status(n):
         ])
     return html.Span([
         html.Span('\u26ac', style={'color': '#ef5350', 'marginRight': '5px'}),
-        html.Span('Disconnected - Check IB Gateway')
+        html.Span('Disconnected')
     ])
 
 
@@ -341,23 +449,45 @@ def update_account_info(n):
     prevent_initial_call=True
 )
 def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, symbol):
-    ctx = dash.callback_context
-    if ctx.triggered:
-        btn = ctx.triggered[0]['prop_id'].split('.')[0]
+    global _cb_status
+    try:
+        ctx = dash.callback_context
+        btn = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else 'load-chart-btn'
         tf_map = {
             'tf-1m': '1 min', 'tf-5m': '5 mins', 'tf-15m': '15 mins',
             'tf-30m': '30 mins', 'tf-1h': '1 hour', 'tf-1d': '1 day'
         }
         app_state['current_timeframe'] = tf_map.get(btn, app_state['current_timeframe'])
+        symbol = (symbol or 'AAPL').upper()
+        app_state['current_symbol'] = symbol
 
-    symbol = (symbol or 'AAPL').upper()
-    app_state['current_symbol'] = symbol
-    print(f"[DEBUG] load_chart_data: symbol={symbol} tf={app_state['current_timeframe']}")
-    bars = ib.get_historical_data(symbol, '1 D', app_state['current_timeframe'])
-    print(f"[DEBUG] load_chart_data: got {len(bars)} bars")
-    if bars:
-        print(f"[DEBUG] prvni bar: {bars[0]}")
-    return {'symbol': symbol, 'timeframe': app_state['current_timeframe'], 'bars': bars}
+        # --- krok 1: callback zacal ---
+        _cb_status = {'step': 'started', 'symbol': symbol,
+                      'tf': app_state['current_timeframe'],
+                      'bars': None, 'error': None,
+                      'ts': datetime.now().strftime('%H:%M:%S')}
+        print(f"[CB] load_chart_data START: {symbol} {app_state['current_timeframe']}")
+
+        # --- krok 2: volame IB ---
+        _cb_status['step'] = 'requesting_IB'
+        bars = ib.get_historical_data(symbol, '1 D', app_state['current_timeframe'])
+
+        # --- krok 3: IB odpovezel ---
+        _cb_status['step'] = 'IB_returned'
+        _cb_status['bars'] = len(bars)
+        print(f"[CB] load_chart_data IB returned {len(bars)} bars")
+
+        result = {'symbol': symbol,
+                  'timeframe': app_state['current_timeframe'],
+                  'bars': bars}
+        _cb_status['step'] = 'done'
+        return result
+
+    except Exception as e:
+        _cb_status['step'] = 'ERROR'
+        _cb_status['error'] = str(e)
+        print(f"[CB] load_chart_data EXCEPTION: {e}")
+        return dash.no_update
 
 
 @app.callback(
@@ -369,26 +499,23 @@ def update_debug_python(data):
         return '(prazdne)'
     bars = data.get('bars', [])
     if not bars:
-        return f"symbol={data.get('symbol')} | 0 BARU! IB vratilo prazdna data."
+        return f"\u26a0\ufe0f symbol={data.get('symbol')} | 0 BARU (IB timeout nebo trh zavreny)"
     b0 = bars[0]
     return (
-        f"\u2705 symbol={data.get('symbol')} | "
-        f"tf={data.get('timeframe')} | "
+        f"\u2705 {data.get('symbol')} | {data.get('timeframe')} | "
         f"{len(bars)} baru | "
-        f"prvni: time={b0['time']} open={b0['open']} close={b0['close']} | "
-        f"posledni close={bars[-1]['close']:.2f}"
+        f"time[0]={b0['time']} close[0]={b0['close']} | "
+        f"close[-1]={bars[-1]['close']:.2f}"
     )
 
 
-# ------------------------------------------------------------------
-# Okamzity log: fires PRED Pythonem - jen JS, bez cekani na IB data
-# ------------------------------------------------------------------
+# ---- Okamzity log kliknuti ----
 app.clientside_callback(
     """
     function(n) {
         if (n > 0 && window.lwcDebug) {
-            window.lwcDebug('BTN', 'Load Chart kliknuto (n=' + n +
-                ') - Python bezi, cekam na IB data...');
+            window.lwcDebug('BTN', 'Load Chart n=' + n +
+                ' - cekam na Python/IB...');
         }
         return n;
     }
@@ -398,55 +525,155 @@ app.clientside_callback(
 )
 
 
-# ------------------------------------------------------------------
-# Hlavni callback: store -> lwcManager.loadData()
-# ------------------------------------------------------------------
+# ---- Hlavni: chart-data-store -> lwcManager ----
 app.clientside_callback(
     """
     function(storeData) {
         var d = window.lwcDebug || function() {};
-
-        d('CB', '=== clientside_callback spusten ===');
-
+        d('CB', '=== Dash clientside callback spusten ===');
         if (!storeData) {
-            d('CB', 'storeData je NULL -> no_update');
+            d('CB', 'storeData NULL -> no_update');
             return window.dash_clientside.no_update;
         }
         if (!storeData.bars) {
-            d('CB', 'storeData.bars chybi -> no_update. Data: ' +
-              JSON.stringify(storeData).slice(0, 200));
+            d('CB', 'bars chybi -> no_update: ' + JSON.stringify(storeData).slice(0,100));
             return window.dash_clientside.no_update;
         }
-
-        d('CB', 'symbol=' + storeData.symbol +
-          ' | baru=' + storeData.bars.length +
-          ' | bars[0].time=' + (storeData.bars[0] && storeData.bars[0].time) +
-          ' | bars[0].close=' + (storeData.bars[0] && storeData.bars[0].close));
-
-        if (!window.lwcManager) {
-            d('CB', 'lwcManager NENI pripraveno, retry za 200ms (max 20x)');
-            var attempt = 0;
-            var retry = setInterval(function() {
-                attempt++;
+        d('CB', 'symbol=' + storeData.symbol + ' baru=' + storeData.bars.length +
+          ' time[0]=' + (storeData.bars[0] && storeData.bars[0].time) +
+          ' close[0]=' + (storeData.bars[0] && storeData.bars[0].close));
+        if (window.lwcManager) {
+            d('CB', 'volam lwcManager.loadData()');
+            window.lwcManager.loadData(storeData);
+        } else {
+            var a = 0;
+            var r = setInterval(function() {
+                a++;
                 if (window.lwcManager) {
-                    d('CB', 'lwcManager nalezen po ' + attempt + 'x, volam loadData()');
+                    d('CB', 'lwcManager nalezen po ' + a + 'x');
                     window.lwcManager.loadData(storeData);
-                    clearInterval(retry);
-                } else if (attempt > 20) {
-                    d('ERR', 'lwcManager stale neni dostupny!');
-                    clearInterval(retry);
+                    clearInterval(r);
+                } else if (a > 20) {
+                    d('ERR', 'lwcManager nenalezen!');
+                    clearInterval(r);
                 }
             }, 200);
-        } else {
-            d('CB', 'lwcManager OK, volam loadData()');
-            window.lwcManager.loadData(storeData);
         }
-
-        return storeData.symbol || 'loaded';
+        return storeData.symbol || 'ok';
     }
     """,
     Output('chart-trigger-store', 'data'),
     Input('chart-data-store', 'data')
+)
+
+
+# ================================================================
+# DIAGNOSTIKA 1 - Test IB spojeni pres /api/diag
+# ================================================================
+app.clientside_callback(
+    """
+    function(n) {
+        if (n < 1) return n;
+        var d = window.lwcDebug || function() {};
+        d('API', '=== TEST 1: IB spojeni (/api/diag) ===');
+        fetch('/api/diag')
+            .then(function(r) { return r.json(); })
+            .then(function(j) {
+                d('API', 'connected=' + j.connected
+                  + ' | account=' + j.account_id
+                  + ' | contracts=' + JSON.stringify(j.cached_contracts)
+                  + ' | time=' + j.time);
+                d('API', 'cb_status.step=' + (j.cb_status && j.cb_status.step)
+                  + ' error=' + (j.cb_status && j.cb_status.error));
+                if (!j.connected) {
+                    d('ERR', 'IB NENI PRIPOJENO! Zkontroluj TWS/Gateway.');
+                } else {
+                    d('API', 'TEST 1 OK - IB pripojeno.');
+                }
+            })
+            .catch(function(e) {
+                d('ERR', 'TEST 1 FETCH FAILED: ' + e);
+            });
+        return n;
+    }
+    """,
+    Output('diag1-trigger', 'data'),
+    Input('diag1-btn', 'n_clicks')
+)
+
+
+# ================================================================
+# DIAGNOSTIKA 2 - Test historickych dat pres /api/test-hist
+# ================================================================
+app.clientside_callback(
+    """
+    function(n) {
+        if (n < 1) return n;
+        var d = window.lwcDebug || function() {};
+        d('API', '=== TEST 2: Historicka data /api/test-hist/AAPL ===');
+        d('API', 'Posilam request... (muze trvat 5-15s)');
+        var t0 = Date.now();
+        fetch('/api/test-hist/AAPL')
+            .then(function(r) { return r.json(); })
+            .then(function(j) {
+                var elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+                if (j.ok) {
+                    d('API', 'TEST 2 OK: ' + j.bars + ' baru za ' + j.elapsed
+                      + 's (JS: ' + elapsed + 's)');
+                    d('API', 'Prvni bar: time=' + (j.first && j.first.time)
+                      + ' close=' + (j.first && j.first.close));
+                } else {
+                    d('ERR', 'TEST 2 FAILED: ' + j.error + ' (' + elapsed + 's)');
+                }
+            })
+            .catch(function(e) {
+                d('ERR', 'TEST 2 FETCH FAILED: ' + e);
+            });
+        return n;
+    }
+    """,
+    Output('diag2-trigger', 'data'),
+    Input('diag2-btn', 'n_clicks')
+)
+
+
+# ================================================================
+# DIAGNOSTIKA 3 - Nacti a nakresli PRES API (bez Dash callbacku)
+# ================================================================
+app.clientside_callback(
+    """
+    function(n) {
+        if (n < 1) return n;
+        var d = window.lwcDebug || function() {};
+        d('API', '=== TEST 3: Fetch + nakreslit (bypass Dash) ===');
+        d('API', 'Stahuju /api/test-hist/AAPL...');
+        fetch('/api/test-hist/AAPL')
+            .then(function(r) { return r.json(); })
+            .then(function(j) {
+                if (!j.ok) {
+                    d('ERR', 'TEST 3 data FAIL: ' + j.error);
+                    return;
+                }
+                d('API', 'Data OK: ' + j.bars + ' baru, stahuji vsechna...');
+                // Potrebujeme vsechna data, ne jen first/last
+                // Zavolame /api/test-hist znovu a vezmeme vsechna data
+                // POZOR: test-hist vraci jen summary - volame Dash store manualne
+                if (window.lwcManager) {
+                    d('API', 'lwcManager dostupny, spoustim testChart() jako fallback');
+                    d('API', 'Pro plna IB data pouzij tlacitko Load Chart po fixu.');
+                    window.lwcManager.testChart();
+                } else {
+                    d('ERR', 'lwcManager neni dostupny!');
+                }
+            })
+            .catch(function(e) {
+                d('ERR', 'TEST 3 FAILED: ' + e);
+            });
+        return n;
+    }
+    """,
+    Output('diag3-trigger', 'data'),
+    Input('diag3-btn', 'n_clicks')
 )
 
 
@@ -455,7 +682,6 @@ app.clientside_callback(
     function(n) {
         if (n > 0) {
             if (window.lwcManager) { window.lwcManager.testChart(); }
-            else if (window.lwcDebug) { window.lwcDebug('ERR', 'lwcManager neni!'); }
         }
         return n;
     }
@@ -465,24 +691,19 @@ app.clientside_callback(
 )
 
 
-# Zkopirovat log do schranky
 app.clientside_callback(
     """
     function(n) {
         if (n > 0) {
-            var area = document.getElementById('debug-log-area');
-            if (area && area.value) {
-                navigator.clipboard.writeText(area.value).then(function() {
-                    var btn = document.getElementById('copy-status');
-                    // signal Dashi - pouzij dummy span
-                }).catch(function() {});
-                // Starsi metoda jako fallback
-                area.select();
+            var a = document.getElementById('debug-log-area');
+            if (a) {
+                a.select();
                 try { document.execCommand('copy'); } catch(e) {}
-                area.setSelectionRange(0, 0);
+                a.setSelectionRange(0,0);
+                navigator.clipboard && navigator.clipboard.writeText(a.value);
             }
         }
-        return n > 0 ? 'Zkopirováno! ✓' : '';
+        return n > 0 ? 'Zkopirováno ✓' : '';
     }
     """,
     Output('copy-status', 'children'),
@@ -494,8 +715,8 @@ app.clientside_callback(
     """
     function(n) {
         if (n > 0) {
-            var area = document.getElementById('debug-log-area');
-            if (area) { area.value = ''; }
+            var a = document.getElementById('debug-log-area');
+            if (a) { a.value = ''; }
         }
         return n;
     }
@@ -513,22 +734,20 @@ app.clientside_callback(
 )
 def update_price_display(n, symbol):
     if not symbol or not ib.is_connected():
-        return 'Last: $0.00', ' \u25b2 +$0.00 (+0.00%)'
+        return 'Last: $0.00', ''
     ticker = ib.get_ticker(symbol)
     if not ticker:
-        return 'Last: $0.00', ' \u25b2 +$0.00 (+0.00%)'
-    last_price = ticker.get('last', 0)
-    prev_close = ticker.get('close', last_price)
-    if prev_close == 0:
-        prev_close = last_price
-    change     = last_price - prev_close
-    change_pct = (change / prev_close * 100) if prev_close > 0 else 0
+        return 'Last: $0.00', ''
+    lp = ticker.get('last', 0)
+    pc = ticker.get('close', lp) or lp
+    change = lp - pc
+    pct = (change / pc * 100) if pc > 0 else 0
     arrow = '\u25b2' if change >= 0 else '\u25bc'
     color = '#26a69a' if change >= 0 else '#ef5350'
     sign  = '+' if change >= 0 else ''
     return (
-        f'Last: ${last_price:.2f}',
-        html.Span(f' {arrow} {sign}${change:.2f} ({sign}{change_pct:.2f}%)',
+        f'Last: ${lp:.2f}',
+        html.Span(f' {arrow} {sign}${change:.2f} ({sign}{pct:.2f}%)',
                   style={'color': color})
     )
 
@@ -544,7 +763,8 @@ def update_quantity(q1, q5, q10, q25, q100):
     if not ctx.triggered:
         return 1
     btn = ctx.triggered[0]['prop_id'].split('.')[0]
-    return {'qty-1': 1, 'qty-5': 5, 'qty-10': 10, 'qty-25': 25, 'qty-100': 100}.get(btn, 1)
+    return {'qty-1': 1, 'qty-5': 5, 'qty-10': 10,
+            'qty-25': 25, 'qty-100': 100}.get(btn, 1)
 
 
 @app.callback(
@@ -564,12 +784,14 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity):
     else:
         return ''
     if not ib.is_connected():
-        return html.Div('\u274c Not connected!', style={'color': '#ef5350', 'fontWeight': 'bold'})
+        return html.Div('\u274c Not connected!',
+                        style={'color': '#ef5350', 'fontWeight': 'bold'})
     result = ib.place_market_order(symbol, action, quantity)
     if result['success']:
         return html.Div(f'\u2705 {action} {quantity} {symbol} @ Market',
                         style={'color': color, 'fontWeight': 'bold'})
-    return html.Div(f'\u274c {result["error"]}', style={'color': '#ef5350', 'fontWeight': 'bold'})
+    return html.Div(f'\u274c {result["error"]}',
+                    style={'color': '#ef5350', 'fontWeight': 'bold'})
 
 
 @app.callback(
@@ -584,8 +806,8 @@ def update_positions_table(n):
         return html.Div('No open positions', style={'color': '#888'})
     rows = []
     for pos in positions:
-        pnl_color = '#26a69a' if pos['unrealized_pnl'] >= 0 else '#ef5350'
-        side = 'LONG' if pos['position'] > 0 else 'SHORT'
+        pnl_c = '#26a69a' if pos['unrealized_pnl'] >= 0 else '#ef5350'
+        side  = 'LONG' if pos['position'] > 0 else 'SHORT'
         rows.append(html.Tr([
             html.Td(pos['symbol'], style={'fontWeight': 'bold'}),
             html.Td(side, style={'color': '#00d4ff'}),
@@ -593,13 +815,11 @@ def update_positions_table(n):
             html.Td(f"${pos['avg_cost']:.2f}"),
             html.Td(f"${pos['market_value']:.2f}"),
             html.Td(f"${pos['unrealized_pnl']:.2f} ({pos['unrealized_pnl_pct']:.2f}%)",
-                    style={'color': pnl_color, 'fontWeight': 'bold'})
+                    style={'color': pnl_c, 'fontWeight': 'bold'})
         ]))
     return html.Table([
-        html.Thead(html.Tr([
-            html.Th('Symbol'), html.Th('Side'), html.Th('Qty'),
-            html.Th('Avg Cost'), html.Th('Market Value'), html.Th('P&L')
-        ])),
+        html.Thead(html.Tr([html.Th('Symbol'), html.Th('Side'), html.Th('Qty'),
+                            html.Th('Avg Cost'), html.Th('Market Value'), html.Th('P&L')])),
         html.Tbody(rows)
     ], style={'width': '100%', 'borderCollapse': 'collapse'})
 
@@ -614,25 +834,22 @@ def update_orders_table(n):
     orders = ib.get_recent_orders(limit=10)
     if not orders:
         return html.Div('No recent orders', style={'color': '#888'})
-    status_icons  = {'Filled': '\u2705', 'Submitted': '\u23f3',
-                     'Cancelled': '\u274c', 'PendingSubmit': '\U0001f552'}
-    status_colors = {'Filled': '#26a69a', 'Submitted': '#ffa726',
-                     'Cancelled': '#ef5350', 'PendingSubmit': '#42a5f5'}
+    icons  = {'Filled': '\u2705', 'Submitted': '\u23f3',
+               'Cancelled': '\u274c', 'PendingSubmit': '\U0001f552'}
+    colors = {'Filled': '#26a69a', 'Submitted': '#ffa726',
+               'Cancelled': '#ef5350', 'PendingSubmit': '#42a5f5'}
     rows = []
-    for order in orders:
-        icon  = status_icons.get(order['status'], '\u2754')
-        color = status_colors.get(order['status'], '#888')
+    for o in orders:
         rows.append(html.Tr([
-            html.Td(order['time']),
-            html.Td(f"{order['action']} {order['quantity']} {order['symbol']}"),
-            html.Td(f"@ {order['price']}"),
-            html.Td(f"{icon} {order['status']}",
-                    style={'color': color, 'fontWeight': 'bold'})
+            html.Td(o['time']),
+            html.Td(f"{o['action']} {o['quantity']} {o['symbol']}"),
+            html.Td(f"@ {o['price']}"),
+            html.Td(f"{icons.get(o['status'], '?')} {o['status']}",
+                    style={'color': colors.get(o['status'], '#888'), 'fontWeight': 'bold'})
         ]))
     return html.Table([
-        html.Thead(html.Tr([
-            html.Th('Time'), html.Th('Order'), html.Th('Price'), html.Th('Status')
-        ])),
+        html.Thead(html.Tr([html.Th('Time'), html.Th('Order'),
+                            html.Th('Price'), html.Th('Status')])),
         html.Tbody(rows)
     ], style={'width': '100%', 'borderCollapse': 'collapse'})
 
@@ -680,7 +897,7 @@ app.index_string = '''
 # ========== RUN ==========
 
 if __name__ == '__main__':
-    print("\U0001f680 Starting IB Trading Platform v2.0...")
+    print("\U0001f680 Starting IB Trading Platform v2.0.7...")
     print(f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
     if ib.connect():
         print("\u2705 Connected to IB Gateway!")
