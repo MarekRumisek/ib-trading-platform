@@ -1,9 +1,9 @@
 """IB Trading Platform - Main Dash Application
 
-Version: 2.4.0
-  - /api/diag/tick/<symbol>  - plna diagnostika tick dat
-  - Tick Diag button v debug panelu
-  - _TickSubscriber: bid/ask price fallback, raw data exposure
+Version: 2.6.0
+  - /api/diag/tick/<symbol>  - plna diagnostika vcetne IB erroru
+  - /api/test/snapshot/<sym> - testuje reqTickersAsync primo
+  - _TickSubscriber: auto-fallback streaming->snapshot
 """
 
 import dash
@@ -52,34 +52,92 @@ def get_tick(symbol):
 
 @server.route('/api/diag/tick/<symbol>')
 def api_diag_tick(symbol):
-    """Plna diagnostika _TickSubscriber pro dany symbol."""
     sym = symbol.upper()
     ts  = ib._tick_sub
     return jsonify({
-        'symbol':            sym,
+        'symbol':             sym,
         'tick_sub_connected': ts.is_connected,
-        'iterations':        ts.iterations,
-        'mdt':               ts._mdt,
+        'iterations':         ts.iterations,
+        'mdt':                ts._mdt,
+        'mode':               ts.mode,
         'subscribed_symbols': ts.subscribed_symbols,
-        'pending':           list(ts._pending),
-        'latest':            ts._latest.get(sym, {}),
-        'raw_fields':        ts.get_raw_data(sym),
-        'time':              datetime.now().strftime('%H:%M:%S')
+        'pending':            list(ts._pending),
+        'latest':             ts._latest.get(sym, {}),
+        'raw_fields':         ts.get_raw_data(sym),
+        'ib_errors':          ts.get_last_errors(),  # <- KLIC: IB chyby
+        'time':               datetime.now().strftime('%H:%M:%S')
     })
+
+
+@server.route('/api/test/snapshot/<symbol>')
+def api_test_snapshot(symbol):
+    """Testuje reqTickersAsync primo - BYPASS _TickSubscriber.
+    Pouzivej pro diagnostiku kdyz streaming nefunguje."""
+    import asyncio
+    from ib_async import IB, Stock
+
+    sym    = symbol.upper()
+    result = {}
+
+    async def _do_snapshot():
+        ib_test = IB()
+        errors  = []
+        def on_err(reqId, code, msg, c):
+            errors.append(f"[{code}] {msg}")
+        ib_test.errorEvent += on_err
+        try:
+            await ib_test.connectAsync(
+                config.IB_HOST, config.IB_PORT,
+                clientId=config.IB_CLIENT_ID + 9  # dedikovanej testovaci clientId
+            )
+            ib_test.reqMarketDataType(3)
+            contract = Stock(sym, 'SMART', 'USD')
+            await ib_test.qualifyContractsAsync(contract)
+            snaps = await ib_test.reqTickersAsync(contract)
+            if snaps:
+                t = snaps[0]
+                def s(v):
+                    if v is None: return None
+                    if isinstance(v, float) and v != v: return 'NaN'
+                    return v
+                result.update({
+                    'ok':     True,
+                    'symbol': sym,
+                    'conId':  contract.conId,
+                    'last':   s(t.last),
+                    'close':  s(t.close),
+                    'bid':    s(t.bid),
+                    'ask':    s(t.ask),
+                    'volume': s(t.volume),
+                    'errors': errors,
+                    'time':   datetime.now().strftime('%H:%M:%S')
+                })
+            else:
+                result.update({'ok': False, 'error': 'no tickers returned', 'errors': errors})
+        except Exception as e:
+            result.update({'ok': False, 'error': str(e), 'errors': errors})
+        finally:
+            try: ib_test.disconnect()
+            except Exception: pass
+
+    asyncio.run(_do_snapshot())
+    return jsonify(result)
 
 
 @server.route('/api/diag')
 def api_diag():
     return jsonify({
-        'connected':       ib.is_connected(),
-        'account_id':      ib.account_id,
-        'cb_status':       _cb_status,
-        'app_state':       app_state,
+        'connected':   ib.is_connected(),
+        'account_id':  ib.account_id,
+        'cb_status':   _cb_status,
+        'app_state':   app_state,
         'tick_sub': {
             'connected':  ib._tick_sub.is_connected,
             'iterations': ib._tick_sub.iterations,
             'mdt':        ib._tick_sub._mdt,
+            'mode':       ib._tick_sub.mode,
             'subscribed': ib._tick_sub.subscribed_symbols,
+            'ib_errors':  ib._tick_sub.get_last_errors(),
         },
         'time': datetime.now().strftime('%H:%M:%S')
     })
@@ -114,7 +172,6 @@ app_state = {'current_symbol': 'AAPL', 'current_timeframe': '5 mins'}
 # ========== LAYOUT ==========
 
 app.layout = html.Div([
-    # Header
     html.Div([
         html.H1("\U0001f680 IB Trading Platform v2.0",
                 style={'display': 'inline-block', 'margin': 0, 'color': '#00d4ff'}),
@@ -124,7 +181,6 @@ app.layout = html.Div([
               'background': 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
               'borderRadius': '10px', 'marginBottom': '20px'}),
 
-    # Account bar
     html.Div([
         html.Div([html.Span("\U0001f4bc Account: ", style={'fontWeight': 'bold'}),
                   html.Span(id='account-id', children='Connecting...')],
@@ -138,7 +194,6 @@ app.layout = html.Div([
     ], style={'padding': '15px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px', 'fontSize': '16px'}),
 
-    # Symbol + price bar
     html.Div([
         html.Div([
             html.Label('Symbol:', style={'marginRight': '10px', 'fontWeight': 'bold'}),
@@ -165,7 +220,6 @@ app.layout = html.Div([
     ], style={'padding': '15px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
-    # Chart panel
     html.Div([
         html.Div([
             html.Div([
@@ -203,13 +257,13 @@ app.layout = html.Div([
         dcc.Store(id='diag2-trigger'),
         dcc.Store(id='diag3-trigger'),
         dcc.Store(id='diag-tick-trigger'),
+        dcc.Store(id='diag-snap-trigger'),
         dcc.Store(id='active-tf-store', data='tf-5m'),
         dcc.Store(id='tick-enabled-store', data=False),
 
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
-    # Order panel
     html.Div([
         html.H3('\U0001f4e4 Order Entry', style={'marginBottom': '15px'}),
         html.Div([
@@ -279,10 +333,14 @@ app.layout = html.Div([
                         style={'padding': '10px 14px', 'marginRight': '6px',
                                'background': '#1b5e20', 'border': 'none',
                                'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
-            # NOVE: Tick diagnostika
             html.Button('\U0001f50d Tick Diag', id='diag-tick-btn', n_clicks=0,
                         style={'padding': '10px 14px', 'marginRight': '6px',
                                'background': '#4a148c', 'border': 'none',
+                               'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer',
+                               'fontWeight': 'bold'}),
+            html.Button('\U0001f4f8 Snapshot Test', id='diag-snap-btn', n_clicks=0,
+                        style={'padding': '10px 14px', 'marginRight': '6px',
+                               'background': '#b71c1c', 'border': 'none',
                                'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer',
                                'fontWeight': 'bold'}),
         ], style={'marginBottom': '12px', 'padding': '10px',
@@ -313,7 +371,7 @@ app.layout = html.Div([
                    'border': '1px solid #333', 'borderRadius': '5px',
                    'padding': '10px', 'resize': 'vertical'}
         ),
-        html.Div('[INIT] [BTN] [CB] [TF] [TICK] [API] [DATA] [ERR]',
+        html.Div('[INIT] [BTN] [CB] [TF] [TICK] [API] [DATA] [ERR] | v2.6',
                  style={'marginTop': '8px', 'fontSize': '12px', 'color': '#888'})
     ], style={'padding': '20px', 'background': '#1a1a2e',
               'borderRadius': '8px', 'marginBottom': '20px',
@@ -421,7 +479,6 @@ app.clientside_callback(
     Output('load-click-log', 'data'), Input('load-chart-btn', 'n_clicks')
 )
 
-# TICK toggle
 app.clientside_callback(
     """
     function(n, currentEnabled) {
@@ -443,7 +500,7 @@ app.clientside_callback(
     State('tick-enabled-store', 'data')
 )
 
-# TICK DIAG
+# Tick Diag
 app.clientside_callback(
     """
     function(n) {
@@ -455,33 +512,28 @@ app.clientside_callback(
         fetch('/api/diag/tick/' + sym)
             .then(function(r) { return r.json(); })
             .then(function(j) {
-                d('API', 'tick_sub_connected=' + j.tick_sub_connected
-                    + '  iterations=' + j.iterations
-                    + '  mdt=' + j.mdt);
-                d('API', 'subscribed_symbols=' + JSON.stringify(j.subscribed_symbols));
-                d('API', 'pending=' + JSON.stringify(j.pending));
+                d('API', 'connected=' + j.tick_sub_connected
+                    + '  iter=' + j.iterations
+                    + '  mdt='  + j.mdt
+                    + '  mode=' + j.mode);
+                d('API', 'subscribed=' + JSON.stringify(j.subscribed_symbols));
                 var lx = j.latest;
                 d('API', 'LATEST: price=' + (lx.price||0)
-                    + '  last='   + (lx.last||0)
-                    + '  close='  + (lx.close||0)
-                    + '  bid='    + (lx.bid||0)
-                    + '  ask='    + (lx.ask||0));
+                    + '  last=' + (lx.last||0) + '  close=' + (lx.close||0)
+                    + '  bid='  + (lx.bid||0)  + '  ask='   + (lx.ask||0));
                 var rf = j.raw_fields;
                 if (rf.error) {
-                    d('ERR', 'RAW: ' + rf.error
-                        + ' | subscribed=' + JSON.stringify(rf.subscribed)
-                        + ' | pending='    + JSON.stringify(rf.pending));
+                    d('ERR', 'RAW: ' + rf.error);
                 } else {
-                    d('API', 'RAW: last='  + rf.last
-                        + '  close=' + rf.close
-                        + '  bid='   + rf.bid
-                        + '  ask='   + rf.ask
-                        + '  halted='+ rf.halted);
-                    d('API', 'RAW: open=' + rf.open
-                        + '  high='  + rf.high
-                        + '  low='   + rf.low
-                        + '  vol='   + rf.volume
-                        + '  midpoint=' + rf._midpoint);
+                    d('API', 'RAW: last=' + rf.last + '  close=' + rf.close
+                        + '  bid=' + rf.bid + '  ask=' + rf.ask);
+                }
+                // IB ERRORY - nejdulezitejsi!
+                if (j.ib_errors && j.ib_errors.length > 0) {
+                    d('ERR', '=== IB ERRORY (' + j.ib_errors.length + ') ===');
+                    j.ib_errors.forEach(function(e) { d('ERR', 'IB: ' + e); });
+                } else {
+                    d('API', 'IB errory: zadne');
                 }
             })
             .catch(function(e) { d('ERR', 'TICK DIAG FAIL: ' + e); });
@@ -490,6 +542,37 @@ app.clientside_callback(
     """,
     Output('diag-tick-trigger', 'data'),
     Input('diag-tick-btn', 'n_clicks')
+)
+
+# Snapshot Test
+app.clientside_callback(
+    """
+    function(n) {
+        if (n < 1) return n;
+        var d = window.lwcDebug || function() {};
+        var sym = (document.getElementById('symbol-input') &&
+                   document.getElementById('symbol-input').value || 'AAPL').toUpperCase();
+        d('API', '=== SNAPSHOT TEST: ' + sym + ' (ceka ~3s...) ===');
+        fetch('/api/test/snapshot/' + sym)
+            .then(function(r) { return r.json(); })
+            .then(function(j) {
+                if (j.ok) {
+                    d('API', 'SNAP OK: last=' + j.last + '  close=' + j.close
+                        + '  bid=' + j.bid + '  ask=' + j.ask
+                        + '  vol=' + j.volume + '  conId=' + j.conId);
+                } else {
+                    d('ERR', 'SNAP FAIL: ' + j.error);
+                }
+                if (j.errors && j.errors.length > 0) {
+                    d('ERR', 'Snapshot IB errory: ' + JSON.stringify(j.errors));
+                }
+            })
+            .catch(function(e) { d('ERR', 'SNAP TEST FAIL: ' + e); });
+        return n;
+    }
+    """,
+    Output('diag-snap-trigger', 'data'),
+    Input('diag-snap-btn', 'n_clicks')
 )
 
 # Loading indikator
@@ -511,7 +594,6 @@ app.clientside_callback(
      Input('load-chart-btn', 'n_clicks')]
 )
 
-# TF aktivni stav
 app.clientside_callback(
     """
     function(n1m, n5m, n15m, n30m, n1h, n1d) {
@@ -546,7 +628,6 @@ app.clientside_callback(
     Input('active-tf-store', 'data')
 )
 
-# chart-data-store -> lwcManager
 app.clientside_callback(
     """
     function(storeData) {
@@ -575,9 +656,8 @@ app.clientside_callback(
     Input('chart-data-store', 'data')
 )
 
-# Diagnostika 1-3
 app.clientside_callback(
-    """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};d('API','=== TEST 1: IB spojeni ===');fetch('/api/diag').then(r=>r.json()).then(j=>{d('API','connected='+j.connected+' account='+j.account_id);d('API','tick_sub: connected='+j.tick_sub.connected+' iter='+j.tick_sub.iterations+' mdt='+j.tick_sub.mdt+' syms='+JSON.stringify(j.tick_sub.subscribed));}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
+    """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};d('API','=== TEST 1: IB spojeni ===');fetch('/api/diag').then(r=>r.json()).then(j=>{d('API','connected='+j.connected+' account='+j.account_id);d('API','tick_sub: connected='+j.tick_sub.connected+' iter='+j.tick_sub.iterations+' mdt='+j.tick_sub.mdt+' mode='+j.tick_sub.mode);if(j.tick_sub.ib_errors&&j.tick_sub.ib_errors.length>0){d('ERR','IB errory: '+JSON.stringify(j.tick_sub.ib_errors));}}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
     Output('diag1-trigger', 'data'), Input('diag1-btn', 'n_clicks')
 )
 app.clientside_callback(
@@ -774,7 +854,7 @@ app.index_string = '''
 # ========== RUN ==========
 
 if __name__ == '__main__':
-    print("\U0001f680 Starting IB Trading Platform v2.4.0...")
+    print("\U0001f680 Starting IB Trading Platform v2.6.0...")
     print(f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
     if ib.connect():
         print("\u2705 Connected to IB Gateway!")
