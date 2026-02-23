@@ -1,9 +1,9 @@
 """IB Trading Platform - Main Dash Application with Lightweight Charts
 
-Version: 2.0.9
-  - Loading indikator nad grafem (okamzita vizualni zpetna vazba)
-  - Fix: chart-data-store callback kontroluje bars.length > 0
-  - _HistWorker: fresh connection + drain queue (viz ib_connector.py)
+Version: 2.1.0
+  - TICK ON/OFF toggle (defaultne OFF)
+  - Tick ridi lwcManager.setTickEnabled() - bez noveho Dash callbacku
+  - CSS tridy tick-on / tick-off pro vizualni stav tlacitka
 """
 
 import dash
@@ -163,28 +163,41 @@ app.layout = html.Div([
 
     # Chart panel
     html.Div([
-        # TF buttony
+        # TF buttony + TICK toggle vpravo
         html.Div([
-            html.Button('1m',  id='tf-1m',  n_clicks=0, className='tf-btn'),
-            html.Button('5m',  id='tf-5m',  n_clicks=0, className='tf-btn tf-active'),
-            html.Button('15m', id='tf-15m', n_clicks=0, className='tf-btn'),
-            html.Button('30m', id='tf-30m', n_clicks=0, className='tf-btn'),
-            html.Button('1h',  id='tf-1h',  n_clicks=0, className='tf-btn'),
-            html.Button('1D',  id='tf-1d',  n_clicks=0, className='tf-btn'),
+            # Vlevo: TF buttony
+            html.Div([
+                html.Button('1m',  id='tf-1m',  n_clicks=0, className='tf-btn'),
+                html.Button('5m',  id='tf-5m',  n_clicks=0, className='tf-btn tf-active'),
+                html.Button('15m', id='tf-15m', n_clicks=0, className='tf-btn'),
+                html.Button('30m', id='tf-30m', n_clicks=0, className='tf-btn'),
+                html.Button('1h',  id='tf-1h',  n_clicks=0, className='tf-btn'),
+                html.Button('1D',  id='tf-1d',  n_clicks=0, className='tf-btn'),
+                # Loading indikator
+                html.Span(
+                    id='chart-loading-indicator', children='',
+                    style={'marginLeft': '15px', 'fontSize': '13px',
+                           'color': '#ffa726', 'fontStyle': 'italic',
+                           'verticalAlign': 'middle'}
+                )
+            ], style={'display': 'inline-block'}),
 
-            # Loading indikator - okamzity vizualni feedback
-            html.Span(
-                id='chart-loading-indicator',
-                children='',
-                style={
-                    'marginLeft': '20px',
-                    'fontSize': '13px',
-                    'color': '#ffa726',
-                    'fontStyle': 'italic',
-                    'verticalAlign': 'middle'
-                }
-            )
-        ], style={'marginBottom': '10px'}),
+            # Vpravo: TICK toggle
+            html.Div([
+                html.Span(
+                    '\u26a0\ufe0f 15min delay na demo',
+                    style={'fontSize': '11px', 'color': '#666',
+                           'marginRight': '10px', 'verticalAlign': 'middle'}
+                ),
+                html.Button(
+                    '\u26a1 TICK: OFF',
+                    id='tick-toggle-btn',
+                    n_clicks=0,
+                    className='tick-btn tick-off'
+                )
+            ], style={'display': 'inline-block', 'float': 'right'})
+
+        ], style={'marginBottom': '10px', 'overflow': 'hidden'}),
 
         html.Div(
             id='lwc-container',
@@ -202,6 +215,7 @@ app.layout = html.Div([
         dcc.Store(id='diag2-trigger'),
         dcc.Store(id='diag3-trigger'),
         dcc.Store(id='active-tf-store', data='tf-5m'),
+        dcc.Store(id='tick-enabled-store', data=False),
 
     ], style={
         'padding': '20px', 'background': '#2d2d3a',
@@ -254,14 +268,12 @@ app.layout = html.Div([
         'borderRadius': '8px', 'marginBottom': '20px'
     }),
 
-    # Positions
     html.Div([
         html.H3('\U0001f4ca Open Positions', style={'marginBottom': '15px'}),
         html.Div(id='positions-table')
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
-    # Orders
     html.Div([
         html.H3('\U0001f4cb Recent Orders', style={'marginBottom': '15px'}),
         html.Div(id='orders-table')
@@ -287,7 +299,7 @@ app.layout = html.Div([
                         style={'padding': '10px 16px', 'marginRight': '8px',
                                'background': '#1565c0', 'border': 'none',
                                'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
-            html.Button('2\ufe0f\u20e3 Hist. data AAPL', id='diag2-btn', n_clicks=0,
+            html.Button('2\ufe0f\u20e3 Hist. data', id='diag2-btn', n_clicks=0,
                         style={'padding': '10px 16px', 'marginRight': '8px',
                                'background': '#6a1599', 'border': 'none',
                                'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
@@ -323,7 +335,7 @@ app.layout = html.Div([
                    'border': '1px solid #333', 'borderRadius': '5px',
                    'padding': '10px', 'resize': 'vertical'}
         ),
-        html.Div('[INIT] [BTN] [CB] [TF] [API] [DATA] [ERR]',
+        html.Div('[INIT] [BTN] [CB] [TF] [TICK] [API] [DATA] [ERR]',
                  style={'marginTop': '8px', 'fontSize': '12px', 'color': '#888'})
     ], style={'padding': '20px', 'background': '#1a1a2e',
               'borderRadius': '8px', 'marginBottom': '20px',
@@ -448,7 +460,7 @@ def update_debug_python(data):
 
 # ========== CLIENTSIDE CALLBACKS ==========
 
-# --- Okamzity log pro Load Chart ---
+# --- Load Chart log ---
 app.clientside_callback(
     """
     function(n) {
@@ -463,23 +475,50 @@ app.clientside_callback(
 
 
 # ================================================================
-# LOADING INDIKATOR - okamzita zpetna vazba pri kliknuti
-# Zobrazi se ihned po kliknuti, zmizi kdyz data dorazí
+# TICK TOGGLE - ON/OFF
+# Vsechno clientside - Python neni potreba
 # ================================================================
+app.clientside_callback(
+    """
+    function(n, currentEnabled) {
+        var enabled = (n > 0) ? !currentEnabled : currentEnabled;
+
+        if (n > 0) {
+            // Informuj lwcManager
+            if (window.lwcManager) {
+                window.lwcManager.setTickEnabled(enabled);
+            }
+            if (window.lwcDebug) {
+                window.lwcDebug('TICK',
+                    'Tick ' + (enabled ? 'ZAPNUT \u26a1 (15min delay na demo!)' : 'VYPNUT'));
+            }
+        }
+
+        var label = '\u26a1 TICK: ' + (enabled ? 'ON' : 'OFF');
+        var cls   = 'tick-btn ' + (enabled ? 'tick-on' : 'tick-off');
+        return [enabled, label, cls];
+    }
+    """,
+    [Output('tick-enabled-store', 'data'),
+     Output('tick-toggle-btn', 'children'),
+     Output('tick-toggle-btn', 'className')],
+    Input('tick-toggle-btn', 'n_clicks'),
+    State('tick-enabled-store', 'data')
+)
+
+
+# --- Loading indikator ---
 app.clientside_callback(
     """
     function(n1m, n5m, n15m, n30m, n1h, n1d, nLoad) {
         var ctx = window.dash_clientside.callback_context;
-        if (!ctx || !ctx.triggered || ctx.triggered.length === 0)
-            return '';
+        if (!ctx || !ctx.triggered || ctx.triggered.length === 0) return '';
         var tid = ctx.triggered_id || ctx.triggered[0].prop_id.split('.')[0];
         var labels = {
-            'tf-1m': '1m', 'tf-5m': '5m', 'tf-15m': '15m',
-            'tf-30m': '30m', 'tf-1h': '1h', 'tf-1d': '1D',
-            'load-chart-btn': 'Load'
+            'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m',
+            'tf-30m':'30m','tf-1h':'1h','tf-1d':'1D','load-chart-btn':'Load'
         };
-        var lbl = labels[tid] || tid;
-        return '\u23f3 Na\u010d\u00edt\u00e1m ' + lbl + '\u2026';
+        return '\u23f3 Na\u010d\u00edt\u00e1m ' + (labels[tid]||tid) + '\u2026';
     }
     """,
     Output('chart-loading-indicator', 'children'),
@@ -490,9 +529,7 @@ app.clientside_callback(
 )
 
 
-# ================================================================
-# TF BUTTONY - aktivni stav (okamzite, bez cekani na Python)
-# ================================================================
+# --- TF aktivni stav ---
 app.clientside_callback(
     """
     function(n1m, n5m, n15m, n30m, n1h, n1d) {
@@ -501,9 +538,9 @@ app.clientside_callback(
             return window.dash_clientside.no_update;
         var tid = ctx.triggered_id || ctx.triggered[0].prop_id.split('.')[0];
         if (window.lwcDebug) {
-            var labels = {'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m',
-                          'tf-30m':'30m','tf-1h':'1h','tf-1d':'1D'};
-            window.lwcDebug('TF', 'Zmen -> ' + (labels[tid]||tid) + ' (cekam na IB...)');
+            var lbl = {'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m',
+                       'tf-30m':'30m','tf-1h':'1h','tf-1d':'1D'};
+            window.lwcDebug('TF', 'Zmen -> ' + (lbl[tid]||tid) + ' (cekam na IB...)');
         }
         return tid;
     }
@@ -514,7 +551,6 @@ app.clientside_callback(
      Input('tf-1h', 'n_clicks'), Input('tf-1d', 'n_clicks')]
 )
 
-
 app.clientside_callback(
     """
     function(activeTf) {
@@ -524,24 +560,20 @@ app.clientside_callback(
         });
     }
     """,
-    [Output('tf-1m',  'className'),
-     Output('tf-5m',  'className'),
-     Output('tf-15m', 'className'),
-     Output('tf-30m', 'className'),
-     Output('tf-1h',  'className'),
-     Output('tf-1d',  'className')],
+    [Output('tf-1m',  'className'), Output('tf-5m',  'className'),
+     Output('tf-15m', 'className'), Output('tf-30m', 'className'),
+     Output('tf-1h',  'className'), Output('tf-1d',  'className')],
     Input('active-tf-store', 'data')
 )
 
 
-# ---- chart-data-store -> lwcManager + skryj loading ----
+# --- chart-data-store -> lwcManager ---
 app.clientside_callback(
     """
     function(storeData) {
         var d = window.lwcDebug || function() {};
         d('CB', '=== Dash clientside callback spusten ===');
 
-        // Skryj loading indikator - data dorazila (i kdyz prazdna)
         var li = document.getElementById('chart-loading-indicator');
         if (li) li.textContent = '';
 
@@ -550,14 +582,13 @@ app.clientside_callback(
             return window.dash_clientside.no_update;
         }
         if (!storeData.bars || storeData.bars.length === 0) {
-            d('CB', 'bars prazdne (0) -> no_update (trh zavreny?)');
+            d('CB', 'bars prazdne -> no_update (trh zavreny?)');
             return window.dash_clientside.no_update;
         }
 
         d('CB', 'symbol=' + storeData.symbol
           + ' tf=' + storeData.timeframe
           + ' baru=' + storeData.bars.length
-          + ' time[0]=' + storeData.bars[0].time
           + ' close[0]=' + storeData.bars[0].close);
 
         if (window.lwcManager) {
@@ -583,26 +614,24 @@ app.clientside_callback(
 )
 
 
-# ---- Diagnostika ----
+# --- Diagnostika ---
 app.clientside_callback(
     """
     function(n) {
         if (n < 1) return n;
         var d = window.lwcDebug || function() {};
         d('API', '=== TEST 1: IB spojeni ===');
-        fetch('/api/diag').then(function(r){return r.json();}).then(function(j){
-            d('API', 'connected=' + j.connected + ' account=' + j.account_id
-              + ' tf=' + (j.app_state && j.app_state.current_timeframe));
-            d('API', 'cb_status.step=' + (j.cb_status && j.cb_status.step)
-              + ' bars=' + (j.cb_status && j.cb_status.bars));
-            if (!j.connected) d('ERR','IB NENI PRIPOJENO!');
+        fetch('/api/diag').then(r=>r.json()).then(j=>{
+            d('API','connected='+j.connected+' account='+j.account_id
+              +' tf='+(j.app_state&&j.app_state.current_timeframe));
+            d('API','cb='+j.cb_status.step+' bars='+j.cb_status.bars);
+            if(!j.connected) d('ERR','IB NENI PRIPOJENO!');
             else d('API','TEST 1 OK');
-        }).catch(function(e){ d('ERR','FETCH FAIL: '+e); });
+        }).catch(e=>d('ERR','FAIL: '+e));
         return n;
     }
     """,
-    Output('diag1-trigger', 'data'),
-    Input('diag1-btn', 'n_clicks')
+    Output('diag1-trigger', 'data'), Input('diag1-btn', 'n_clicks')
 )
 
 app.clientside_callback(
@@ -610,19 +639,17 @@ app.clientside_callback(
     function(n) {
         if (n < 1) return n;
         var d = window.lwcDebug || function() {};
-        d('API', '=== TEST 2: Historicka data ===');
-        d('API', 'Posilam...');
-        var t0 = Date.now();
-        fetch('/api/test-hist/AAPL').then(function(r){return r.json();}).then(function(j){
-            var el = ((Date.now()-t0)/1000).toFixed(1);
-            if (j.ok) d('API','TEST 2 OK: '+j.bars+' baru za '+j.elapsed+'s');
-            else d('ERR','TEST 2 FAIL: '+j.error+' ('+el+'s)');
-        }).catch(function(e){ d('ERR','FETCH FAIL: '+e); });
+        d('API', 'TEST 2: Hist. data...');
+        var t0=Date.now();
+        fetch('/api/test-hist/AAPL').then(r=>r.json()).then(j=>{
+            var el=((Date.now()-t0)/1000).toFixed(1);
+            if(j.ok) d('API','OK: '+j.bars+' baru za '+j.elapsed+'s');
+            else d('ERR','FAIL: '+j.error+' ('+el+'s)');
+        }).catch(e=>d('ERR','FAIL: '+e));
         return n;
     }
     """,
-    Output('diag2-trigger', 'data'),
-    Input('diag2-btn', 'n_clicks')
+    Output('diag2-trigger', 'data'), Input('diag2-btn', 'n_clicks')
 )
 
 app.clientside_callback(
@@ -630,46 +657,39 @@ app.clientside_callback(
     function(n) {
         if (n < 1) return n;
         var d = window.lwcDebug || function() {};
-        d('API', '=== TEST 3: Fetch + nakreslit ===');
-        fetch('/api/test-hist/AAPL').then(function(r){return r.json();}).then(function(j){
-            if (!j.ok) { d('ERR','Data FAIL: '+j.error); return; }
-            d('API', 'Data OK: '+j.bars+' baru');
-            if (window.lwcManager) window.lwcManager.testChart();
-            else d('ERR','lwcManager neni!');
-        }).catch(function(e){ d('ERR','FETCH FAIL: '+e); });
+        d('API', 'TEST 3: Fetch + nakreslit...');
+        fetch('/api/test-hist/AAPL').then(r=>r.json()).then(j=>{
+            if(!j.ok){d('ERR','Fail: '+j.error);return;}
+            d('API','OK: '+j.bars+' baru');
+            if(window.lwcManager) window.lwcManager.testChart();
+        }).catch(e=>d('ERR','FAIL: '+e));
         return n;
     }
     """,
-    Output('diag3-trigger', 'data'),
-    Input('diag3-btn', 'n_clicks')
+    Output('diag3-trigger', 'data'), Input('diag3-btn', 'n_clicks')
 )
 
 app.clientside_callback(
     """function(n){if(n>0&&window.lwcManager)window.lwcManager.testChart();return n;}""",
-    Output('test-chart-trigger', 'data'),
-    Input('test-chart-btn', 'n_clicks')
+    Output('test-chart-trigger', 'data'), Input('test-chart-btn', 'n_clicks')
 )
 
 app.clientside_callback(
     """
     function(n){
-        if(n>0){
-            var a=document.getElementById('debug-log-area');
+        if(n>0){var a=document.getElementById('debug-log-area');
             if(a){a.select();try{document.execCommand('copy');}catch(e){}
                   a.setSelectionRange(0,0);
-                  navigator.clipboard&&navigator.clipboard.writeText(a.value);}
-        }
+                  navigator.clipboard&&navigator.clipboard.writeText(a.value);}}
         return n>0?'Zkopirov\u00e1no \u2713':'';
     }
     """,
-    Output('copy-status', 'children'),
-    Input('copy-log-btn', 'n_clicks')
+    Output('copy-status', 'children'), Input('copy-log-btn', 'n_clicks')
 )
 
 app.clientside_callback(
     """function(n){if(n>0){var a=document.getElementById('debug-log-area');if(a)a.value='';}return n;}""",
-    Output('clear-log-trigger', 'data'),
-    Input('clear-log-btn', 'n_clicks')
+    Output('clear-log-trigger', 'data'), Input('clear-log-btn', 'n_clicks')
 )
 
 
@@ -781,10 +801,10 @@ def update_orders_table(n):
     orders = ib.get_recent_orders(limit=10)
     if not orders:
         return html.Div('No recent orders', style={'color': '#888'})
-    icons = {'Filled': '\u2705', 'Submitted': '\u23f3',
-             'Cancelled': '\u274c', 'PendingSubmit': '\U0001f552'}
+    icons  = {'Filled': '\u2705', 'Submitted': '\u23f3',
+               'Cancelled': '\u274c', 'PendingSubmit': '\U0001f552'}
     colors = {'Filled': '#26a69a', 'Submitted': '#ffa726',
-              'Cancelled': '#ef5350', 'PendingSubmit': '#42a5f5'}
+               'Cancelled': '#ef5350', 'PendingSubmit': '#42a5f5'}
     rows = []
     for o in orders:
         rows.append(html.Tr([
@@ -824,6 +844,31 @@ app.index_string = '''
             }
             .tf-btn:hover, .qty-btn:hover { background: #4a4a6a; }
             .tf-active { background: #667eea !important; }
+
+            /* TICK toggle button */
+            .tick-btn {
+                padding: 8px 14px;
+                border-radius: 5px;
+                cursor: pointer;
+                font-weight: bold;
+                font-size: 13px;
+                border: 2px solid;
+                transition: all 0.2s;
+            }
+            .tick-off {
+                background: #2d2d3a;
+                border-color: #555;
+                color: #888;
+            }
+            .tick-off:hover { background: #3a3a4a; border-color: #777; color: #aaa; }
+            .tick-on {
+                background: #1b5e20;
+                border-color: #26a69a;
+                color: #26a69a;
+                box-shadow: 0 0 8px #26a69a44;
+            }
+            .tick-on:hover { background: #2e7d32; }
+
             table { border-collapse: collapse; width: 100%; }
             th, td { padding: 12px; text-align: left; border-bottom: 1px solid #3d3d4a; }
             th { background: #3d3d4a; font-weight: bold; color: #00d4ff; }
@@ -845,7 +890,7 @@ app.index_string = '''
 # ========== RUN ==========
 
 if __name__ == '__main__':
-    print("\U0001f680 Starting IB Trading Platform v2.0.9...")
+    print("\U0001f680 Starting IB Trading Platform v2.1.0...")
     print(f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
     if ib.connect():
         print("\u2705 Connected to IB Gateway!")

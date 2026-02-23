@@ -1,14 +1,17 @@
 /**
- * IB Trading Platform - Lightweight Charts Manager v2.0.5
+ * IB Trading Platform - Lightweight Charts Manager v2.1.0
  * =========================================================
- * v2.0.5 - window.lwcDebug exposed globally so clientside_callback
- *          can also write to the debug panel
+ * v2.1.0:
+ *   - Tick polling defaultne OFF (ridi uzivatel tlacitkem)
+ *   - Spravne H/L tracking pro aktualni svicku
+ *   - setTickEnabled(bool) - public API
+ *   - TICK_POLL_MS = 5000 (data jsou 15min delayed na demo uctu)
  */
 (function () {
     'use strict';
 
-    var VERSION         = 'v2.0.5';
-    var TICK_POLL_MS    = 1000;
+    var VERSION         = 'v2.1.0';
+    var TICK_POLL_MS    = 5000;   // 5s staci - data jsou 15min delayed na paper accountu
     var CHART_BG        = '#1e1e2e';
     var GRID_COLOR      = '#3d3d4a';
     var TEXT_COLOR      = '#d1d4dc';
@@ -20,9 +23,12 @@
     var candleSeries    = null;
     var volumeSeries    = null;
     var tickTimer       = null;
+    var tickEnabled     = false;   // defaultne OFF - ridi uzivatel
     var currentSymbol   = null;
     var lastBarTime     = null;
     var lastBarOpen     = null;
+    var lastBarHigh     = null;    // tracking max price od otevreni svicky
+    var lastBarLow      = null;    // tracking min price od otevreni svicky
     var lastBarClose    = null;
     var indicatorSeries = {};
     var container       = null;
@@ -30,8 +36,6 @@
 
     // =================================================================
     // GLOBALNI debug logger
-    // Pise do konzole I do #debug-log-area na strance.
-    // Exposed jako window.lwcDebug aby ho mohly volat i clientside_callback.
     // =================================================================
     function writeDebug(type, msg) {
         var ts   = new Date().toLocaleTimeString('cs-CZ');
@@ -42,12 +46,10 @@
         var area = document.getElementById('debug-log-area');
         if (area) { area.value = line + area.value; }
     }
-
-    // Zpristupni globalne - pouziva i clientside_callback
     window.lwcDebug = writeDebug;
 
     // =================================================================
-    // Placeholder v kontejneru grafu
+    // Placeholder
     // =================================================================
     function showPlaceholder(msg) {
         var c = document.getElementById('lwc-container');
@@ -81,7 +83,7 @@
         }
 
         if (typeof LightweightCharts === 'undefined') {
-            writeDebug('ERR', 'LightweightCharts NENI NACTENA! Zkontroluj CDN v app.py');
+            writeDebug('ERR', 'LightweightCharts NENI NACTENA!');
             showPlaceholder('CHYBA: Lightweight Charts CDN se nenactlo!');
             return;
         }
@@ -152,7 +154,6 @@
 
         bars.sort(function (a, b) { return a.time - b.time; });
 
-        // Zkontroluj format prvniho baru
         var b0 = bars[0];
         writeDebug('DATA', 'Prvni bar: time=' + b0.time + ' (' + typeof b0.time + ')' +
             ' open=' + b0.open + ' high=' + b0.high +
@@ -160,12 +161,8 @@
         writeDebug('DATA', 'Posledni: time=' + bars[bars.length-1].time +
             ' close=' + bars[bars.length-1].close);
 
-        // Zkontroluj ze time je cislo, ne retezec
         if (typeof b0.time !== 'number') {
-            writeDebug('ERR', 'PROBLEM: time je ' + typeof b0.time + ' misto number! Lighthouse Charts odmitne data.');
-        }
-        if (b0.time < 1000000000 || b0.time > 9999999999) {
-            writeDebug('WARN', 'Podezrely timestamp: ' + b0.time + ' (cekame 10-ciferny Unix timestamp)');
+            writeDebug('ERR', 'PROBLEM: time je ' + typeof b0.time + ' misto number!');
         }
 
         try {
@@ -181,15 +178,26 @@
                 };
             }));
 
-            var last     = bars[bars.length - 1];
-            lastBarTime  = last.time;
-            lastBarOpen  = last.open;
-            lastBarClose = last.close;
+            // Uloz posledni svicku pro tick update
+            var last      = bars[bars.length - 1];
+            lastBarTime   = last.time;
+            lastBarOpen   = last.open;
+            lastBarHigh   = last.high;   // tracking max od otevreni
+            lastBarLow    = last.low;    // tracking min od otevreni
+            lastBarClose  = last.close;
             currentSymbol = symbol;
 
             chart.timeScale().fitContent();
             writeDebug('DATA', 'USPECH: Vykresleno ' + bars.length + ' svicek pro ' + symbol);
-            startTickPolling(symbol);
+
+            // Tick polling - spusti jen kdyz je uzivatel zapnul
+            if (tickEnabled) {
+                startTickPolling(symbol);
+            } else {
+                // Zastav predchozi polling kdyz se nacita nova data
+                if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+                writeDebug('TICK', 'Tick je OFF - k zapnuti pouzij tlacitko TICK');
+            }
 
         } catch (e) {
             writeDebug('ERR', 'setData selhal: ' + e.message);
@@ -222,34 +230,62 @@
     }
 
     // =================================================================
-    // 4. Live tick polling
+    // 4. Tick polling - Live update posledni svicky
+    //
+    // POZOR: Na paper/demo accountu vraci IB data s ~15min zpozdenim!
+    // Tick ON/OFF ridi uzivatel - defaultne OFF.
     // =================================================================
     function startTickPolling(symbol) {
-        if (tickTimer) { clearInterval(tickTimer); }
-        writeDebug('TICK', 'Polling pro ' + symbol + ' kazdych ' + TICK_POLL_MS + 'ms');
+        if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+        if (!tickEnabled) {
+            return;
+        }
+        writeDebug('TICK', 'Polling pro ' + symbol + ' kazdych ' + TICK_POLL_MS + 'ms (15min delay na demo!)');
         tickTimer = setInterval(function () { pollTick(symbol); }, TICK_POLL_MS);
     }
 
     function pollTick(symbol) {
-        if (!symbol || !candleSeries || lastBarTime === null) { return; }
+        if (!tickEnabled || !symbol || !candleSeries || lastBarTime === null) { return; }
         fetch('/api/tick/' + encodeURIComponent(symbol))
             .then(function (r) { return r.json(); })
             .then(function (data) {
                 if (!data || !data.price || data.price <= 0) { return; }
+                var price = parseFloat(data.price);
+
+                // Spravne sledovani HIGH a LOW od otevreni svicky
+                lastBarHigh  = Math.max(lastBarHigh, price);
+                lastBarLow   = Math.min(lastBarLow, price);
+                lastBarClose = price;
+
                 candleSeries.update({
                     time:  lastBarTime,
                     open:  lastBarOpen,
-                    high:  Math.max(lastBarOpen, data.price),
-                    low:   Math.min(lastBarOpen, data.price),
-                    close: data.price
+                    high:  lastBarHigh,
+                    low:   lastBarLow,
+                    close: lastBarClose
                 });
-                lastBarClose = data.price;
             })
             .catch(function () {});
     }
 
     // =================================================================
-    // 5. Indicator API
+    // 5. setTickEnabled - vola se z tlacitka v UI
+    // =================================================================
+    function setTickEnabled(enabled) {
+        tickEnabled = !!enabled;
+        if (tickEnabled) {
+            if (currentSymbol) {
+                startTickPolling(currentSymbol);
+            } else {
+                writeDebug('TICK', 'Tick ON - nejdrive nacti graf (Load Chart)');
+            }
+        } else {
+            if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
+        }
+    }
+
+    // =================================================================
+    // 6. Indicator API
     // =================================================================
     function addIndicator(name, type, data, options) {
         if (!chart) { writeDebug('WARN', 'Graf neni ready pro indikator: ' + name); return; }
@@ -275,6 +311,7 @@
     window.lwcManager = {
         loadData:        loadData,
         testChart:       testChart,
+        setTickEnabled:  setTickEnabled,
         addIndicator:    addIndicator,
         removeIndicator: removeIndicator
     };
