@@ -1,21 +1,15 @@
 """IB API Connector using ib_async
 
-Version: 2.7.0 - hist_poll fallback pro paper accounty bez API subscripce
+Version: 2.7.1 - hist_poll fix: mdt=4 + useRTH=True + 3600S
 
-TIEDENA HIERARCHIE FALLBACKU:
-  1. STREAMING   reqMktData(snapshot=False)  -> okamzity update, ideal
-  2. SNAPSHOT    reqTickersAsync()           -> jednorazovy dotaz kazdych 15s
-  3. HIST_POLL   reqHistoricalDataAsync()    -> posledni 1min bar kazdych 30s
-                 !! funguje BEZ API market data subscripce !!
+HIERARCHIE FALLBACKU:
+  1. STREAMING   reqMktData(snapshot=False)  -> okamzity update
+  2. SNAPSHOT    reqTickersAsync()           -> kazdych 15s
+  3. HIST_POLL   reqHistoricalDataAsync()    -> kazdych 30s, mdt=4, useRTH=True
 
-Error 10089 -> okamzity skok na hist_poll rezim.
-
-PRICE EXTRACTION ORDER:
-  1. ticker.last   (posledni obchod)
-  2. ticker.close  (predchozi close)
-  3. ticker.bid    (aktualni nabidka)
-  4. ticker.ask    (aktualni pozadavek)
-  -> midpoint bid/ask jako posledni moznost
+Error 10089 -> okamzity skok na hist_poll.
+Error 162   -> bylo zpusobeno useRTH=False + 300S (prilis kratka doba).
+               Fixnuto: mdt=4 pred hist dotazem, useRTH=True, duration 3600S.
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder
@@ -32,19 +26,6 @@ import asyncio
 # ================================================================
 
 class _TickSubscriber:
-    """Streaming tick data s trojnasobnym fallbackem.
-
-    Rezim 1 - STREAMING (mdt=3):
-      reqMktData -> ticker.updateEvent
-
-    Rezim 2 - SNAPSHOT (mdt=40):
-      reqTickersAsync kazdych 15s
-
-    Rezim 3 - HIST_POLL (mdt=99):
-      reqHistoricalDataAsync (1min bary) kazdych 30s.
-      Funguje VZDY - i bez market data API subscripce.
-      Cena = close posledniho dokonceneho 1min baru (max 1min stara).
-    """
 
     def __init__(self, host, port, client_id):
         self._host         = host
@@ -59,7 +40,7 @@ class _TickSubscriber:
         self._iterations: int  = 0
         self._mdt: int         = 0
         self._mode: str        = 'init'
-        self._next_hist_poll: int = 0  # iterations counter pro hist poll trigger
+        self._next_hist_poll: int = 0
 
         self._thread = threading.Thread(
             target=self._run, daemon=True,
@@ -132,8 +113,6 @@ class _TickSubscriber:
     @property
     def mode(self) -> str: return self._mode
 
-    # --- helpers ---
-
     @staticmethod
     def _extract_price(t) -> float:
         for attr in ('last', 'close', 'bid', 'ask'):
@@ -163,8 +142,6 @@ class _TickSubscriber:
     def _has_error(self, code: int) -> bool:
         return any(f'[{code}]' in e for e in self._last_errors[-10:])
 
-    # --- background thread ---
-
     def _run(self):
         asyncio.run(self._async_run())
 
@@ -188,7 +165,9 @@ class _TickSubscriber:
         def on_ib_error(reqId, errorCode, errorString, contract):
             msg = f"[{errorCode}] reqId={reqId}: {errorString}"
             self._last_errors = (self._last_errors + [msg])[-20:]
-            print(f"[TICK-SUB] IB_ERR [{errorCode}] reqId={reqId}: {errorString}")
+            # Ignoruj bezne info zpravy (2104, 2106, 2158)
+            if errorCode not in (2104, 2106, 2107, 2108, 2158, 2119):
+                print(f"[TICK-SUB] IB_ERR [{errorCode}] reqId={reqId}: {errorString}")
         ib.errorEvent += on_ib_error
 
         try:
@@ -201,13 +180,13 @@ class _TickSubscriber:
             self._connected = True
             self._mode      = 'streaming'
 
-            contracts_local: dict = {}  # sym -> Contract
-            tickers_local: dict   = {}  # sym -> ib_async Ticker
+            contracts_local: dict = {}
+            tickers_local: dict   = {}
             self._tickers         = tickers_local
             self._next_hist_poll  = 0
 
             while ib.isConnected():
-                # --- Nove subscriptions ---
+                # Nove subscriptions
                 with self._lock:
                     new_syms = list(self._pending - set(contracts_local.keys()))
                     self._pending.clear()
@@ -233,9 +212,8 @@ class _TickSubscriber:
                             print(f"[TICK-SUB] STREAM {sym}")
 
                         elif self._mode == 'hist_poll':
-                            # Okamzite spust prvni poll
                             self._next_hist_poll = self._iterations
-                            print(f"[TICK-SUB] HIST_POLL {sym} (neni treba mkt sub)")
+                            print(f"[TICK-SUB] HIST_POLL {sym} (zadna mkt sub potreba)")
 
                     except Exception as e:
                         print(f"[TICK-SUB] Subscribe error {sym}: {e}")
@@ -245,10 +223,9 @@ class _TickSubscriber:
                 await asyncio.sleep(1.0)
                 self._iterations += 1
 
-                # --- Detekce error 10089 -> okamzite hist_poll ---
+                # --- Error 10089 -> okamzite hist_poll ---
                 if self._mode != 'hist_poll' and self._has_error(10089):
-                    print("[TICK-SUB] Error 10089 detekovan -> HIST_POLL rezim")
-                    # Zrus streaming subs
+                    print("[TICK-SUB] Error 10089 -> HIST_POLL rezim")
                     for t in list(tickers_local.values()):
                         try: ib.cancelMktData(t)
                         except Exception: pass
@@ -257,7 +234,7 @@ class _TickSubscriber:
                     self._mdt            = 99
                     self._next_hist_poll = self._iterations  # okamzita prvni poll
 
-                # --- Streaming: fallback poll pro symboly bez updateEvent ---
+                # --- Streaming: fallback poll ---
                 elif self._mode == 'streaming':
                     for sym, t in list(tickers_local.items()):
                         if self._latest.get(sym, {}).get('price', 0) <= 0:
@@ -265,14 +242,14 @@ class _TickSubscriber:
                             if p > 0:
                                 self._latest[sym] = self._make_latest(t, p)
 
-                    # Auto-fallback po 15s bez dat (jiny duvod nez 10089)
+                    # Auto-fallback po 15s bez dat (jiny duvod)
                     if self._iterations == 15 and contracts_local:
                         no_data = all(
                             self._latest.get(s, {}).get('price', 0) <= 0
                             for s in contracts_local
                         )
                         if no_data:
-                            print("[TICK-SUB] WARN: 15s bez dat -> SNAPSHOT rezim")
+                            print("[TICK-SUB] 15s bez dat -> SNAPSHOT")
                             for t in list(tickers_local.values()):
                                 try: ib.cancelMktData(t)
                                 except Exception: pass
@@ -280,7 +257,7 @@ class _TickSubscriber:
                             self._mode = 'snapshot'
                             self._mdt  = 40
 
-                # --- Snapshot rezim: kazdych 15s ---
+                # --- Snapshot rezim ---
                 elif self._mode == 'snapshot' and self._iterations % 15 == 0:
                     for sym, contract in list(contracts_local.items()):
                         try:
@@ -291,34 +268,38 @@ class _TickSubscriber:
                                 if p > 0:
                                     self._latest[sym] = self._make_latest(t, p)
                                     print(f"[TICK-SUB] SNAP {sym}: p={p}")
-                                else:
-                                    print(f"[TICK-SUB] SNAP {sym}: NaN, err={self._last_errors[-1:]}")
                         except Exception as e:
                             print(f"[TICK-SUB] Snapshot err {sym}: {e}")
 
-                    # Snapshot take selhava (10089) -> hist_poll
                     if self._has_error(10089):
-                        print("[TICK-SUB] Snapshot take 10089 -> HIST_POLL rezim")
+                        print("[TICK-SUB] Snapshot 10089 -> HIST_POLL")
                         self._mode           = 'hist_poll'
                         self._mdt            = 99
                         self._next_hist_poll = self._iterations
 
                 # --- HIST_POLL rezim ---
                 elif self._mode == 'hist_poll' and self._iterations >= self._next_hist_poll:
-                    self._next_hist_poll = self._iterations + 30  # dalsi poll za 30s
+                    # Dalsi poll za 30s
+                    self._next_hist_poll = self._iterations + 30
+
+                    # FIX: pred hist dotazem pouzij mdt=4 (frozen/delayed)
+                    # mdt=3 (streaming) na teto connecti zpusoboval error 162
+                    ib.reqMarketDataType(4)
+
                     for sym, contract in list(contracts_local.items()):
                         try:
                             bars = await ib.reqHistoricalDataAsync(
                                 contract,
                                 endDateTime='',
-                                durationStr='300 S',      # posledni 5 minut dat
-                                barSizeSetting='1 min',   # 1min bary
+                                durationStr='3600 S',     # 1 hodina dat - zarucene nejaky bar
+                                barSizeSetting='1 min',
                                 whatToShow='TRADES',
-                                useRTH=False,
+                                useRTH=True,              # FIX: True = jen regularni hodiny
                                 formatDate=1
                             )
                             if bars:
                                 price = float(bars[-1].close)
+                                bar_t = bars[-1].date
                                 self._latest[sym] = {
                                     'price':  price,
                                     'last':   price,
@@ -328,23 +309,21 @@ class _TickSubscriber:
                                     'volume': int(bars[-1].volume) if bars[-1].volume else 0,
                                     'mdt':    99,
                                     'mode':   'hist_poll',
-                                    'bar_time': int(bars[-1].date.timestamp())
-                                              if hasattr(bars[-1].date, 'timestamp')
-                                              else str(bars[-1].date),
+                                    'bar_time': str(bar_t),
                                     'iterations': self._iterations,
                                     'ts': time.time()
                                 }
                                 print(
                                     f"[TICK-SUB] HIST_POLL {sym}: "
-                                    f"close={price} "
-                                    f"bar={bars[-1].date} "
+                                    f"close={price:.2f}  bar={bar_t}  "
                                     f"({len(bars)} bars)"
                                 )
                             else:
-                                print(f"[TICK-SUB] HIST_POLL {sym}: prazdne bary")
+                                print(f"[TICK-SUB] HIST_POLL {sym}: stale prazdne, retry za 5s")
+                                self._next_hist_poll = self._iterations + 5
                         except Exception as e:
                             print(f"[TICK-SUB] HIST_POLL err {sym}: {e}")
-                            self._next_hist_poll = self._iterations + 5  # retry za 5s
+                            self._next_hist_poll = self._iterations + 5
 
         finally:
             self._connected = False
