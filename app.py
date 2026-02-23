@@ -4,7 +4,7 @@ Professional trading platform with real-time market data,
 order execution, positions tracking, and TradingView Lightweight Charts.
 
 Author: Perplexity AI Assistant
-Version: 2.0.3 - In-page debug panel
+Version: 2.0.4 - Fix readOnly bool + clear-log circular callback
 """
 
 import dash
@@ -127,6 +127,7 @@ app.layout = html.Div([
         dcc.Store(id='chart-data-store'),
         dcc.Store(id='chart-trigger-store'),
         dcc.Store(id='test-chart-trigger'),
+        dcc.Store(id='clear-log-trigger'),   # dummy output pro clear button
 
     ], style={
         'padding': '20px', 'background': '#2d2d3a',
@@ -199,16 +200,14 @@ app.layout = html.Div([
 
     # ================================================================
     # DEBUG PANEL
-    # Zobrazuje veskere JS udalosti a Python data v realnem case.
-    # Lze odstranit kdyz vse funguje.
     # ================================================================
     html.Div([
         html.H3('\U0001f527 Debug Panel',
                 style={'marginBottom': '10px', 'color': '#ff9800'}),
 
-        # Python inspector - ukazuje co je v chart-data-store
+        # Python inspector
         html.Div([
-            html.Span('Python → chart-data-store: ',
+            html.Span('Python \u2192 chart-data-store: ',
                       style={'fontWeight': 'bold', 'color': '#00d4ff'}),
             html.Span(id='debug-python-info',
                       children='(ceka na Load Chart...)',
@@ -240,10 +239,10 @@ app.layout = html.Div([
             ),
         ], style={'marginBottom': '10px'}),
 
-        # JS log textarea - JS pise sem primo (bez Dashe)
+        # JS log textarea
+        # OPRAVA: readOnly neni boolean v Dash - pouzivame CSS pointer-events: none
         html.Textarea(
             id='debug-log-area',
-            readOnly=True,
             rows=18,
             placeholder='Sem JS pise vsechny kroky...\nOtevri stranku a uvidis co se deje.',
             style={
@@ -251,7 +250,8 @@ app.layout = html.Div([
                 'background': '#0d0d0d', 'color': '#00ff00',
                 'fontFamily': 'monospace', 'fontSize': '12px',
                 'border': '1px solid #333', 'borderRadius': '5px',
-                'padding': '10px', 'resize': 'vertical'
+                'padding': '10px', 'resize': 'vertical',
+                'pointerEvents': 'none'   # nahrazuje readOnly - nelze psat mysi
             }
         ),
         html.Div(
@@ -344,7 +344,6 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, symbol):
     return {'symbol': symbol, 'timeframe': app_state['current_timeframe'], 'bars': bars}
 
 
-# Ukazuje co Python vlozil do chart-data-store
 @app.callback(
     Output('debug-python-info', 'children'),
     Input('chart-data-store', 'data')
@@ -403,7 +402,7 @@ app.clientside_callback(
             } else {
                 var area = document.getElementById('debug-log-area');
                 if (area) {
-                    area.value = '[CHYBA] window.lwcManager neni definovano! JS se nenacetl.\n' + area.value;
+                    area.value = '[CHYBA] window.lwcManager neni definovano! JS se nenacetl.\\n' + area.value;
                 }
             }
         }
@@ -416,6 +415,7 @@ app.clientside_callback(
 
 
 # Clientside: clear-log-btn -> smaze debug textarea
+# OPRAVA: output je dummy Store, NE clear-log-btn samotny (to by bylo cyklicke)
 app.clientside_callback(
     """
     function(n) {
@@ -426,7 +426,7 @@ app.clientside_callback(
         return n;
     }
     """,
-    Output('clear-log-btn', 'n_clicks'),
+    Output('clear-log-trigger', 'data'),   # <-- dummy store, ne button
     Input('clear-log-btn', 'n_clicks')
 )
 
