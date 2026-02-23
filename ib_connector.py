@@ -5,13 +5,32 @@ for trading platform. Handles connection, market data, orders,
 positions, and account information.
 
 Author: Perplexity AI Assistant
-Version: 2.0.2 - reqMarketDataType(4) fix for paper trading
+Version: 2.0.3 - nest_asyncio fix for Flask/Dash threading + Lock
 """
+
+# =============================================================
+# KRITICKA OPRAVA: nest_asyncio
+# =============================================================
+# ib_async (ib_insync fork) pouziva asyncio event loop.
+# Flask/Dash spousti Python callbacky v ruznych worker threadech.
+# Kazdy thread ma svuj vlastni (prazdny) event loop.
+# Kdyz reqHistoricalData() zavolani loop.run_until_complete()
+# z worker threadu, dostane spatny loop -> ZAMRZNE navzdy.
+#
+# nest_asyncio patchi asyncio tak, ze dovoluje vnorene
+# run_until_complete() na uz bezicim loopu.
+# Timto se vsechny ib_async volani provedou na SPRAVNEM
+# (hlavnim) event loopu, bez ohledu ze ktereho threadu volame.
+# =============================================================
+import nest_asyncio
+nest_asyncio.apply()
+# =============================================================
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder, util
 from datetime import datetime
 import config
 import time
+import threading
 
 
 class IBConnector:
@@ -24,6 +43,10 @@ class IBConnector:
         self.tickers = {}     # Cache ticker subscriptions (key = symbol or conId)
         self.contracts = {}   # Cache qualified contracts (key = symbol string)
         self.executions = []  # Store executions from IB
+
+        # Lock: zabrání souběžným voláním get_historical_data z více threadů
+        # (ib_async není thread-safe pro souběžné hist. dotazy)
+        self._hist_lock = threading.Lock()
 
     def connect(self):
         """Connect to IB Gateway or TWS"""
@@ -56,20 +79,10 @@ class IBConnector:
 
             # -------------------------------------------------------
             # DULEZITE: reqMarketDataType(4) = Delayed Frozen
-            #
-            # Paper trading ucty nemaji predplatne live market dat.
-            # Bez tohoto nastaveni IB haze Error 10089.
-            #
-            # Typy dat:
-            #  1 = Live (placene predplatne)
-            #  2 = Frozen (placene, posledni cena po zavreni burzy)
-            #  3 = Delayed (zdarma, 15 min zpozdeni behem otevreni)
-            #  4 = Delayed Frozen (zdarma, posledni cena i po zavreni)
-            #                                    ^^^ TOTO CHCEME
             # -------------------------------------------------------
             self.ib.reqMarketDataType(4)
             if config.DEBUG_CONNECTION:
-                print("\U0001f4e1 Market data type: Delayed Frozen (4) - zdarma na paper uctu")
+                print("\U0001f4e1 Market data type: Delayed Frozen (4)")
 
             if config.DEBUG_CONNECTION:
                 print("\U0001f4dd Loading executions from IB (last 24h)...")
@@ -108,11 +121,7 @@ class IBConnector:
         return self.connected and self.ib.isConnected()
 
     def _get_qualified_contract(self, symbol):
-        """Return a qualified Stock contract (cached after first call).
-
-        ib_async needs conId before reqMktData / reqHistoricalData.
-        qualifyContracts() asks IB for the conId and fills it in.
-        """
+        """Return a qualified Stock contract (cached after first call)."""
         if symbol not in self.contracts:
             contract = Stock(symbol, 'SMART', 'USD')
             self.ib.qualifyContracts(contract)
@@ -147,36 +156,44 @@ class IBConnector:
     def get_historical_data(self, symbol, duration='1 D', bar_size='5 mins'):
         """Get historical OHLCV bars for Lightweight Charts.
         Returns list of dicts with Unix timestamp 'time' (int).
+
+        Poznamka: _hist_lock zajistuje, ze z vice Dash/Flask threadu
+        nikdy nevola IB zaroven - ib_async neni thread-safe pro
+        soubeha hist. dotazy.
         """
         if not self.is_connected():
+            print("[HIST] Not connected, returning []")
             return []
-        try:
-            contract = self._get_qualified_contract(symbol)
-            bars = self.ib.reqHistoricalData(
-                contract,
-                endDateTime='',
-                durationStr=duration,
-                barSizeSetting=bar_size,
-                whatToShow='TRADES',
-                useRTH=True,
-                formatDate=1,
-                timeout=15
-            )
-            result = []
-            for bar in bars:
-                result.append({
-                    'time':   self._bar_date_to_unix(bar.date),
-                    'open':   bar.open,
-                    'high':   bar.high,
-                    'low':    bar.low,
-                    'close':  bar.close,
-                    'volume': bar.volume
-                })
-            print(f"\U0001f4c8 Loaded {len(result)} bars for {symbol}")
-            return result
-        except Exception as e:
-            print(f"\u274c Error getting historical data: {e}")
-            return []
+
+        with self._hist_lock:
+            try:
+                print(f"[HIST] Requesting {symbol} | {duration} | {bar_size}")
+                contract = self._get_qualified_contract(symbol)
+                bars = self.ib.reqHistoricalData(
+                    contract,
+                    endDateTime='',
+                    durationStr=duration,
+                    barSizeSetting=bar_size,
+                    whatToShow='TRADES',
+                    useRTH=True,
+                    formatDate=1,
+                    timeout=15
+                )
+                result = []
+                for bar in bars:
+                    result.append({
+                        'time':   self._bar_date_to_unix(bar.date),
+                        'open':   bar.open,
+                        'high':   bar.high,
+                        'low':    bar.low,
+                        'close':  bar.close,
+                        'volume': bar.volume
+                    })
+                print(f"[HIST] Got {len(result)} bars for {symbol}")
+                return result
+            except Exception as e:
+                print(f"\u274c [HIST] Error for {symbol}: {e}")
+                return []
 
     @staticmethod
     def _bar_date_to_unix(bar_date):
@@ -270,16 +287,8 @@ class IBConnector:
                 current_status = trade.orderStatus.status
                 if current_status != last_status:
                     if config.DEBUG_ORDERS:
-                        print(f"[{iteration:2d}s] \U0001f4ca Status: {last_status or 'None'} \u2192 {current_status}")
+                        print(f"[{iteration:2d}s] Status: {last_status or 'None'} -> {current_status}")
                     last_status = current_status
-                if trade.log and config.DEBUG_ORDERS:
-                    for entry in trade.log:
-                        if entry.message and entry.message.strip():
-                            if entry.errorCode and entry.errorCode != 0:
-                                if entry.errorCode >= 2000:
-                                    print(f"       \u26a0\ufe0f Warning {entry.errorCode}: {entry.message}")
-                                else:
-                                    print(f"       \u274c Error {entry.errorCode}: {entry.message}")
                 if current_status in ['Submitted', 'Filled', 'PreSubmitted']:
                     break
                 if current_status in ['Cancelled', 'Inactive', 'ApiCancelled']:

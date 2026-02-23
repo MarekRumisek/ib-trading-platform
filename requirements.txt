@@ -9,5 +9,11 @@ pandas==2.1.4
 # IB API
 ib-async==2.1.0
 
+# DULEZITE: ib_async pouziva asyncio event loop.
+# Flask/Dash spousti callbacky v ruznych threadech.
+# nest_asyncio umoznuje vnorene event loops - bez neho
+# volani ib.reqHistoricalData() z Flask workeru ZAMRZNE navzdy.
+nest-asyncio>=1.6.0
+
 # Utilities
 python-dateutil==2.8.2
