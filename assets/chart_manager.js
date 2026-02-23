@@ -1,125 +1,159 @@
 /**
- * IB Trading Platform - Lightweight Charts Manager v2.0.2
+ * IB Trading Platform - Lightweight Charts Manager v2.0.3
  * =========================================================
- * Fixes in this version:
- *  - Use offsetWidth (not clientWidth) to get real rendered width
- *  - Retry initChart until offsetWidth > 0 (React may render after DOMContentLoaded)
- *  - Use chart.resize() in window resize handler
- *  - Retry loadData if chart not ready yet
- *
- * Responsibilities:
- *  1. initChart()       - Creates LWC chart once the container has real dimensions
- *  2. loadData()        - Loads OHLCV bars from dcc.Store into the chart
- *  3. pollTick()        - Polls /api/tick/<symbol> every 1s for live price updates
- *  4. addIndicator()    - Public API for future indicators (MA, EMA, RSI, MACD...)
- *  5. removeIndicator() - Removes a named indicator series
+ * Changelog:
+ *  v2.0.3 - Added visible placeholder, more console.log for debugging
+ *  v2.0.2 - offsetWidth fix, retry until width>0, chart.resize()
+ *  v2.0.1 - qualifyContracts, LWC v4 pin
+ *  v2.0.0 - Initial LWC integration
  */
 (function () {
     'use strict';
 
-    // --- Configuration ---
-    var TICK_POLL_MS  = 1000;
-    var CHART_BG      = '#1e1e2e';
-    var GRID_COLOR    = '#3d3d4a';
-    var TEXT_COLOR    = '#d1d4dc';
-    var UP_COLOR      = '#26a69a';
-    var DOWN_COLOR    = '#ef5350';
-    var CHART_HEIGHT  = 500;
+    var VERSION          = 'v2.0.3';
+    var TICK_POLL_MS     = 1000;
+    var CHART_BG         = '#1e1e2e';
+    var GRID_COLOR       = '#3d3d4a';
+    var TEXT_COLOR       = '#d1d4dc';
+    var UP_COLOR         = '#26a69a';
+    var DOWN_COLOR       = '#ef5350';
+    var CHART_HEIGHT     = 500;
 
-    // --- State ---
-    var chart           = null;
-    var candleSeries    = null;
-    var volumeSeries    = null;
-    var tickTimer       = null;
-    var currentSymbol   = null;
-    var lastBarTime     = null;
-    var lastBarOpen     = null;
-    var lastBarClose    = null;
-    var indicatorSeries = {};
-    var container       = null;
+    var chart            = null;
+    var candleSeries     = null;
+    var volumeSeries     = null;
+    var tickTimer        = null;
+    var currentSymbol    = null;
+    var lastBarTime      = null;
+    var lastBarOpen      = null;
+    var lastBarClose     = null;
+    var indicatorSeries  = {};
+    var container        = null;
+    var initAttempts     = 0;
 
     // =================================================================
-    // 1. initChart
-    // Called repeatedly until the container div has real pixel dimensions.
-    // Dash/React renders the DOM asynchronously, so the div may exist but
-    // have zero width until layout is calculated.
+    // Pomocna funkce - vypise zpravu do konzole s prefixem [LWC]
+    // Otevri DevTools (F12) -> Console a uvidis vsechny kroky
     // =================================================================
-    function initChart() {
-        container = document.getElementById('lwc-container');
-
-        if (!container) {
-            setTimeout(initChart, 200);
-            return;
-        }
-
-        // offsetWidth reflects the real rendered width.
-        // If it is 0, React has not finished laying out the page yet.
-        var w = container.offsetWidth;
-        if (w === 0) {
-            setTimeout(initChart, 200);
-            return;
-        }
-
-        // --- Create the LWC chart ---
-        chart = LightweightCharts.createChart(container, {
-            width:  w,
-            height: CHART_HEIGHT,
-            layout: {
-                background: { color: CHART_BG },
-                textColor:  TEXT_COLOR
-            },
-            grid: {
-                vertLines: { color: GRID_COLOR },
-                horzLines: { color: GRID_COLOR }
-            },
-            crosshair: {
-                mode: LightweightCharts.CrosshairMode.Normal
-            },
-            rightPriceScale: {
-                borderColor: GRID_COLOR
-            },
-            timeScale: {
-                borderColor:    GRID_COLOR,
-                timeVisible:    true,
-                secondsVisible: false
-            }
-        });
-
-        // Candlestick series
-        candleSeries = chart.addCandlestickSeries({
-            upColor:       UP_COLOR,
-            downColor:     DOWN_COLOR,
-            borderVisible: false,
-            wickUpColor:   UP_COLOR,
-            wickDownColor: DOWN_COLOR
-        });
-
-        // Volume histogram at bottom 15% of chart
-        volumeSeries = chart.addHistogramSeries({
-            color:        '#667eea',
-            priceFormat:  { type: 'volume' },
-            priceScaleId: 'volume',
-            scaleMargins: { top: 0.85, bottom: 0 }
-        });
-
-        // Responsive resize
-        window.addEventListener('resize', function () {
-            if (chart && container) {
-                chart.resize(container.offsetWidth, CHART_HEIGHT);
-            }
-        });
-
-        console.log('[LWC] Chart ready. Width=' + w + 'px');
+    function log(msg) {
+        console.log('[LWC ' + VERSION + '] ' + msg);
+    }
+    function warn(msg) {
+        console.warn('[LWC ' + VERSION + '] ' + msg);
+    }
+    function err(msg) {
+        console.error('[LWC ' + VERSION + '] ' + msg);
     }
 
     // =================================================================
-    // 2. loadData
-    // Called by Dash clientside_callback when dcc.Store changes.
-    // storeData = { symbol, timeframe, bars: [{time, open, high, low, close, volume}] }
+    // Zobraz placeholder text v kontejneru
+    // (dokazuje ze kontejner existuje a JS bezi)
+    // =================================================================
+    function showPlaceholder(msg) {
+        var c = document.getElementById('lwc-container');
+        if (!c) { return; }
+        c.innerHTML = '<div style="color:#667eea;font-size:14px;padding:20px;' +
+            'font-family:monospace;background:#1e1e2e;height:100%;' +
+            'display:flex;align-items:center;justify-content:center;">' +
+            '\u23f3 ' + msg + '</div>';
+    }
+
+    // =================================================================
+    // 1. initChart - vola se opakovane dokud kontejner nema sirku > 0
+    // =================================================================
+    function initChart() {
+        initAttempts++;
+        container = document.getElementById('lwc-container');
+
+        if (!container) {
+            log('Attempt ' + initAttempts + ': container not in DOM yet, retrying...');
+            showPlaceholder('Cekam na DOM... (' + initAttempts + ')');
+            setTimeout(initChart, 200);
+            return;
+        }
+
+        var w = container.offsetWidth;
+        if (w === 0) {
+            log('Attempt ' + initAttempts + ': container exists but width=0, retrying...');
+            showPlaceholder('Cekam na vykreslovani... (' + initAttempts + ')');
+            setTimeout(initChart, 200);
+            return;
+        }
+
+        // Zkontroluj ze LWC knihovna je nactena
+        if (typeof LightweightCharts === 'undefined') {
+            err('LightweightCharts library NOT LOADED! Check CDN in app.py index_string');
+            showPlaceholder('CHYBA: Lightweight Charts knihovna se nenactla!');
+            return;
+        }
+
+        log('Initializing chart. Container width=' + w + 'px, height=' + CHART_HEIGHT + 'px');
+        showPlaceholder('Inicializuji graf...');
+
+        try {
+            // Vycisti kontejner pred vytvorenim grafu
+            container.innerHTML = '';
+
+            chart = LightweightCharts.createChart(container, {
+                width:  w,
+                height: CHART_HEIGHT,
+                layout: {
+                    background: { color: CHART_BG },
+                    textColor:  TEXT_COLOR
+                },
+                grid: {
+                    vertLines: { color: GRID_COLOR },
+                    horzLines: { color: GRID_COLOR }
+                },
+                crosshair: {
+                    mode: LightweightCharts.CrosshairMode.Normal
+                },
+                rightPriceScale: { borderColor: GRID_COLOR },
+                timeScale: {
+                    borderColor:    GRID_COLOR,
+                    timeVisible:    true,
+                    secondsVisible: false
+                }
+            });
+
+            candleSeries = chart.addCandlestickSeries({
+                upColor:       UP_COLOR,
+                downColor:     DOWN_COLOR,
+                borderVisible: false,
+                wickUpColor:   UP_COLOR,
+                wickDownColor: DOWN_COLOR
+            });
+
+            volumeSeries = chart.addHistogramSeries({
+                color:        '#667eea',
+                priceFormat:  { type: 'volume' },
+                priceScaleId: 'volume',
+                scaleMargins: { top: 0.85, bottom: 0 }
+            });
+
+            window.addEventListener('resize', function () {
+                if (chart && container) {
+                    chart.resize(container.offsetWidth, CHART_HEIGHT);
+                    log('Chart resized to ' + container.offsetWidth + 'px');
+                }
+            });
+
+            log('Chart ready! Waiting for data (click Load Chart button)...');
+
+        } catch (e) {
+            err('createChart failed: ' + e.message);
+            showPlaceholder('CHYBA pri vytvareni grafu: ' + e.message);
+        }
+    }
+
+    // =================================================================
+    // 2. loadData - vola se z Dash clientside_callback
     // =================================================================
     function loadData(storeData) {
-        // If chart is not initialised yet, retry in 300ms
+        log('loadData() called. symbol=' + (storeData && storeData.symbol));
+
         if (!chart || !candleSeries) {
+            warn('Chart not ready yet, retrying loadData in 300ms...');
             setTimeout(function () { loadData(storeData); }, 300);
             return;
         }
@@ -128,67 +162,70 @@
         var symbol = storeData.symbol || '?';
 
         if (bars.length === 0) {
-            console.warn('[LWC] No bars received for ' + symbol);
+            warn('No bars received for ' + symbol + ' - trh mozna zavreny?');
+            showPlaceholder('Zadna data pro ' + symbol + ' (trh zavreny nebo IB timeout)');
             return;
         }
 
-        // Sort bars ascending by time (safety guard)
+        log('Loading ' + bars.length + ' bars for ' + symbol + ' (' + storeData.timeframe + ')');
+
+        // Seradime bary vzestupne podle casu (pojistka)
         bars.sort(function (a, b) { return a.time - b.time; });
 
-        // Load OHLC candles
-        candleSeries.setData(bars.map(function (b) {
-            return { time: b.time, open: b.open, high: b.high,
-                     low: b.low, close: b.close };
-        }));
+        // Prvni a posledni bar pro debug
+        log('First bar: time=' + bars[0].time + ' open=' + bars[0].open + ' close=' + bars[0].close);
+        log('Last bar:  time=' + bars[bars.length-1].time + ' close=' + bars[bars.length-1].close);
 
-        // Load volume (colour matches candle direction)
-        volumeSeries.setData(bars.map(function (b) {
-            return {
-                time:  b.time,
-                value: b.volume,
-                color: b.close >= b.open
-                    ? UP_COLOR + '88'
-                    : DOWN_COLOR + '88'
-            };
-        }));
+        try {
+            candleSeries.setData(bars.map(function (b) {
+                return { time: b.time, open: b.open, high: b.high,
+                         low: b.low, close: b.close };
+            }));
 
-        // Remember last bar so live tick can continue the candle
-        var last    = bars[bars.length - 1];
-        lastBarTime  = last.time;
-        lastBarOpen  = last.open;
-        lastBarClose = last.close;
-        currentSymbol = symbol;
+            volumeSeries.setData(bars.map(function (b) {
+                return {
+                    time:  b.time,
+                    value: b.volume,
+                    color: b.close >= b.open
+                        ? UP_COLOR + '88'
+                        : DOWN_COLOR + '88'
+                };
+            }));
 
-        chart.timeScale().fitContent();
+            var last    = bars[bars.length - 1];
+            lastBarTime  = last.time;
+            lastBarOpen  = last.open;
+            lastBarClose = last.close;
+            currentSymbol = symbol;
 
-        console.log('[LWC] Loaded ' + bars.length + ' bars for '
-                    + symbol + ' (' + storeData.timeframe + ')');
+            chart.timeScale().fitContent();
 
-        startTickPolling(symbol);
+            log('SUCCESS: Chart rendered ' + bars.length + ' bars for ' + symbol);
+            startTickPolling(symbol);
+
+        } catch (e) {
+            err('setData failed: ' + e.message);
+        }
     }
 
     // =================================================================
-    // 3. Real-time tick polling
-    // Calls /api/tick/<symbol> every TICK_POLL_MS milliseconds.
-    // Updates the LAST candle in real time (open price stays fixed,
-    // high/low/close change as new prices arrive).
+    // 3. Live tick polling
     // =================================================================
     function startTickPolling(symbol) {
-        if (tickTimer) { clearInterval(tickTimer); }
+        if (tickTimer) {
+            clearInterval(tickTimer);
+            log('Stopped previous tick polling');
+        }
+        log('Starting tick polling for ' + symbol + ' every ' + TICK_POLL_MS + 'ms');
         tickTimer = setInterval(function () { pollTick(symbol); }, TICK_POLL_MS);
     }
 
     function pollTick(symbol) {
         if (!symbol || !candleSeries || lastBarTime === null) { return; }
-
         fetch('/api/tick/' + encodeURIComponent(symbol))
             .then(function (r) { return r.json(); })
             .then(function (data) {
                 if (!data || !data.price || data.price <= 0) { return; }
-
-                // Update the current candle with the latest price.
-                // open stays as it was when the candle opened,
-                // high/low expand as price moves, close = latest price.
                 candleSeries.update({
                     time:  lastBarTime,
                     open:  lastBarOpen,
@@ -202,23 +239,11 @@
     }
 
     // =================================================================
-    // 4. Indicator API  (used by future MA / RSI / MACD callbacks)
-    //
-    // Example:
-    //   window.lwcManager.addIndicator(
-    //     'MA20', 'line',
-    //     [{time: 1700000000, value: 182.5}, ...],
-    //     { color: '#FFD700', lineWidth: 2 }
-    //   );
+    // 4 + 5. Indicator API
     // =================================================================
     function addIndicator(name, type, data, options) {
-        if (!chart) {
-            console.warn('[LWC] Chart not ready for indicator: ' + name);
-            return;
-        }
-        if (indicatorSeries[name]) {
-            chart.removeSeries(indicatorSeries[name]);
-        }
+        if (!chart) { warn('Chart not ready for indicator: ' + name); return; }
+        if (indicatorSeries[name]) { chart.removeSeries(indicatorSeries[name]); }
         var series;
         if (type === 'histogram') {
             series = chart.addHistogramSeries(options || {});
@@ -229,29 +254,25 @@
         }
         series.setData(data);
         indicatorSeries[name] = series;
-        console.log('[LWC] Indicator added: ' + name + ' (' + type + ')');
+        log('Indicator added: ' + name + ' (' + type + ')');
     }
 
-    // =================================================================
-    // 5. removeIndicator
-    // =================================================================
     function removeIndicator(name) {
         if (indicatorSeries[name] && chart) {
             chart.removeSeries(indicatorSeries[name]);
             delete indicatorSeries[name];
-            console.log('[LWC] Indicator removed: ' + name);
+            log('Indicator removed: ' + name);
         }
     }
 
-    // --- Public API ---
+    // Public API
     window.lwcManager = {
         loadData:        loadData,
         addIndicator:    addIndicator,
         removeIndicator: removeIndicator
     };
 
-    // Start init loop - will keep retrying every 200ms until
-    // the container exists AND has a non-zero width
-    setTimeout(initChart, 200);
+    log('Script loaded ' + VERSION + ', starting initChart loop...');
+    setTimeout(initChart, 300);
 
 }());

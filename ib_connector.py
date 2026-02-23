@@ -5,7 +5,7 @@ for trading platform. Handles connection, market data, orders,
 positions, and account information.
 
 Author: Perplexity AI Assistant
-Version: 2.0.1 - qualifyContracts() fix + Unix timestamps for LWC
+Version: 2.0.2 - reqMarketDataType(4) fix for paper trading
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder, util
@@ -21,7 +21,7 @@ class IBConnector:
         self.ib = IB()
         self.connected = False
         self.account_id = None
-        self.tickers = {}     # Cache ticker subscriptions (key = symbol string)
+        self.tickers = {}     # Cache ticker subscriptions (key = symbol or conId)
         self.contracts = {}   # Cache qualified contracts (key = symbol string)
         self.executions = []  # Store executions from IB
 
@@ -53,6 +53,23 @@ class IBConnector:
             accounts = self.ib.managedAccounts()
             if accounts:
                 self.account_id = accounts[0]
+
+            # -------------------------------------------------------
+            # DULEZITE: reqMarketDataType(4) = Delayed Frozen
+            #
+            # Paper trading ucty nemaji predplatne live market dat.
+            # Bez tohoto nastaveni IB haze Error 10089.
+            #
+            # Typy dat:
+            #  1 = Live (placene predplatne)
+            #  2 = Frozen (placene, posledni cena po zavreni burzy)
+            #  3 = Delayed (zdarma, 15 min zpozdeni behem otevreni)
+            #  4 = Delayed Frozen (zdarma, posledni cena i po zavreni)
+            #                                    ^^^ TOTO CHCEME
+            # -------------------------------------------------------
+            self.ib.reqMarketDataType(4)
+            if config.DEBUG_CONNECTION:
+                print("\U0001f4e1 Market data type: Delayed Frozen (4) - zdarma na paper uctu")
 
             if config.DEBUG_CONNECTION:
                 print("\U0001f4dd Loading executions from IB (last 24h)...")
@@ -91,17 +108,14 @@ class IBConnector:
         return self.connected and self.ib.isConnected()
 
     def _get_qualified_contract(self, symbol):
-        """Return a qualified Stock contract for symbol (cached after first call).
+        """Return a qualified Stock contract (cached after first call).
 
-        WHY: ib_async requires contracts to have a conId (a unique number from IB)
-        before it can use them for market data or historical data requests.
-        Stock('AAPL', 'SMART', 'USD') creates a 'bare' contract with NO conId.
-        qualifyContracts() sends a quick request to IB which fills in the conId.
-        We cache the result so we only call IB once per symbol per session.
+        ib_async needs conId before reqMktData / reqHistoricalData.
+        qualifyContracts() asks IB for the conId and fills it in.
         """
         if symbol not in self.contracts:
             contract = Stock(symbol, 'SMART', 'USD')
-            self.ib.qualifyContracts(contract)   # <-- fills in conId
+            self.ib.qualifyContracts(contract)
             self.contracts[symbol] = contract
             print(f"\u2705 Qualified contract for {symbol} (conId={contract.conId})")
         return self.contracts[symbol]
@@ -132,16 +146,12 @@ class IBConnector:
 
     def get_historical_data(self, symbol, duration='1 D', bar_size='5 mins'):
         """Get historical OHLCV bars for Lightweight Charts.
-
-        Returns bars with 'time' as Unix timestamp (int seconds).
-        Lightweight Charts requires integers, not date strings.
+        Returns list of dicts with Unix timestamp 'time' (int).
         """
         if not self.is_connected():
             return []
         try:
-            # Use qualified contract (has conId) - required by ib_async
             contract = self._get_qualified_contract(symbol)
-
             bars = self.ib.reqHistoricalData(
                 contract,
                 endDateTime='',
@@ -152,37 +162,27 @@ class IBConnector:
                 formatDate=1,
                 timeout=15
             )
-
             result = []
             for bar in bars:
-                unix_ts = self._bar_date_to_unix(bar.date)
                 result.append({
-                    'time':   unix_ts,
+                    'time':   self._bar_date_to_unix(bar.date),
                     'open':   bar.open,
                     'high':   bar.high,
                     'low':    bar.low,
                     'close':  bar.close,
                     'volume': bar.volume
                 })
-
             print(f"\U0001f4c8 Loaded {len(result)} bars for {symbol}")
             return result
-
         except Exception as e:
             print(f"\u274c Error getting historical data: {e}")
             return []
 
     @staticmethod
     def _bar_date_to_unix(bar_date):
-        """Convert IB bar.date to Unix timestamp (int).
-
-        IB returns dates as strings:
-        - Intraday: '20240101 09:30:00' or '20240101 09:30:00 US/Eastern'
-        - Daily:    '20240101'
-        """
+        """Convert IB bar.date string to Unix timestamp int."""
         if hasattr(bar_date, 'timestamp'):
             return int(bar_date.timestamp())
-
         if isinstance(bar_date, str):
             clean = bar_date.split(' US/')[0].split(' America/')[0].strip()
             if len(clean) == 8:
@@ -190,25 +190,20 @@ class IBConnector:
             else:
                 dt = datetime.strptime(clean, '%Y%m%d %H:%M:%S')
             return int(dt.timestamp())
-
         return int(datetime.now().timestamp())
 
     def get_ticker(self, symbol):
-        """Get real-time ticker data for a symbol."""
+        """Get real-time (or delayed) ticker data for a symbol."""
         if not self.is_connected():
             return None
         try:
             if symbol in self.tickers:
-                # Already subscribed - just read the cached ticker object
                 ticker = self.tickers[symbol]
             else:
-                # First time: qualify contract, then subscribe to market data
                 contract = self._get_qualified_contract(symbol)
                 ticker = self.ib.reqMktData(contract, '', False, False)
                 self.tickers[symbol] = ticker
-
             self.ib.sleep(0.5)
-
             return {
                 'last':   ticker.last   if ticker.last   == ticker.last   else 0,
                 'bid':    ticker.bid    if ticker.bid    == ticker.bid    else 0,
@@ -231,9 +226,7 @@ class IBConnector:
             else:
                 ticker = self.ib.reqMktData(contract, '', False, False)
                 self.tickers[cache_key] = ticker
-
             self.ib.sleep(0.5)
-
             return {
                 'last':   ticker.last   if ticker.last   == ticker.last   else 0,
                 'bid':    ticker.bid    if ticker.bid    == ticker.bid    else 0,
@@ -250,46 +243,35 @@ class IBConnector:
         """Place an order (MARKET or LIMIT)."""
         if not self.is_connected():
             return {'success': False, 'error': 'Not connected to IB'}
-
         if timeout is None:
             timeout = config.ORDER_TIMEOUT
-
         try:
             if config.DEBUG_ORDERS:
                 print("\n" + "=" * 60)
                 print("\U0001f680 PLACING ORDER")
                 print("=" * 60)
-
             print(f"\U0001f4e4 Order: {action} {quantity} {symbol} @ {order_type}")
-
             contract = Stock(symbol, 'SMART', 'USD')
-
             if order_type == 'LIMIT':
                 if not limit_price:
-                    return {'success': False, 'error': 'Limit price required for LIMIT orders'}
+                    return {'success': False, 'error': 'Limit price required'}
                 order = LimitOrder(action, quantity, limit_price)
             else:
                 order = MarketOrder(action, quantity)
-
             order.transmit = True
             order.outsideRth = True
-
             trade = self.ib.placeOrder(contract, order)
-
             start_time = time.time()
             last_status = None
             iteration = 0
-
             while time.time() - start_time < timeout:
                 self.ib.sleep(1)
                 iteration += 1
                 current_status = trade.orderStatus.status
-
                 if current_status != last_status:
                     if config.DEBUG_ORDERS:
                         print(f"[{iteration:2d}s] \U0001f4ca Status: {last_status or 'None'} \u2192 {current_status}")
                     last_status = current_status
-
                 if trade.log and config.DEBUG_ORDERS:
                     for entry in trade.log:
                         if entry.message and entry.message.strip():
@@ -298,19 +280,15 @@ class IBConnector:
                                     print(f"       \u26a0\ufe0f Warning {entry.errorCode}: {entry.message}")
                                 else:
                                     print(f"       \u274c Error {entry.errorCode}: {entry.message}")
-
                 if current_status in ['Submitted', 'Filled', 'PreSubmitted']:
                     break
                 if current_status in ['Cancelled', 'Inactive', 'ApiCancelled']:
                     break
-
             final_status = trade.orderStatus.status
             order_id = trade.order.orderId if trade.order else None
-
             if final_status in ['Submitted', 'Filled', 'PreSubmitted']:
                 return {
-                    'success': True,
-                    'order_id': order_id,
+                    'success': True, 'order_id': order_id,
                     'status': final_status,
                     'filled': trade.orderStatus.filled,
                     'remaining': trade.orderStatus.remaining,
@@ -327,17 +305,14 @@ class IBConnector:
                     error_msg += "\n" + "\n".join(error_messages)
                 return {'success': False, 'order_id': order_id,
                         'status': final_status, 'error': error_msg}
-
         except Exception as e:
             print(f"\u274c Order FAILED: {e}")
             return {'success': False, 'error': str(e)}
 
     def place_market_order(self, symbol, action, quantity):
-        """Legacy method - calls place_order with MARKET type."""
         return self.place_order(symbol, action, quantity, 'MARKET')
 
     def get_positions(self):
-        """Get all open positions with P&L."""
         if not self.is_connected():
             return []
         try:
@@ -349,18 +324,18 @@ class IBConnector:
                     ticker['last'] if ticker and ticker['last'] > 0 else pos.avgCost
                 )
                 market_value = pos.position * current_price
-                cost_basis = pos.position * pos.avgCost
+                cost_basis   = pos.position * pos.avgCost
                 unrealized_pnl = market_value - cost_basis
                 unrealized_pnl_pct = (
                     (unrealized_pnl / abs(cost_basis) * 100) if cost_basis != 0 else 0
                 )
                 result.append({
-                    'symbol': pos.contract.symbol,
-                    'position': pos.position,
-                    'avg_cost': pos.avgCost,
-                    'market_price': current_price,
-                    'market_value': market_value,
-                    'unrealized_pnl': unrealized_pnl,
+                    'symbol':             pos.contract.symbol,
+                    'position':           pos.position,
+                    'avg_cost':           pos.avgCost,
+                    'market_price':       current_price,
+                    'market_value':       market_value,
+                    'unrealized_pnl':     unrealized_pnl,
                     'unrealized_pnl_pct': unrealized_pnl_pct
                 })
             return result
@@ -369,7 +344,6 @@ class IBConnector:
             return []
 
     def get_recent_orders(self, limit=10):
-        """Get recent orders from executions (fills)."""
         if not self.is_connected():
             return []
         try:
@@ -382,16 +356,15 @@ class IBConnector:
                         if hasattr(exec_data.time, 'strftime')
                         else str(exec_data.time)[:5]
                     ),
-                    'symbol': fill.contract.symbol,
-                    'action': exec_data.side,
+                    'symbol':   fill.contract.symbol,
+                    'action':   exec_data.side,
                     'quantity': exec_data.shares,
-                    'price': f"${exec_data.price:.2f}",
-                    'status': 'Filled'
+                    'price':    f"${exec_data.price:.2f}",
+                    'status':   'Filled'
                 })
-
             trades = self.ib.trades()
             for trade in trades:
-                order = trade.order
+                order  = trade.order
                 status = trade.orderStatus
                 if status.status == 'Filled':
                     continue
@@ -400,19 +373,17 @@ class IBConnector:
                     else f"Limit ${order.lmtPrice:.2f}"
                 )
                 result.append({
-                    'time': datetime.now().strftime('%H:%M'),
-                    'symbol': trade.contract.symbol,
-                    'action': order.action,
+                    'time':     datetime.now().strftime('%H:%M'),
+                    'symbol':   trade.contract.symbol,
+                    'action':   order.action,
                     'quantity': order.totalQuantity,
-                    'price': price,
-                    'status': status.status
+                    'price':    price,
+                    'status':   status.status
                 })
-
             return result[::-1][-limit:]
         except Exception as e:
             print(f"\u274c Error getting orders: {e}")
             return []
 
     def __del__(self):
-        """Cleanup on destruction."""
         self.disconnect()
