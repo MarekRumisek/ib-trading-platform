@@ -1,97 +1,99 @@
 /**
- * IB Trading Platform - Lightweight Charts Manager v2.0.3
+ * IB Trading Platform - Lightweight Charts Manager v2.0.4
  * =========================================================
- * Changelog:
- *  v2.0.3 - Added visible placeholder, more console.log for debugging
- *  v2.0.2 - offsetWidth fix, retry until width>0, chart.resize()
- *  v2.0.1 - qualifyContracts, LWC v4 pin
- *  v2.0.0 - Initial LWC integration
+ * v2.0.4 - In-page debug panel support, testChart() for fake data testing
+ * v2.0.3 - Visible placeholder, heavy console.log
+ * v2.0.2 - offsetWidth fix, retry until width>0, chart.resize()
  */
 (function () {
     'use strict';
 
-    var VERSION          = 'v2.0.3';
-    var TICK_POLL_MS     = 1000;
-    var CHART_BG         = '#1e1e2e';
-    var GRID_COLOR       = '#3d3d4a';
-    var TEXT_COLOR       = '#d1d4dc';
-    var UP_COLOR         = '#26a69a';
-    var DOWN_COLOR       = '#ef5350';
-    var CHART_HEIGHT     = 500;
+    var VERSION         = 'v2.0.4';
+    var TICK_POLL_MS    = 1000;
+    var CHART_BG        = '#1e1e2e';
+    var GRID_COLOR      = '#3d3d4a';
+    var TEXT_COLOR      = '#d1d4dc';
+    var UP_COLOR        = '#26a69a';
+    var DOWN_COLOR      = '#ef5350';
+    var CHART_HEIGHT    = 500;
 
-    var chart            = null;
-    var candleSeries     = null;
-    var volumeSeries     = null;
-    var tickTimer        = null;
-    var currentSymbol    = null;
-    var lastBarTime      = null;
-    var lastBarOpen      = null;
-    var lastBarClose     = null;
-    var indicatorSeries  = {};
-    var container        = null;
-    var initAttempts     = 0;
-
-    // =================================================================
-    // Pomocna funkce - vypise zpravu do konzole s prefixem [LWC]
-    // Otevri DevTools (F12) -> Console a uvidis vsechny kroky
-    // =================================================================
-    function log(msg) {
-        console.log('[LWC ' + VERSION + '] ' + msg);
-    }
-    function warn(msg) {
-        console.warn('[LWC ' + VERSION + '] ' + msg);
-    }
-    function err(msg) {
-        console.error('[LWC ' + VERSION + '] ' + msg);
-    }
+    var chart           = null;
+    var candleSeries    = null;
+    var volumeSeries    = null;
+    var tickTimer       = null;
+    var currentSymbol   = null;
+    var lastBarTime     = null;
+    var lastBarOpen     = null;
+    var lastBarClose    = null;
+    var indicatorSeries = {};
+    var container       = null;
+    var initAttempts    = 0;
 
     // =================================================================
-    // Zobraz placeholder text v kontejneru
-    // (dokazuje ze kontejner existuje a JS bezi)
+    // Debug logger - pise do konzole I do #debug-log-area na strance
+    // =================================================================
+    function writeDebug(type, msg) {
+        var ts   = new Date().toLocaleTimeString('cs-CZ');
+        var line = '[' + ts + '] [' + type + '] ' + msg + '\n';
+        // 1. Browser console
+        if (type === 'ERR') {
+            console.error('[LWC] ' + msg);
+        } else if (type === 'WARN') {
+            console.warn('[LWC] ' + msg);
+        } else {
+            console.log('[LWC] ' + msg);
+        }
+        // 2. In-page debug panel (ak existuje)
+        var area = document.getElementById('debug-log-area');
+        if (area) {
+            area.value = line + area.value;  // nejnovejsi nahore
+        }
+    }
+
+    // =================================================================
+    // Zobraz placeholder v kontejneru grafu
     // =================================================================
     function showPlaceholder(msg) {
         var c = document.getElementById('lwc-container');
         if (!c) { return; }
-        c.innerHTML = '<div style="color:#667eea;font-size:14px;padding:20px;' +
-            'font-family:monospace;background:#1e1e2e;height:100%;' +
+        c.innerHTML =
+            '<div style="color:#667eea;font-size:14px;padding:20px;' +
+            'font-family:monospace;background:#1e1e2e;height:100%;box-sizing:border-box;' +
             'display:flex;align-items:center;justify-content:center;">' +
             '\u23f3 ' + msg + '</div>';
     }
 
     // =================================================================
-    // 1. initChart - vola se opakovane dokud kontejner nema sirku > 0
+    // 1. initChart
     // =================================================================
     function initChart() {
         initAttempts++;
         container = document.getElementById('lwc-container');
 
         if (!container) {
-            log('Attempt ' + initAttempts + ': container not in DOM yet, retrying...');
-            showPlaceholder('Cekam na DOM... (' + initAttempts + ')');
+            writeDebug('INIT', 'Pokus ' + initAttempts + ': div #lwc-container nenalezen, cekam...');
             setTimeout(initChart, 200);
             return;
         }
 
         var w = container.offsetWidth;
         if (w === 0) {
-            log('Attempt ' + initAttempts + ': container exists but width=0, retrying...');
-            showPlaceholder('Cekam na vykreslovani... (' + initAttempts + ')');
+            writeDebug('INIT', 'Pokus ' + initAttempts + ': div existuje ale sirka=0, cekam...');
+            showPlaceholder('Cekam na vykreslovani... (pokus ' + initAttempts + ')');
             setTimeout(initChart, 200);
             return;
         }
 
-        // Zkontroluj ze LWC knihovna je nactena
         if (typeof LightweightCharts === 'undefined') {
-            err('LightweightCharts library NOT LOADED! Check CDN in app.py index_string');
-            showPlaceholder('CHYBA: Lightweight Charts knihovna se nenactla!');
+            writeDebug('ERR', 'LightweightCharts knihovna NENI NACTENA! Zkontroluj CDN v app.py');
+            showPlaceholder('CHYBA: Lightweight Charts CDN se nenactlo!');
             return;
         }
 
-        log('Initializing chart. Container width=' + w + 'px, height=' + CHART_HEIGHT + 'px');
+        writeDebug('INIT', 'Zacinam vytvorit graf. Sirka=' + w + 'px, Vyska=' + CHART_HEIGHT + 'px');
         showPlaceholder('Inicializuji graf...');
 
         try {
-            // Vycisti kontejner pred vytvorenim grafu
             container.innerHTML = '';
 
             chart = LightweightCharts.createChart(container, {
@@ -105,9 +107,7 @@
                     vertLines: { color: GRID_COLOR },
                     horzLines: { color: GRID_COLOR }
                 },
-                crosshair: {
-                    mode: LightweightCharts.CrosshairMode.Normal
-                },
+                crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
                 rightPriceScale: { borderColor: GRID_COLOR },
                 timeScale: {
                     borderColor:    GRID_COLOR,
@@ -134,26 +134,27 @@
             window.addEventListener('resize', function () {
                 if (chart && container) {
                     chart.resize(container.offsetWidth, CHART_HEIGHT);
-                    log('Chart resized to ' + container.offsetWidth + 'px');
+                    writeDebug('RESIZE', 'Graf zmenen na ' + container.offsetWidth + 'px');
                 }
             });
 
-            log('Chart ready! Waiting for data (click Load Chart button)...');
+            writeDebug('INIT', 'HOTOVO! Graf inicializovan. Klikni Load Chart nebo Test Chart.');
 
         } catch (e) {
-            err('createChart failed: ' + e.message);
-            showPlaceholder('CHYBA pri vytvareni grafu: ' + e.message);
+            writeDebug('ERR', 'createChart selhal: ' + e.message);
+            showPlaceholder('CHYBA pri tvorbe grafu: ' + e.message);
         }
     }
 
     // =================================================================
-    // 2. loadData - vola se z Dash clientside_callback
+    // 2. loadData
     // =================================================================
     function loadData(storeData) {
-        log('loadData() called. symbol=' + (storeData && storeData.symbol));
+        writeDebug('DATA', 'loadData() zavolano. symbol=' + (storeData && storeData.symbol) +
+                   ' baru=' + (storeData && storeData.bars ? storeData.bars.length : 0));
 
         if (!chart || !candleSeries) {
-            warn('Chart not ready yet, retrying loadData in 300ms...');
+            writeDebug('DATA', 'Graf jeste neni ready, zkusim znovu za 300ms...');
             setTimeout(function () { loadData(storeData); }, 300);
             return;
         }
@@ -162,61 +163,79 @@
         var symbol = storeData.symbol || '?';
 
         if (bars.length === 0) {
-            warn('No bars received for ' + symbol + ' - trh mozna zavreny?');
-            showPlaceholder('Zadna data pro ' + symbol + ' (trh zavreny nebo IB timeout)');
+            writeDebug('WARN', 'Zadne bary pro ' + symbol + ' - trh zavreny nebo IB timeout');
+            showPlaceholder('Zadna data pro ' + symbol + '. Trh je mozna zavreny.');
             return;
         }
 
-        log('Loading ' + bars.length + ' bars for ' + symbol + ' (' + storeData.timeframe + ')');
-
-        // Seradime bary vzestupne podle casu (pojistka)
         bars.sort(function (a, b) { return a.time - b.time; });
 
-        // Prvni a posledni bar pro debug
-        log('First bar: time=' + bars[0].time + ' open=' + bars[0].open + ' close=' + bars[0].close);
-        log('Last bar:  time=' + bars[bars.length-1].time + ' close=' + bars[bars.length-1].close);
+        writeDebug('DATA', 'Prvni bar: time=' + bars[0].time +
+                   ' open=' + bars[0].open + ' close=' + bars[0].close);
+        writeDebug('DATA', 'Posledni: time=' + bars[bars.length-1].time +
+                   ' close=' + bars[bars.length-1].close);
 
         try {
             candleSeries.setData(bars.map(function (b) {
-                return { time: b.time, open: b.open, high: b.high,
-                         low: b.low, close: b.close };
+                return { time: b.time, open: b.open,
+                         high: b.high, low: b.low, close: b.close };
             }));
-
             volumeSeries.setData(bars.map(function (b) {
                 return {
                     time:  b.time,
                     value: b.volume,
-                    color: b.close >= b.open
-                        ? UP_COLOR + '88'
-                        : DOWN_COLOR + '88'
+                    color: b.close >= b.open ? UP_COLOR + '88' : DOWN_COLOR + '88'
                 };
             }));
 
-            var last    = bars[bars.length - 1];
+            var last     = bars[bars.length - 1];
             lastBarTime  = last.time;
             lastBarOpen  = last.open;
             lastBarClose = last.close;
             currentSymbol = symbol;
 
             chart.timeScale().fitContent();
-
-            log('SUCCESS: Chart rendered ' + bars.length + ' bars for ' + symbol);
+            writeDebug('DATA', 'OK! Vykresleno ' + bars.length + ' svicek pro ' + symbol);
             startTickPolling(symbol);
 
         } catch (e) {
-            err('setData failed: ' + e.message);
+            writeDebug('ERR', 'setData selhal: ' + e.message);
         }
     }
 
     // =================================================================
-    // 3. Live tick polling
+    // 3. testChart - 100 vymyslenych svicek (test LWC bez IB)
+    // Pokud toto funguje -> LWC OK, problem je v Python->Dash->JS pipeline
+    // Pokud toto NEFUNGUJE -> problem je v LWC nebo kontejneru
+    // =================================================================
+    function testChart() {
+        writeDebug('TEST', '--- Spoustim TEST CHART s 100 vymyslenymi svickami ---');
+        var bars  = [];
+        var now   = Math.floor(Date.now() / 1000);
+        var price = 200;
+        for (var i = 99; i >= 0; i--) {
+            var t      = now - i * 300;           // 5-minutove svicky
+            var change = (Math.random() - 0.47) * 3;
+            var open   = price;
+            price      = Math.max(10, price + change);
+            var close  = price;
+            var high   = Math.max(open, close) + Math.random() * 1.5;
+            var low    = Math.min(open, close) - Math.random() * 1.5;
+            bars.push({
+                time: t, open: open, high: high,
+                low: low, close: close,
+                volume: Math.floor(Math.random() * 500000 + 50000)
+            });
+        }
+        loadData({ symbol: 'TEST-DATA', timeframe: '5 mins (FAKE)', bars: bars });
+    }
+
+    // =================================================================
+    // 4. Live tick polling
     // =================================================================
     function startTickPolling(symbol) {
-        if (tickTimer) {
-            clearInterval(tickTimer);
-            log('Stopped previous tick polling');
-        }
-        log('Starting tick polling for ' + symbol + ' every ' + TICK_POLL_MS + 'ms');
+        if (tickTimer) { clearInterval(tickTimer); }
+        writeDebug('TICK', 'Zacina polling pro ' + symbol + ' kazdych ' + TICK_POLL_MS + 'ms');
         tickTimer = setInterval(function () { pollTick(symbol); }, TICK_POLL_MS);
     }
 
@@ -235,14 +254,14 @@
                 });
                 lastBarClose = data.price;
             })
-            .catch(function () { /* IB not connected - ignore */ });
+            .catch(function () {});
     }
 
     // =================================================================
-    // 4 + 5. Indicator API
+    // 5 + 6. Indicator API
     // =================================================================
     function addIndicator(name, type, data, options) {
-        if (!chart) { warn('Chart not ready for indicator: ' + name); return; }
+        if (!chart) { writeDebug('WARN', 'Graf neni ready pro indikator: ' + name); return; }
         if (indicatorSeries[name]) { chart.removeSeries(indicatorSeries[name]); }
         var series;
         if (type === 'histogram') {
@@ -254,25 +273,26 @@
         }
         series.setData(data);
         indicatorSeries[name] = series;
-        log('Indicator added: ' + name + ' (' + type + ')');
+        writeDebug('IND', 'Pridano: ' + name + ' (' + type + ')');
     }
 
     function removeIndicator(name) {
         if (indicatorSeries[name] && chart) {
             chart.removeSeries(indicatorSeries[name]);
             delete indicatorSeries[name];
-            log('Indicator removed: ' + name);
+            writeDebug('IND', 'Odebrano: ' + name);
         }
     }
 
     // Public API
     window.lwcManager = {
         loadData:        loadData,
+        testChart:       testChart,
         addIndicator:    addIndicator,
         removeIndicator: removeIndicator
     };
 
-    log('Script loaded ' + VERSION + ', starting initChart loop...');
+    writeDebug('INIT', 'Script nacteny ' + VERSION + ', spoustim initChart smycku...');
     setTimeout(initChart, 300);
 
 }());

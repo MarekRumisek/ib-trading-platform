@@ -4,7 +4,7 @@ Professional trading platform with real-time market data,
 order execution, positions tracking, and TradingView Lightweight Charts.
 
 Author: Perplexity AI Assistant
-Version: 2.0.2 - Fix chart rendering (Store output + offsetWidth)
+Version: 2.0.3 - In-page debug panel
 """
 
 import dash
@@ -109,7 +109,6 @@ app.layout = html.Div([
 
     # Chart panel
     html.Div([
-        # Timeframe buttons
         html.Div([
             html.Button('1m',  id='tf-1m',  n_clicks=0, className='tf-btn'),
             html.Button('5m',  id='tf-5m',  n_clicks=0, className='tf-btn tf-active'),
@@ -119,17 +118,15 @@ app.layout = html.Div([
             html.Button('1D',  id='tf-1d',  n_clicks=0, className='tf-btn'),
         ], style={'marginBottom': '10px'}),
 
-        # Lightweight Charts canvas target
         html.Div(
             id='lwc-container',
             style={'width': '100%', 'height': '500px', 'position': 'relative',
                    'background': '#1e1e2e'}
         ),
 
-        # Bridge: Python writes OHLCV here, JS reads it
         dcc.Store(id='chart-data-store'),
-        # Dummy store: clientside_callback writes here to confirm JS was called
         dcc.Store(id='chart-trigger-store'),
+        dcc.Store(id='test-chart-trigger'),
 
     ], style={
         'padding': '20px', 'background': '#2d2d3a',
@@ -200,6 +197,76 @@ app.layout = html.Div([
         'borderRadius': '8px', 'marginBottom': '20px'
     }),
 
+    # ================================================================
+    # DEBUG PANEL
+    # Zobrazuje veskere JS udalosti a Python data v realnem case.
+    # Lze odstranit kdyz vse funguje.
+    # ================================================================
+    html.Div([
+        html.H3('\U0001f527 Debug Panel',
+                style={'marginBottom': '10px', 'color': '#ff9800'}),
+
+        # Python inspector - ukazuje co je v chart-data-store
+        html.Div([
+            html.Span('Python → chart-data-store: ',
+                      style={'fontWeight': 'bold', 'color': '#00d4ff'}),
+            html.Span(id='debug-python-info',
+                      children='(ceka na Load Chart...)',
+                      style={'fontFamily': 'monospace', 'fontSize': '13px'})
+        ], style={'marginBottom': '12px', 'padding': '8px',
+                  'background': '#0d0d1a', 'borderRadius': '5px'}),
+
+        # Tlacitka
+        html.Div([
+            html.Button(
+                '\U0001f9ea Test Chart (100 vymyslenych svicek)',
+                id='test-chart-btn', n_clicks=0,
+                style={
+                    'padding': '10px 20px', 'marginRight': '10px',
+                    'background': '#ff9800', 'border': 'none',
+                    'borderRadius': '5px', 'color': 'black',
+                    'cursor': 'pointer', 'fontWeight': 'bold', 'fontSize': '14px'
+                }
+            ),
+            html.Button(
+                '\U0001f5d1 Smazat log',
+                id='clear-log-btn', n_clicks=0,
+                style={
+                    'padding': '10px 20px',
+                    'background': '#555', 'border': 'none',
+                    'borderRadius': '5px', 'color': 'white',
+                    'cursor': 'pointer', 'fontSize': '14px'
+                }
+            ),
+        ], style={'marginBottom': '10px'}),
+
+        # JS log textarea - JS pise sem primo (bez Dashe)
+        html.Textarea(
+            id='debug-log-area',
+            readOnly=True,
+            rows=18,
+            placeholder='Sem JS pise vsechny kroky...\nOtevri stranku a uvidis co se deje.',
+            style={
+                'width': '100%', 'boxSizing': 'border-box',
+                'background': '#0d0d0d', 'color': '#00ff00',
+                'fontFamily': 'monospace', 'fontSize': '12px',
+                'border': '1px solid #333', 'borderRadius': '5px',
+                'padding': '10px', 'resize': 'vertical'
+            }
+        ),
+        html.Div(
+            '\u2139\ufe0f Tlacitko "Test Chart" nakresli vymysleny graf BEZ IB. '
+            'Pokud funguje -> LWC je OK, problem je jinde. '
+            'Pokud NEFUNGUJE -> problem je v JS/LWC.',
+            style={'marginTop': '8px', 'fontSize': '12px',
+                   'color': '#888', 'fontStyle': 'italic'}
+        )
+    ], style={
+        'padding': '20px', 'background': '#1a1a2e',
+        'borderRadius': '8px', 'marginBottom': '20px',
+        'border': '2px solid #ff9800'
+    }),
+
     dcc.Interval(id='price-update-interval',     interval=1000, n_intervals=0),
     dcc.Interval(id='positions-update-interval', interval=2000, n_intervals=0),
     dcc.Interval(id='connection-check-interval', interval=5000, n_intervals=0),
@@ -247,7 +314,6 @@ def update_account_info(n):
     )
 
 
-# --- Chart data: Python fetches IB bars → dcc.Store → JS renders chart ---
 @app.callback(
     Output('chart-data-store', 'data'),
     [Input('load-chart-btn', 'n_clicks'),
@@ -257,7 +323,8 @@ def update_account_info(n):
      Input('tf-30m', 'n_clicks'),
      Input('tf-1h',  'n_clicks'),
      Input('tf-1d',  'n_clicks')],
-    State('symbol-input', 'value')
+    State('symbol-input', 'value'),
+    prevent_initial_call=True
 )
 def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, symbol):
     ctx = dash.callback_context
@@ -271,13 +338,33 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, symbol):
 
     symbol = (symbol or 'AAPL').upper()
     app_state['current_symbol'] = symbol
+    print(f"[DEBUG] load_chart_data: symbol={symbol} timeframe={app_state['current_timeframe']}")
     bars = ib.get_historical_data(symbol, '1 D', app_state['current_timeframe'])
-
+    print(f"[DEBUG] load_chart_data: got {len(bars)} bars")
     return {'symbol': symbol, 'timeframe': app_state['current_timeframe'], 'bars': bars}
 
 
-# --- Clientside callback: Store changes → JS lwcManager.loadData() ---
-# Output goes to a dummy dcc.Store (not an HTML attribute - avoids Dash silent failure)
+# Ukazuje co Python vlozil do chart-data-store
+@app.callback(
+    Output('debug-python-info', 'children'),
+    Input('chart-data-store', 'data')
+)
+def update_debug_python(data):
+    if not data:
+        return '(prazdne - zatim nebylo kliknuto Load Chart)'
+    bars = data.get('bars', [])
+    if not bars:
+        return f"symbol={data.get('symbol')} | 0 baru! (IB vratilo prazdna data)"
+    return (
+        f"symbol={data.get('symbol')} | "
+        f"timeframe={data.get('timeframe')} | "
+        f"{len(bars)} baru | "
+        f"prvni time={bars[0]['time']} | "
+        f"posledni close={bars[-1]['close']:.2f}"
+    )
+
+
+# Clientside: chart-data-store -> lwcManager.loadData()
 app.clientside_callback(
     """
     function(storeData) {
@@ -287,16 +374,60 @@ app.clientside_callback(
         if (window.lwcManager) {
             window.lwcManager.loadData(storeData);
         } else {
-            // Chart not ready yet - retry after a short delay
-            setTimeout(function() {
-                if (window.lwcManager) { window.lwcManager.loadData(storeData); }
-            }, 500);
+            var attempt = 0;
+            var retry = setInterval(function() {
+                attempt++;
+                if (window.lwcManager) {
+                    window.lwcManager.loadData(storeData);
+                    clearInterval(retry);
+                } else if (attempt > 20) {
+                    clearInterval(retry);
+                }
+            }, 200);
         }
-        return storeData.symbol;
+        return storeData.symbol || 'loaded';
     }
     """,
     Output('chart-trigger-store', 'data'),
     Input('chart-data-store', 'data')
+)
+
+
+# Clientside: test-chart-btn -> lwcManager.testChart()
+app.clientside_callback(
+    """
+    function(n) {
+        if (n > 0) {
+            if (window.lwcManager) {
+                window.lwcManager.testChart();
+            } else {
+                var area = document.getElementById('debug-log-area');
+                if (area) {
+                    area.value = '[CHYBA] window.lwcManager neni definovano! JS se nenacetl.\n' + area.value;
+                }
+            }
+        }
+        return n;
+    }
+    """,
+    Output('test-chart-trigger', 'data'),
+    Input('test-chart-btn', 'n_clicks')
+)
+
+
+# Clientside: clear-log-btn -> smaze debug textarea
+app.clientside_callback(
+    """
+    function(n) {
+        if (n > 0) {
+            var area = document.getElementById('debug-log-area');
+            if (area) { area.value = ''; }
+        }
+        return n;
+    }
+    """,
+    Output('clear-log-btn', 'n_clicks'),
+    Input('clear-log-btn', 'n_clicks')
 )
 
 
@@ -314,6 +445,8 @@ def update_price_display(n, symbol):
         return 'Last: $0.00', ' \u25b2 +$0.00 (+0.00%)'
     last_price = ticker.get('last', 0)
     prev_close = ticker.get('close', last_price)
+    if prev_close == 0:
+        prev_close = last_price
     change = last_price - prev_close
     change_pct = (change / prev_close * 100) if prev_close > 0 else 0
     arrow = '\u25b2' if change >= 0 else '\u25bc'
@@ -442,12 +575,11 @@ app.index_string = '''
         <title>{%title%}</title>
         {%favicon%}
         {%css%}
-        <!-- TradingView Lightweight Charts v4.2.0 (pinned - v5 renamed all APIs) -->
+        <!-- TradingView Lightweight Charts v4.2.0 -->
         <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
         <style>
             body { margin: 0; padding: 0; background: #1e1e2e; }
             #lwc-container { display: block; width: 100%; height: 500px; }
-            #lwc-container > * { display: block; }
             .tf-btn, .qty-btn {
                 padding: 8px 15px; margin: 0 5px;
                 background: #2d2d3a; border: 2px solid #667eea;
