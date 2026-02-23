@@ -1,17 +1,21 @@
 """IB API Connector using ib_async
 
-Version: 2.6.0 - Error logging + auto-fallback snapshot mode
+Version: 2.7.0 - hist_poll fallback pro paper accounty bez API subscripce
 
-DIAGNOSTIKA: Proc streaming nefunguje?
-  - IB vraci chybu (354, 200, ...) ktera se tise spolkla
-  - Po 15s s price=0 auto-prechod na reqTickersAsync (snapshot) rezim
-  - /api/test/snapshot/<sym> pro prime otestovani snapshot API
-  - Vsechny IB errory viditelne v debug logu + Tick Diag
+TIEDENA HIERARCHIE FALLBACKU:
+  1. STREAMING   reqMktData(snapshot=False)  -> okamzity update, ideal
+  2. SNAPSHOT    reqTickersAsync()           -> jednorazovy dotaz kazdych 15s
+  3. HIST_POLL   reqHistoricalDataAsync()    -> posledni 1min bar kazdych 30s
+                 !! funguje BEZ API market data subscripce !!
 
-ARCHITEKTURA:
-  self.ib          (clientId=1) -- hlavni spojeni
-  _HistWorker      (clientId=2) -- hist. data
-  _TickSubscriber  (clientId=3) -- streaming/snapshot tick data
+Error 10089 -> okamzity skok na hist_poll rezim.
+
+PRICE EXTRACTION ORDER:
+  1. ticker.last   (posledni obchod)
+  2. ticker.close  (predchozi close)
+  3. ticker.bid    (aktualni nabidka)
+  4. ticker.ask    (aktualni pozadavek)
+  -> midpoint bid/ask jako posledni moznost
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder
@@ -28,15 +32,18 @@ import asyncio
 # ================================================================
 
 class _TickSubscriber:
-    """Streaming market data s auto-fallback na snapshot rezim.
+    """Streaming tick data s trojnasobnym fallbackem.
 
     Rezim 1 - STREAMING (mdt=3):
-      reqMktData -> ticker.updateEvent -> okamzity update
+      reqMktData -> ticker.updateEvent
 
-    Rezim 2 - SNAPSHOT (mdt=40, fallback po 15s bez dat):
-      reqTickersAsync(contract) kazdych 15s -> cena zarucene funguje
+    Rezim 2 - SNAPSHOT (mdt=40):
+      reqTickersAsync kazdych 15s
 
-    Vsechny IB chyby jsou logovany a dostupne pres get_last_errors()
+    Rezim 3 - HIST_POLL (mdt=99):
+      reqHistoricalDataAsync (1min bary) kazdych 30s.
+      Funguje VZDY - i bez market data API subscripce.
+      Cena = close posledniho dokonceneho 1min baru (max 1min stara).
     """
 
     def __init__(self, host, port, client_id):
@@ -46,12 +53,13 @@ class _TickSubscriber:
         self._latest: dict      = {}
         self._tickers: dict     = {}
         self._pending: set      = set()
-        self._last_errors: list = []   # posledni IB errory
+        self._last_errors: list = []
         self._lock             = threading.Lock()
         self._connected: bool  = False
         self._iterations: int  = 0
         self._mdt: int         = 0
-        self._mode: str        = 'init'   # 'streaming' | 'snapshot'
+        self._mode: str        = 'init'
+        self._next_hist_poll: int = 0  # iterations counter pro hist poll trigger
 
         self._thread = threading.Thread(
             target=self._run, daemon=True,
@@ -124,7 +132,7 @@ class _TickSubscriber:
     @property
     def mode(self) -> str: return self._mode
 
-    # --- cena: last -> close -> bid -> ask -> midpoint ---
+    # --- helpers ---
 
     @staticmethod
     def _extract_price(t) -> float:
@@ -140,17 +148,20 @@ class _TickSubscriber:
             pass
         return 0.0
 
-    def _make_latest(self, t, price) -> dict:
+    def _make_latest(self, t, price, mode=None) -> dict:
         return {
             'price':  price,
-            'last':   float(t.last)   if t.last   == t.last   and t.last   else 0.0,
-            'close':  float(t.close)  if t.close  == t.close  and t.close  else 0.0,
-            'bid':    float(t.bid)    if t.bid    == t.bid    and t.bid    else 0.0,
-            'ask':    float(t.ask)    if t.ask    == t.ask    and t.ask    else 0.0,
+            'last':   float(t.last)  if t.last  == t.last  and t.last  else 0.0,
+            'close':  float(t.close) if t.close == t.close and t.close else 0.0,
+            'bid':    float(t.bid)   if t.bid   == t.bid   and t.bid   else 0.0,
+            'ask':    float(t.ask)   if t.ask   == t.ask   and t.ask   else 0.0,
             'volume': (int(t.volume) if t.volume == t.volume and t.volume else 0),
-            'mdt':    self._mdt, 'mode': self._mode,
+            'mdt':    self._mdt, 'mode': mode or self._mode,
             'iterations': self._iterations, 'ts': time.time()
         }
+
+    def _has_error(self, code: int) -> bool:
+        return any(f'[{code}]' in e for e in self._last_errors[-10:])
 
     # --- background thread ---
 
@@ -174,11 +185,10 @@ class _TickSubscriber:
     async def _connect_and_stream(self):
         ib = IB()
 
-        # --- IB ERROR HANDLER ---
         def on_ib_error(reqId, errorCode, errorString, contract):
             msg = f"[{errorCode}] reqId={reqId}: {errorString}"
-            self._last_errors = (self._last_errors + [msg])[-15:]
-            print(f"[TICK-SUB] IB_ERR {msg}")
+            self._last_errors = (self._last_errors + [msg])[-20:]
+            print(f"[TICK-SUB] IB_ERR [{errorCode}] reqId={reqId}: {errorString}")
         ib.errorEvent += on_ib_error
 
         try:
@@ -192,11 +202,12 @@ class _TickSubscriber:
             self._mode      = 'streaming'
 
             contracts_local: dict = {}  # sym -> Contract
-            tickers_local: dict   = {}  # sym -> ib_async Ticker (streaming)
+            tickers_local: dict   = {}  # sym -> ib_async Ticker
             self._tickers         = tickers_local
+            self._next_hist_poll  = 0
 
             while ib.isConnected():
-                # Nove subscriptions
+                # --- Nove subscriptions ---
                 with self._lock:
                     new_syms = list(self._pending - set(contracts_local.keys()))
                     self._pending.clear()
@@ -206,6 +217,7 @@ class _TickSubscriber:
                         contract = Stock(sym, 'SMART', 'USD')
                         await ib.qualifyContractsAsync(contract)
                         contracts_local[sym] = contract
+                        print(f"[TICK-SUB] Contract OK: {sym} conId={contract.conId}")
 
                         if self._mode == 'streaming':
                             ticker = ib.reqMktData(contract, '', False, False)
@@ -218,9 +230,12 @@ class _TickSubscriber:
                                         self._latest[s] = self._make_latest(t, p)
                                 return on_ticker
                             ticker.updateEvent += make_handler(sym)
-                            print(f"[TICK-SUB] STREAM {sym} (conId={contract.conId})")
-                        else:
-                            print(f"[TICK-SUB] SNAP {sym} (conId={contract.conId})")
+                            print(f"[TICK-SUB] STREAM {sym}")
+
+                        elif self._mode == 'hist_poll':
+                            # Okamzite spust prvni poll
+                            self._next_hist_poll = self._iterations
+                            print(f"[TICK-SUB] HIST_POLL {sym} (neni treba mkt sub)")
 
                     except Exception as e:
                         print(f"[TICK-SUB] Subscribe error {sym}: {e}")
@@ -230,52 +245,106 @@ class _TickSubscriber:
                 await asyncio.sleep(1.0)
                 self._iterations += 1
 
-                # --- Auto-fallback check po 15s ---
-                if self._mode == 'streaming' and self._iterations == 15 and contracts_local:
-                    no_data = all(
-                        self._latest.get(s, {}).get('price', 0) <= 0
-                        for s in contracts_local
-                    )
-                    if no_data:
-                        recent_errors = self._last_errors[-5:]
-                        print(f"[TICK-SUB] WARN: 15s streaming bez dat! Errory: {recent_errors}")
-                        print("[TICK-SUB] Prechazim na SNAPSHOT rezim (reqTickersAsync)")
-                        # Zrus streaming subscriptions
-                        for t in tickers_local.values():
-                            try: ib.cancelMktData(t)
-                            except Exception: pass
-                        tickers_local.clear()
-                        self._mode = 'snapshot'
-                        self._mdt  = 40
+                # --- Detekce error 10089 -> okamzite hist_poll ---
+                if self._mode != 'hist_poll' and self._has_error(10089):
+                    print("[TICK-SUB] Error 10089 detekovan -> HIST_POLL rezim")
+                    # Zrus streaming subs
+                    for t in list(tickers_local.values()):
+                        try: ib.cancelMktData(t)
+                        except Exception: pass
+                    tickers_local.clear()
+                    self._mode           = 'hist_poll'
+                    self._mdt            = 99
+                    self._next_hist_poll = self._iterations  # okamzita prvni poll
 
-                # --- Streaming: poll fallback ---
-                if self._mode == 'streaming':
+                # --- Streaming: fallback poll pro symboly bez updateEvent ---
+                elif self._mode == 'streaming':
                     for sym, t in list(tickers_local.items()):
                         if self._latest.get(sym, {}).get('price', 0) <= 0:
                             p = self._extract_price(t)
                             if p > 0:
                                 self._latest[sym] = self._make_latest(t, p)
 
-                # --- SNAPSHOT rezim: kazdych 15s ---
-                if self._mode == 'snapshot' and self._iterations % 15 == 0:
+                    # Auto-fallback po 15s bez dat (jiny duvod nez 10089)
+                    if self._iterations == 15 and contracts_local:
+                        no_data = all(
+                            self._latest.get(s, {}).get('price', 0) <= 0
+                            for s in contracts_local
+                        )
+                        if no_data:
+                            print("[TICK-SUB] WARN: 15s bez dat -> SNAPSHOT rezim")
+                            for t in list(tickers_local.values()):
+                                try: ib.cancelMktData(t)
+                                except Exception: pass
+                            tickers_local.clear()
+                            self._mode = 'snapshot'
+                            self._mdt  = 40
+
+                # --- Snapshot rezim: kazdych 15s ---
+                elif self._mode == 'snapshot' and self._iterations % 15 == 0:
                     for sym, contract in list(contracts_local.items()):
                         try:
                             snaps = await ib.reqTickersAsync(contract)
                             if snaps:
                                 t = snaps[0]
                                 p = self._extract_price(t)
-                                print(
-                                    f"[TICK-SUB] SNAP {sym}: "
-                                    f"last={t.last} close={t.close} "
-                                    f"bid={t.bid} ask={t.ask} -> p={p}"
-                                )
                                 if p > 0:
                                     self._latest[sym] = self._make_latest(t, p)
+                                    print(f"[TICK-SUB] SNAP {sym}: p={p}")
                                 else:
-                                    print(f"[TICK-SUB] SNAP {sym}: VSE NaN! "
-                                          f"Errory: {self._last_errors[-3:]}")
+                                    print(f"[TICK-SUB] SNAP {sym}: NaN, err={self._last_errors[-1:]}")
                         except Exception as e:
-                            print(f"[TICK-SUB] Snapshot error {sym}: {e}")
+                            print(f"[TICK-SUB] Snapshot err {sym}: {e}")
+
+                    # Snapshot take selhava (10089) -> hist_poll
+                    if self._has_error(10089):
+                        print("[TICK-SUB] Snapshot take 10089 -> HIST_POLL rezim")
+                        self._mode           = 'hist_poll'
+                        self._mdt            = 99
+                        self._next_hist_poll = self._iterations
+
+                # --- HIST_POLL rezim ---
+                elif self._mode == 'hist_poll' and self._iterations >= self._next_hist_poll:
+                    self._next_hist_poll = self._iterations + 30  # dalsi poll za 30s
+                    for sym, contract in list(contracts_local.items()):
+                        try:
+                            bars = await ib.reqHistoricalDataAsync(
+                                contract,
+                                endDateTime='',
+                                durationStr='300 S',      # posledni 5 minut dat
+                                barSizeSetting='1 min',   # 1min bary
+                                whatToShow='TRADES',
+                                useRTH=False,
+                                formatDate=1
+                            )
+                            if bars:
+                                price = float(bars[-1].close)
+                                self._latest[sym] = {
+                                    'price':  price,
+                                    'last':   price,
+                                    'close':  float(bars[-2].close) if len(bars) > 1 else price,
+                                    'bid':    0.0,
+                                    'ask':    0.0,
+                                    'volume': int(bars[-1].volume) if bars[-1].volume else 0,
+                                    'mdt':    99,
+                                    'mode':   'hist_poll',
+                                    'bar_time': int(bars[-1].date.timestamp())
+                                              if hasattr(bars[-1].date, 'timestamp')
+                                              else str(bars[-1].date),
+                                    'iterations': self._iterations,
+                                    'ts': time.time()
+                                }
+                                print(
+                                    f"[TICK-SUB] HIST_POLL {sym}: "
+                                    f"close={price} "
+                                    f"bar={bars[-1].date} "
+                                    f"({len(bars)} bars)"
+                                )
+                            else:
+                                print(f"[TICK-SUB] HIST_POLL {sym}: prazdne bary")
+                        except Exception as e:
+                            print(f"[TICK-SUB] HIST_POLL err {sym}: {e}")
+                            self._next_hist_poll = self._iterations + 5  # retry za 5s
 
         finally:
             self._connected = False
@@ -341,13 +410,11 @@ class _HistWorker:
     def _fetch_fresh(self, symbol, duration, bar_size):
         ib = IB()
         try:
-            print(f"[HIST] Connecting clientId={self._client_id}...")
             ib.connect(self._host, self._port,
                        clientId=self._client_id, timeout=10)
             ib.reqMarketDataType(4)
             contract = Stock(symbol, 'SMART', 'USD')
             ib.qualifyContracts(contract)
-            print(f"[HIST] reqHistoricalData {symbol} | {duration} | {bar_size}")
             bars = ib.reqHistoricalData(
                 contract, endDateTime='', durationStr=duration,
                 barSizeSetting=bar_size, whatToShow='TRADES',
@@ -473,7 +540,6 @@ class IBConnector:
             return {'success': False, 'error': 'Not connected to IB'}
         if timeout is None: timeout = config.ORDER_TIMEOUT
         try:
-            print(f"\U0001f4e4 Order: {action} {quantity} {symbol} @ {order_type}")
             contract = Stock(symbol, 'SMART', 'USD')
             order    = (LimitOrder(action, quantity, limit_price)
                         if order_type == 'LIMIT' else MarketOrder(action, quantity))
