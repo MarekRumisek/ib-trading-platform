@@ -1,9 +1,9 @@
-"""IB Trading Platform - Main Dash Application with Lightweight Charts
+"""IB Trading Platform - Main Dash Application
 
-Version: 2.1.0
-  - TICK ON/OFF toggle (defaultne OFF)
-  - Tick ridi lwcManager.setTickEnabled() - bez noveho Dash callbacku
-  - CSS tridy tick-on / tick-off pro vizualni stav tlacitka
+Version: 2.4.0
+  - /api/diag/tick/<symbol>  - plna diagnostika tick dat
+  - Tick Diag button v debug panelu
+  - _TickSubscriber: bid/ask price fallback, raw data exposure
 """
 
 import dash
@@ -39,28 +39,48 @@ DURATION_MAP = {
     '1 day':   '6 M',
 }
 
-
 # ================================================================
 # FLASK API
 # ================================================================
 
 @server.route('/api/tick/<symbol>')
 def get_tick(symbol):
-    ticker = ib.get_ticker(symbol.upper())
-    if not ticker:
-        return jsonify({'error': 'no data'}), 404
-    price = ticker['last'] if ticker['last'] > 0 else ticker['close']
+    sym   = symbol.upper()
+    price = ib.get_latest_price(sym)
     return jsonify({'time': int(datetime.now().timestamp()), 'price': price})
+
+
+@server.route('/api/diag/tick/<symbol>')
+def api_diag_tick(symbol):
+    """Plna diagnostika _TickSubscriber pro dany symbol."""
+    sym = symbol.upper()
+    ts  = ib._tick_sub
+    return jsonify({
+        'symbol':            sym,
+        'tick_sub_connected': ts.is_connected,
+        'iterations':        ts.iterations,
+        'mdt':               ts._mdt,
+        'subscribed_symbols': ts.subscribed_symbols,
+        'pending':           list(ts._pending),
+        'latest':            ts._latest.get(sym, {}),
+        'raw_fields':        ts.get_raw_data(sym),
+        'time':              datetime.now().strftime('%H:%M:%S')
+    })
 
 
 @server.route('/api/diag')
 def api_diag():
     return jsonify({
-        'connected': ib.is_connected(),
-        'account_id': ib.account_id,
-        'cached_contracts': list(ib.contracts.keys()),
-        'cb_status': _cb_status,
-        'app_state': app_state,
+        'connected':       ib.is_connected(),
+        'account_id':      ib.account_id,
+        'cb_status':       _cb_status,
+        'app_state':       app_state,
+        'tick_sub': {
+            'connected':  ib._tick_sub.is_connected,
+            'iterations': ib._tick_sub.iterations,
+            'mdt':        ib._tick_sub._mdt,
+            'subscribed': ib._tick_sub.subscribed_symbols,
+        },
         'time': datetime.now().strftime('%H:%M:%S')
     })
 
@@ -71,12 +91,12 @@ def api_test_hist(symbol):
     try:
         if not ib.is_connected():
             return jsonify({'ok': False, 'error': 'NOT CONNECTED', 'elapsed': 0})
-        bars = ib.get_historical_data(symbol.upper(), '2 D', '5 mins')
+        bars    = ib.get_historical_data(symbol.upper(), '2 D', '5 mins')
         elapsed = round(time.time() - t0, 2)
         if bars:
             return jsonify({'ok': True, 'bars': len(bars), 'elapsed': elapsed,
                             'first': bars[0], 'last': bars[-1]})
-        return jsonify({'ok': False, 'error': 'EMPTY - 0 bars', 'elapsed': elapsed})
+        return jsonify({'ok': False, 'error': 'EMPTY', 'elapsed': elapsed})
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e),
                         'elapsed': round(time.time() - t0, 2)})
@@ -89,10 +109,7 @@ def api_cb_status():
 
 # ================================================================
 
-app_state = {
-    'current_symbol': 'AAPL',
-    'current_timeframe': '5 mins',
-}
+app_state = {'current_symbol': 'AAPL', 'current_timeframe': '5 mins'}
 
 # ========== LAYOUT ==========
 
@@ -103,30 +120,23 @@ app.layout = html.Div([
                 style={'display': 'inline-block', 'margin': 0, 'color': '#00d4ff'}),
         html.Div(id='connection-status',
                  style={'display': 'inline-block', 'float': 'right', 'fontSize': 18})
-    ], style={
-        'padding': '20px',
-        'background': 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-        'borderRadius': '10px', 'marginBottom': '20px'
-    }),
+    ], style={'padding': '20px',
+              'background': 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+              'borderRadius': '10px', 'marginBottom': '20px'}),
 
     # Account bar
     html.Div([
-        html.Div([
-            html.Span("\U0001f4bc Account: ", style={'fontWeight': 'bold'}),
-            html.Span(id='account-id', children='Connecting...')
-        ], style={'display': 'inline-block', 'marginRight': '30px'}),
-        html.Div([
-            html.Span("\U0001f4b0 Balance: ", style={'fontWeight': 'bold'}),
-            html.Span(id='account-balance', children='$0.00')
-        ], style={'display': 'inline-block', 'marginRight': '30px'}),
-        html.Div([
-            html.Span("\U0001f4c8 Buying Power: ", style={'fontWeight': 'bold'}),
-            html.Span(id='buying-power', children='$0.00')
-        ], style={'display': 'inline-block'})
-    ], style={
-        'padding': '15px', 'background': '#2d2d3a',
-        'borderRadius': '8px', 'marginBottom': '20px', 'fontSize': '16px'
-    }),
+        html.Div([html.Span("\U0001f4bc Account: ", style={'fontWeight': 'bold'}),
+                  html.Span(id='account-id', children='Connecting...')],
+                 style={'display': 'inline-block', 'marginRight': '30px'}),
+        html.Div([html.Span("\U0001f4b0 Balance: ", style={'fontWeight': 'bold'}),
+                  html.Span(id='account-balance', children='$0.00')],
+                 style={'display': 'inline-block', 'marginRight': '30px'}),
+        html.Div([html.Span("\U0001f4c8 Buying Power: ", style={'fontWeight': 'bold'}),
+                  html.Span(id='buying-power', children='$0.00')],
+                 style={'display': 'inline-block'})
+    ], style={'padding': '15px', 'background': '#2d2d3a',
+              'borderRadius': '8px', 'marginBottom': '20px', 'fontSize': '16px'}),
 
     # Symbol + price bar
     html.Div([
@@ -134,20 +144,16 @@ app.layout = html.Div([
             html.Label('Symbol:', style={'marginRight': '10px', 'fontWeight': 'bold'}),
             dcc.Input(
                 id='symbol-input', type='text', value='AAPL',
-                style={
-                    'width': '150px', 'padding': '8px', 'borderRadius': '5px',
-                    'border': '2px solid #667eea', 'background': '#1e1e2e',
-                    'color': 'white', 'fontSize': '16px'
-                }
+                style={'width': '150px', 'padding': '8px', 'borderRadius': '5px',
+                       'border': '2px solid #667eea', 'background': '#1e1e2e',
+                       'color': 'white', 'fontSize': '16px'}
             ),
             html.Button(
                 'Load Chart', id='load-chart-btn', n_clicks=0,
-                style={
-                    'marginLeft': '10px', 'padding': '8px 20px',
-                    'background': 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                    'border': 'none', 'borderRadius': '5px',
-                    'color': 'white', 'cursor': 'pointer', 'fontWeight': 'bold'
-                }
+                style={'marginLeft': '10px', 'padding': '8px 20px',
+                       'background': 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                       'border': 'none', 'borderRadius': '5px',
+                       'color': 'white', 'cursor': 'pointer', 'fontWeight': 'bold'}
             )
         ], style={'display': 'inline-block', 'marginRight': '30px'}),
         html.Div([
@@ -156,16 +162,12 @@ app.layout = html.Div([
             html.Span(id='price-change-display', children='',
                       style={'fontSize': '16px', 'marginLeft': '15px'})
         ], style={'display': 'inline-block'})
-    ], style={
-        'padding': '15px', 'background': '#2d2d3a',
-        'borderRadius': '8px', 'marginBottom': '20px'
-    }),
+    ], style={'padding': '15px', 'background': '#2d2d3a',
+              'borderRadius': '8px', 'marginBottom': '20px'}),
 
     # Chart panel
     html.Div([
-        # TF buttony + TICK toggle vpravo
         html.Div([
-            # Vlevo: TF buttony
             html.Div([
                 html.Button('1m',  id='tf-1m',  n_clicks=0, className='tf-btn'),
                 html.Button('5m',  id='tf-5m',  n_clicks=0, className='tf-btn tf-active'),
@@ -173,37 +175,23 @@ app.layout = html.Div([
                 html.Button('30m', id='tf-30m', n_clicks=0, className='tf-btn'),
                 html.Button('1h',  id='tf-1h',  n_clicks=0, className='tf-btn'),
                 html.Button('1D',  id='tf-1d',  n_clicks=0, className='tf-btn'),
-                # Loading indikator
-                html.Span(
-                    id='chart-loading-indicator', children='',
-                    style={'marginLeft': '15px', 'fontSize': '13px',
-                           'color': '#ffa726', 'fontStyle': 'italic',
-                           'verticalAlign': 'middle'}
-                )
+                html.Span(id='chart-loading-indicator', children='',
+                          style={'marginLeft': '15px', 'fontSize': '13px',
+                                 'color': '#ffa726', 'fontStyle': 'italic',
+                                 'verticalAlign': 'middle'})
             ], style={'display': 'inline-block'}),
-
-            # Vpravo: TICK toggle
             html.Div([
-                html.Span(
-                    '\u26a0\ufe0f 15min delay na demo',
-                    style={'fontSize': '11px', 'color': '#666',
-                           'marginRight': '10px', 'verticalAlign': 'middle'}
-                ),
-                html.Button(
-                    '\u26a1 TICK: OFF',
-                    id='tick-toggle-btn',
-                    n_clicks=0,
-                    className='tick-btn tick-off'
-                )
+                html.Span('\u26a0\ufe0f 15min delay na demo',
+                          style={'fontSize': '11px', 'color': '#666',
+                                 'marginRight': '10px', 'verticalAlign': 'middle'}),
+                html.Button('\u26a1 TICK: OFF', id='tick-toggle-btn',
+                            n_clicks=0, className='tick-btn tick-off')
             ], style={'display': 'inline-block', 'float': 'right'})
-
         ], style={'marginBottom': '10px', 'overflow': 'hidden'}),
 
-        html.Div(
-            id='lwc-container',
-            style={'width': '100%', 'height': '500px', 'position': 'relative',
-                   'background': '#1e1e2e'}
-        ),
+        html.Div(id='lwc-container',
+                 style={'width': '100%', 'height': '500px', 'position': 'relative',
+                        'background': '#1e1e2e'}),
 
         dcc.Store(id='chart-data-store'),
         dcc.Store(id='chart-trigger-store'),
@@ -214,13 +202,12 @@ app.layout = html.Div([
         dcc.Store(id='diag1-trigger'),
         dcc.Store(id='diag2-trigger'),
         dcc.Store(id='diag3-trigger'),
+        dcc.Store(id='diag-tick-trigger'),
         dcc.Store(id='active-tf-store', data='tf-5m'),
         dcc.Store(id='tick-enabled-store', data=False),
 
-    ], style={
-        'padding': '20px', 'background': '#2d2d3a',
-        'borderRadius': '8px', 'marginBottom': '20px'
-    }),
+    ], style={'padding': '20px', 'background': '#2d2d3a',
+              'borderRadius': '8px', 'marginBottom': '20px'}),
 
     # Order panel
     html.Div([
@@ -232,41 +219,27 @@ app.layout = html.Div([
             html.Button('10',  id='qty-10',  n_clicks=0, className='qty-btn'),
             html.Button('25',  id='qty-25',  n_clicks=0, className='qty-btn'),
             html.Button('100', id='qty-100', n_clicks=0, className='qty-btn'),
-            dcc.Input(
-                id='qty-custom', type='number', value=1, min=1,
-                style={
-                    'width': '80px', 'marginLeft': '10px', 'padding': '8px',
-                    'borderRadius': '5px', 'border': '2px solid #667eea',
-                    'background': '#1e1e2e', 'color': 'white'
-                }
-            )
+            dcc.Input(id='qty-custom', type='number', value=1, min=1,
+                      style={'width': '80px', 'marginLeft': '10px', 'padding': '8px',
+                             'borderRadius': '5px', 'border': '2px solid #667eea',
+                             'background': '#1e1e2e', 'color': 'white'})
         ], style={'marginBottom': '15px'}),
         html.Div([
-            html.Button(
-                '\U0001f7e2 BUY MARKET', id='buy-btn', n_clicks=0,
-                style={
-                    'padding': '15px 40px',
-                    'background': 'linear-gradient(135deg, #26a69a 0%, #1a7f6f 100%)',
-                    'border': 'none', 'borderRadius': '8px', 'color': 'white',
-                    'fontSize': '18px', 'fontWeight': 'bold',
-                    'cursor': 'pointer', 'marginRight': '15px'
-                }
-            ),
-            html.Button(
-                '\U0001f534 SELL MARKET', id='sell-btn', n_clicks=0,
-                style={
-                    'padding': '15px 40px',
-                    'background': 'linear-gradient(135deg, #ef5350 0%, #c62828 100%)',
-                    'border': 'none', 'borderRadius': '8px', 'color': 'white',
-                    'fontSize': '18px', 'fontWeight': 'bold', 'cursor': 'pointer'
-                }
-            )
+            html.Button('\U0001f7e2 BUY MARKET', id='buy-btn', n_clicks=0,
+                        style={'padding': '15px 40px',
+                               'background': 'linear-gradient(135deg, #26a69a 0%, #1a7f6f 100%)',
+                               'border': 'none', 'borderRadius': '8px', 'color': 'white',
+                               'fontSize': '18px', 'fontWeight': 'bold',
+                               'cursor': 'pointer', 'marginRight': '15px'}),
+            html.Button('\U0001f534 SELL MARKET', id='sell-btn', n_clicks=0,
+                        style={'padding': '15px 40px',
+                               'background': 'linear-gradient(135deg, #ef5350 0%, #c62828 100%)',
+                               'border': 'none', 'borderRadius': '8px', 'color': 'white',
+                               'fontSize': '18px', 'fontWeight': 'bold', 'cursor': 'pointer'})
         ]),
         html.Div(id='order-feedback', style={'marginTop': '15px', 'fontSize': '16px'})
-    ], style={
-        'padding': '20px', 'background': '#2d2d3a',
-        'borderRadius': '8px', 'marginBottom': '20px'
-    }),
+    ], style={'padding': '20px', 'background': '#2d2d3a',
+              'borderRadius': '8px', 'marginBottom': '20px'}),
 
     html.Div([
         html.H3('\U0001f4ca Open Positions', style={'marginBottom': '15px'}),
@@ -285,8 +258,7 @@ app.layout = html.Div([
         html.H3('\U0001f527 Debug Panel',
                 style={'marginBottom': '10px', 'color': '#ff9800'}),
         html.Div([
-            html.Span('Python callback: ',
-                      style={'fontWeight': 'bold', 'color': '#00d4ff'}),
+            html.Span('Python callback: ', style={'fontWeight': 'bold', 'color': '#00d4ff'}),
             html.Span(id='debug-python-info', children='(ceka na Load Chart...)',
                       style={'fontFamily': 'monospace', 'fontSize': '13px'})
         ], style={'marginBottom': '12px', 'padding': '8px',
@@ -296,17 +268,23 @@ app.layout = html.Div([
                      style={'color': '#ff9800', 'fontWeight': 'bold',
                             'marginBottom': '8px', 'fontSize': '13px'}),
             html.Button('1\ufe0f\u20e3 IB Spojeni', id='diag1-btn', n_clicks=0,
-                        style={'padding': '10px 16px', 'marginRight': '8px',
+                        style={'padding': '10px 14px', 'marginRight': '6px',
                                'background': '#1565c0', 'border': 'none',
                                'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
             html.Button('2\ufe0f\u20e3 Hist. data', id='diag2-btn', n_clicks=0,
-                        style={'padding': '10px 16px', 'marginRight': '8px',
+                        style={'padding': '10px 14px', 'marginRight': '6px',
                                'background': '#6a1599', 'border': 'none',
                                'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
-            html.Button('3\ufe0f\u20e3 Nakreslit z API', id='diag3-btn', n_clicks=0,
-                        style={'padding': '10px 16px', 'background': '#1b5e20',
-                               'border': 'none', 'borderRadius': '5px',
-                               'color': 'white', 'cursor': 'pointer'}),
+            html.Button('3\ufe0f\u20e3 Nakreslit', id='diag3-btn', n_clicks=0,
+                        style={'padding': '10px 14px', 'marginRight': '6px',
+                               'background': '#1b5e20', 'border': 'none',
+                               'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
+            # NOVE: Tick diagnostika
+            html.Button('\U0001f50d Tick Diag', id='diag-tick-btn', n_clicks=0,
+                        style={'padding': '10px 14px', 'marginRight': '6px',
+                               'background': '#4a148c', 'border': 'none',
+                               'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer',
+                               'fontWeight': 'bold'}),
         ], style={'marginBottom': '12px', 'padding': '10px',
                   'background': '#0d1a2e', 'borderRadius': '5px',
                   'border': '1px solid #1565c0'}),
@@ -346,11 +324,9 @@ app.layout = html.Div([
     dcc.Interval(id='connection-check-interval', interval=10000, n_intervals=0),
     html.Div(id='hidden-state', style={'display': 'none'})
 
-], style={
-    'maxWidth': '1400px', 'margin': '0 auto', 'padding': '20px',
-    'background': '#1e1e2e', 'minHeight': '100vh',
-    'color': 'white', 'fontFamily': 'Arial, sans-serif'
-})
+], style={'maxWidth': '1400px', 'margin': '0 auto', 'padding': '20px',
+          'background': '#1e1e2e', 'minHeight': '100vh',
+          'color': 'white', 'fontFamily': 'Arial, sans-serif'})
 
 
 # ========== PYTHON CALLBACKS ==========
@@ -361,14 +337,10 @@ app.layout = html.Div([
 )
 def update_connection_status(n):
     if ib.is_connected():
-        return html.Span([
-            html.Span('\u26ac', style={'color': '#26a69a', 'marginRight': '5px'}),
-            html.Span('Connected to IB Gateway')
-        ])
-    return html.Span([
-        html.Span('\u26ac', style={'color': '#ef5350', 'marginRight': '5px'}),
-        html.Span('Disconnected')
-    ])
+        return html.Span([html.Span('\u26ac', style={'color': '#26a69a', 'marginRight': '5px'}),
+                          html.Span('Connected to IB Gateway')])
+    return html.Span([html.Span('\u26ac', style={'color': '#ef5350', 'marginRight': '5px'}),
+                      html.Span('Disconnected')])
 
 
 @app.callback(
@@ -381,22 +353,17 @@ def update_account_info(n):
     if not ib.is_connected():
         return 'Not Connected', '$0.00', '$0.00'
     d = ib.get_account_info()
-    return (
-        d.get('account_id', 'N/A'),
-        f"${d.get('net_liquidation', 0):,.2f}",
-        f"${d.get('buying_power', 0):,.2f}"
-    )
+    return (d.get('account_id', 'N/A'),
+            f"${d.get('net_liquidation', 0):,.2f}",
+            f"${d.get('buying_power', 0):,.2f}")
 
 
 @app.callback(
     Output('chart-data-store', 'data'),
     [Input('load-chart-btn', 'n_clicks'),
-     Input('tf-1m',  'n_clicks'),
-     Input('tf-5m',  'n_clicks'),
-     Input('tf-15m', 'n_clicks'),
-     Input('tf-30m', 'n_clicks'),
-     Input('tf-1h',  'n_clicks'),
-     Input('tf-1d',  'n_clicks')],
+     Input('tf-1m',  'n_clicks'), Input('tf-5m',  'n_clicks'),
+     Input('tf-15m', 'n_clicks'), Input('tf-30m', 'n_clicks'),
+     Input('tf-1h',  'n_clicks'), Input('tf-1d',  'n_clicks')],
     State('symbol-input', 'value'),
     prevent_initial_call=True
 )
@@ -406,35 +373,26 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, symbol):
         ctx = dash.callback_context
         btn = (ctx.triggered[0]['prop_id'].split('.')[0]
                if ctx.triggered else 'load-chart-btn')
-
-        tf_map = {
-            'tf-1m': '1 min',   'tf-5m': '5 mins',
-            'tf-15m': '15 mins', 'tf-30m': '30 mins',
-            'tf-1h': '1 hour',  'tf-1d': '1 day'
-        }
+        tf_map = {'tf-1m': '1 min', 'tf-5m': '5 mins',
+                  'tf-15m': '15 mins', 'tf-30m': '30 mins',
+                  'tf-1h': '1 hour', 'tf-1d': '1 day'}
         if btn in tf_map:
             app_state['current_timeframe'] = tf_map[btn]
-
         symbol = (symbol or 'AAPL').upper()
         app_state['current_symbol'] = symbol
-        tf = app_state['current_timeframe']
+        tf       = app_state['current_timeframe']
         duration = DURATION_MAP.get(tf, '1 D')
-
         _cb_status = {'step': 'started', 'symbol': symbol, 'tf': tf,
                       'bars': None, 'error': None,
                       'ts': datetime.now().strftime('%H:%M:%S')}
         print(f"[CB] START: {symbol} | {tf} | duration={duration}")
-
         _cb_status['step'] = 'requesting_IB'
         bars = ib.get_historical_data(symbol, duration, tf)
-
         _cb_status['step'] = 'IB_returned'
         _cb_status['bars'] = len(bars)
         print(f"[CB] IB returned {len(bars)} bars")
-
         _cb_status['step'] = 'done'
         return {'symbol': symbol, 'timeframe': tf, 'bars': bars}
-
     except Exception as e:
         _cb_status['step'] = 'ERROR'
         _cb_status['error'] = str(e)
@@ -447,12 +405,10 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, symbol):
     Input('chart-data-store', 'data')
 )
 def update_debug_python(data):
-    if not data:
-        return '(prazdne)'
+    if not data: return '(prazdne)'
     bars = data.get('bars', [])
     if not bars:
-        return (f"\u26a0\ufe0f {data.get('symbol')} | {data.get('timeframe')} "
-                f"| 0 BARU (trh zavreny nebo IB timeout)")
+        return f"\u26a0\ufe0f {data.get('symbol')} | {data.get('timeframe')} | 0 BARU"
     b0 = bars[0]
     return (f"\u2705 {data.get('symbol')} | {data.get('timeframe')} "
             f"| {len(bars)} baru | close[0]={b0['close']} close[-1]={bars[-1]['close']:.2f}")
@@ -460,40 +416,21 @@ def update_debug_python(data):
 
 # ========== CLIENTSIDE CALLBACKS ==========
 
-# --- Load Chart log ---
 app.clientside_callback(
-    """
-    function(n) {
-        if (n > 0 && window.lwcDebug)
-            window.lwcDebug('BTN', 'Load Chart n=' + n + ' - cekam na Python/IB...');
-        return n;
-    }
-    """,
-    Output('load-click-log', 'data'),
-    Input('load-chart-btn', 'n_clicks')
+    """function(n){if(n>0&&window.lwcDebug)window.lwcDebug('BTN','Load Chart n='+n+' - cekam na Python/IB...');return n;}""",
+    Output('load-click-log', 'data'), Input('load-chart-btn', 'n_clicks')
 )
 
-
-# ================================================================
-# TICK TOGGLE - ON/OFF
-# Vsechno clientside - Python neni potreba
-# ================================================================
+# TICK toggle
 app.clientside_callback(
     """
     function(n, currentEnabled) {
         var enabled = (n > 0) ? !currentEnabled : currentEnabled;
-
         if (n > 0) {
-            // Informuj lwcManager
-            if (window.lwcManager) {
-                window.lwcManager.setTickEnabled(enabled);
-            }
-            if (window.lwcDebug) {
-                window.lwcDebug('TICK',
-                    'Tick ' + (enabled ? 'ZAPNUT \u26a1 (15min delay na demo!)' : 'VYPNUT'));
-            }
+            if (window.lwcManager) window.lwcManager.setTickEnabled(enabled);
+            if (window.lwcDebug)
+                window.lwcDebug('TICK', 'Tick ' + (enabled ? 'ZAPNUT \u26a1 (15min delay na demo!)' : 'VYPNUT'));
         }
-
         var label = '\u26a1 TICK: ' + (enabled ? 'ON' : 'OFF');
         var cls   = 'tick-btn ' + (enabled ? 'tick-on' : 'tick-off');
         return [enabled, label, cls];
@@ -506,18 +443,64 @@ app.clientside_callback(
     State('tick-enabled-store', 'data')
 )
 
+# TICK DIAG
+app.clientside_callback(
+    """
+    function(n) {
+        if (n < 1) return n;
+        var d = window.lwcDebug || function() {};
+        var sym = (document.getElementById('symbol-input') &&
+                   document.getElementById('symbol-input').value || 'AAPL').toUpperCase();
+        d('API', '=== TICK DIAG: ' + sym + ' ===');
+        fetch('/api/diag/tick/' + sym)
+            .then(function(r) { return r.json(); })
+            .then(function(j) {
+                d('API', 'tick_sub_connected=' + j.tick_sub_connected
+                    + '  iterations=' + j.iterations
+                    + '  mdt=' + j.mdt);
+                d('API', 'subscribed_symbols=' + JSON.stringify(j.subscribed_symbols));
+                d('API', 'pending=' + JSON.stringify(j.pending));
+                var lx = j.latest;
+                d('API', 'LATEST: price=' + (lx.price||0)
+                    + '  last='   + (lx.last||0)
+                    + '  close='  + (lx.close||0)
+                    + '  bid='    + (lx.bid||0)
+                    + '  ask='    + (lx.ask||0));
+                var rf = j.raw_fields;
+                if (rf.error) {
+                    d('ERR', 'RAW: ' + rf.error
+                        + ' | subscribed=' + JSON.stringify(rf.subscribed)
+                        + ' | pending='    + JSON.stringify(rf.pending));
+                } else {
+                    d('API', 'RAW: last='  + rf.last
+                        + '  close=' + rf.close
+                        + '  bid='   + rf.bid
+                        + '  ask='   + rf.ask
+                        + '  halted='+ rf.halted);
+                    d('API', 'RAW: open=' + rf.open
+                        + '  high='  + rf.high
+                        + '  low='   + rf.low
+                        + '  vol='   + rf.volume
+                        + '  midpoint=' + rf._midpoint);
+                }
+            })
+            .catch(function(e) { d('ERR', 'TICK DIAG FAIL: ' + e); });
+        return n;
+    }
+    """,
+    Output('diag-tick-trigger', 'data'),
+    Input('diag-tick-btn', 'n_clicks')
+)
 
-# --- Loading indikator ---
+# Loading indikator
 app.clientside_callback(
     """
     function(n1m, n5m, n15m, n30m, n1h, n1d, nLoad) {
         var ctx = window.dash_clientside.callback_context;
         if (!ctx || !ctx.triggered || ctx.triggered.length === 0) return '';
         var tid = ctx.triggered_id || ctx.triggered[0].prop_id.split('.')[0];
-        var labels = {
-            'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m',
-            'tf-30m':'30m','tf-1h':'1h','tf-1d':'1D','load-chart-btn':'Load'
-        };
+        var labels = {'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m',
+                      'tf-30m':'30m','tf-1h':'1h','tf-1d':'1D','load-chart-btn':'Load'};
         return '\u23f3 Na\u010d\u00edt\u00e1m ' + (labels[tid]||tid) + '\u2026';
     }
     """,
@@ -528,8 +511,7 @@ app.clientside_callback(
      Input('load-chart-btn', 'n_clicks')]
 )
 
-
-# --- TF aktivni stav ---
+# TF aktivni stav
 app.clientside_callback(
     """
     function(n1m, n5m, n15m, n30m, n1h, n1d) {
@@ -555,9 +537,7 @@ app.clientside_callback(
     """
     function(activeTf) {
         var ids = ['tf-1m','tf-5m','tf-15m','tf-30m','tf-1h','tf-1d'];
-        return ids.map(function(id) {
-            return id === activeTf ? 'tf-btn tf-active' : 'tf-btn';
-        });
+        return ids.map(function(id) { return id===activeTf?'tf-btn tf-active':'tf-btn'; });
     }
     """,
     [Output('tf-1m',  'className'), Output('tf-5m',  'className'),
@@ -566,127 +546,56 @@ app.clientside_callback(
     Input('active-tf-store', 'data')
 )
 
-
-# --- chart-data-store -> lwcManager ---
+# chart-data-store -> lwcManager
 app.clientside_callback(
     """
     function(storeData) {
         var d = window.lwcDebug || function() {};
         d('CB', '=== Dash clientside callback spusten ===');
-
         var li = document.getElementById('chart-loading-indicator');
         if (li) li.textContent = '';
-
-        if (!storeData) {
-            d('CB', 'storeData NULL -> no_update');
-            return window.dash_clientside.no_update;
-        }
-        if (!storeData.bars || storeData.bars.length === 0) {
-            d('CB', 'bars prazdne -> no_update (trh zavreny?)');
-            return window.dash_clientside.no_update;
-        }
-
-        d('CB', 'symbol=' + storeData.symbol
-          + ' tf=' + storeData.timeframe
-          + ' baru=' + storeData.bars.length
-          + ' close[0]=' + storeData.bars[0].close);
-
+        if (!storeData) { d('CB', 'storeData NULL -> no_update'); return window.dash_clientside.no_update; }
+        if (!storeData.bars || storeData.bars.length === 0) { d('CB', 'bars prazdne -> no_update'); return window.dash_clientside.no_update; }
+        d('CB', 'symbol=' + storeData.symbol + ' tf=' + storeData.timeframe
+          + ' baru=' + storeData.bars.length + ' close[0]=' + storeData.bars[0].close);
         if (window.lwcManager) {
             d('CB', 'volam lwcManager.loadData()');
             window.lwcManager.loadData(storeData);
         } else {
-            var a = 0, r = setInterval(function() {
+            var a=0, r=setInterval(function(){
                 a++;
-                if (window.lwcManager) {
-                    window.lwcManager.loadData(storeData);
-                    clearInterval(r);
-                } else if (a > 20) {
-                    d('ERR', 'lwcManager nenalezen!');
-                    clearInterval(r);
-                }
-            }, 200);
+                if(window.lwcManager){window.lwcManager.loadData(storeData);clearInterval(r);}
+                else if(a>20){d('ERR','lwcManager nenalezen!');clearInterval(r);}
+            },200);
         }
-        return storeData.symbol || 'ok';
+        return storeData.symbol||'ok';
     }
     """,
     Output('chart-trigger-store', 'data'),
     Input('chart-data-store', 'data')
 )
 
-
-# --- Diagnostika ---
+# Diagnostika 1-3
 app.clientside_callback(
-    """
-    function(n) {
-        if (n < 1) return n;
-        var d = window.lwcDebug || function() {};
-        d('API', '=== TEST 1: IB spojeni ===');
-        fetch('/api/diag').then(r=>r.json()).then(j=>{
-            d('API','connected='+j.connected+' account='+j.account_id
-              +' tf='+(j.app_state&&j.app_state.current_timeframe));
-            d('API','cb='+j.cb_status.step+' bars='+j.cb_status.bars);
-            if(!j.connected) d('ERR','IB NENI PRIPOJENO!');
-            else d('API','TEST 1 OK');
-        }).catch(e=>d('ERR','FAIL: '+e));
-        return n;
-    }
-    """,
+    """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};d('API','=== TEST 1: IB spojeni ===');fetch('/api/diag').then(r=>r.json()).then(j=>{d('API','connected='+j.connected+' account='+j.account_id);d('API','tick_sub: connected='+j.tick_sub.connected+' iter='+j.tick_sub.iterations+' mdt='+j.tick_sub.mdt+' syms='+JSON.stringify(j.tick_sub.subscribed));}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
     Output('diag1-trigger', 'data'), Input('diag1-btn', 'n_clicks')
 )
-
 app.clientside_callback(
-    """
-    function(n) {
-        if (n < 1) return n;
-        var d = window.lwcDebug || function() {};
-        d('API', 'TEST 2: Hist. data...');
-        var t0=Date.now();
-        fetch('/api/test-hist/AAPL').then(r=>r.json()).then(j=>{
-            var el=((Date.now()-t0)/1000).toFixed(1);
-            if(j.ok) d('API','OK: '+j.bars+' baru za '+j.elapsed+'s');
-            else d('ERR','FAIL: '+j.error+' ('+el+'s)');
-        }).catch(e=>d('ERR','FAIL: '+e));
-        return n;
-    }
-    """,
+    """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};d('API','TEST 2: Hist. data...');fetch('/api/test-hist/AAPL').then(r=>r.json()).then(j=>{if(j.ok)d('API','OK: '+j.bars+' baru za '+j.elapsed+'s');else d('ERR','FAIL: '+j.error);}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
     Output('diag2-trigger', 'data'), Input('diag2-btn', 'n_clicks')
 )
-
 app.clientside_callback(
-    """
-    function(n) {
-        if (n < 1) return n;
-        var d = window.lwcDebug || function() {};
-        d('API', 'TEST 3: Fetch + nakreslit...');
-        fetch('/api/test-hist/AAPL').then(r=>r.json()).then(j=>{
-            if(!j.ok){d('ERR','Fail: '+j.error);return;}
-            d('API','OK: '+j.bars+' baru');
-            if(window.lwcManager) window.lwcManager.testChart();
-        }).catch(e=>d('ERR','FAIL: '+e));
-        return n;
-    }
-    """,
+    """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};d('API','TEST 3: Fetch+nakreslit...');fetch('/api/test-hist/AAPL').then(r=>r.json()).then(j=>{if(!j.ok){d('ERR','Fail: '+j.error);return;}d('API','OK: '+j.bars+' baru');if(window.lwcManager)window.lwcManager.testChart();}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
     Output('diag3-trigger', 'data'), Input('diag3-btn', 'n_clicks')
 )
-
 app.clientside_callback(
     """function(n){if(n>0&&window.lwcManager)window.lwcManager.testChart();return n;}""",
     Output('test-chart-trigger', 'data'), Input('test-chart-btn', 'n_clicks')
 )
-
 app.clientside_callback(
-    """
-    function(n){
-        if(n>0){var a=document.getElementById('debug-log-area');
-            if(a){a.select();try{document.execCommand('copy');}catch(e){}
-                  a.setSelectionRange(0,0);
-                  navigator.clipboard&&navigator.clipboard.writeText(a.value);}}
-        return n>0?'Zkopirov\u00e1no \u2713':'';
-    }
-    """,
+    """function(n){if(n>0){var a=document.getElementById('debug-log-area');if(a){a.select();try{document.execCommand('copy');}catch(e){}a.setSelectionRange(0,0);navigator.clipboard&&navigator.clipboard.writeText(a.value);}}return n>0?'Zkopirov\u00e1no \u2713':'';}""" ,
     Output('copy-status', 'children'), Input('copy-log-btn', 'n_clicks')
 )
-
 app.clientside_callback(
     """function(n){if(n>0){var a=document.getElementById('debug-log-area');if(a)a.value='';}return n;}""",
     Output('clear-log-trigger', 'data'), Input('clear-log-btn', 'n_clicks')
@@ -700,22 +609,20 @@ app.clientside_callback(
     State('symbol-input', 'value')
 )
 def update_price_display(n, symbol):
-    if not symbol or not ib.is_connected():
-        return 'Last: $0.00', ''
+    if not symbol or not ib.is_connected(): return 'Last: $0.00', ''
     ticker = ib.get_ticker(symbol)
-    if not ticker:
-        return 'Last: $0.00', ''
-    lp = ticker.get('last', 0)
+    if not ticker: return 'Last: $0.00', ''
+    lp = ticker.get('price', 0) or ticker.get('last', 0)
     pc = ticker.get('close', lp) or lp
+    if lp <= 0: return 'Last: $0.00', ''
     change = lp - pc
-    pct = (change / pc * 100) if pc > 0 else 0
-    arrow = '\u25b2' if change >= 0 else '\u25bc'
-    color = '#26a69a' if change >= 0 else '#ef5350'
-    sign = '+' if change >= 0 else ''
+    pct    = (change / pc * 100) if pc > 0 else 0
+    arrow  = '\u25b2' if change >= 0 else '\u25bc'
+    color  = '#26a69a' if change >= 0 else '#ef5350'
+    sign   = '+' if change >= 0 else ''
     return (
         f'Last: ${lp:.2f}',
-        html.Span(f' {arrow} {sign}${change:.2f} ({sign}{pct:.2f}%)',
-                  style={'color': color})
+        html.Span(f' {arrow} {sign}${change:.2f} ({sign}{pct:.2f}%)', style={'color': color})
     )
 
 
@@ -727,11 +634,9 @@ def update_price_display(n, symbol):
 )
 def update_quantity(q1, q5, q10, q25, q100):
     ctx = dash.callback_context
-    if not ctx.triggered:
-        return 1
+    if not ctx.triggered: return 1
     btn = ctx.triggered[0]['prop_id'].split('.')[0]
-    return {'qty-1': 1, 'qty-5': 5, 'qty-10': 10,
-            'qty-25': 25, 'qty-100': 100}.get(btn, 1)
+    return {'qty-1': 1, 'qty-5': 5, 'qty-10': 10, 'qty-25': 25, 'qty-100': 100}.get(btn, 1)
 
 
 @app.callback(
@@ -741,18 +646,13 @@ def update_quantity(q1, q5, q10, q25, q100):
 )
 def place_order(buy_clicks, sell_clicks, symbol, quantity):
     ctx = dash.callback_context
-    if not ctx.triggered:
-        return ''
+    if not ctx.triggered: return ''
     btn = ctx.triggered[0]['prop_id'].split('.')[0]
-    if btn == 'buy-btn' and buy_clicks > 0:
-        action, color = 'BUY', '#26a69a'
-    elif btn == 'sell-btn' and sell_clicks > 0:
-        action, color = 'SELL', '#ef5350'
-    else:
-        return ''
+    if btn == 'buy-btn' and buy_clicks > 0:   action, color = 'BUY',  '#26a69a'
+    elif btn == 'sell-btn' and sell_clicks > 0: action, color = 'SELL', '#ef5350'
+    else: return ''
     if not ib.is_connected():
-        return html.Div('\u274c Not connected!',
-                        style={'color': '#ef5350', 'fontWeight': 'bold'})
+        return html.Div('\u274c Not connected!', style={'color': '#ef5350', 'fontWeight': 'bold'})
     result = ib.place_market_order(symbol, action, quantity)
     if result['success']:
         return html.Div(f'\u2705 {action} {quantity} {symbol} @ Market',
@@ -776,8 +676,7 @@ def update_positions_table(n):
         pnl_c = '#26a69a' if pos['unrealized_pnl'] >= 0 else '#ef5350'
         rows.append(html.Tr([
             html.Td(pos['symbol'], style={'fontWeight': 'bold'}),
-            html.Td('LONG' if pos['position'] > 0 else 'SHORT',
-                    style={'color': '#00d4ff'}),
+            html.Td('LONG' if pos['position'] > 0 else 'SHORT', style={'color': '#00d4ff'}),
             html.Td(abs(pos['position'])),
             html.Td(f"${pos['avg_cost']:.2f}"),
             html.Td(f"${pos['market_value']:.2f}"),
@@ -844,31 +743,16 @@ app.index_string = '''
             }
             .tf-btn:hover, .qty-btn:hover { background: #4a4a6a; }
             .tf-active { background: #667eea !important; }
-
-            /* TICK toggle button */
             .tick-btn {
-                padding: 8px 14px;
-                border-radius: 5px;
-                cursor: pointer;
-                font-weight: bold;
-                font-size: 13px;
-                border: 2px solid;
-                transition: all 0.2s;
+                padding: 8px 14px; border-radius: 5px;
+                cursor: pointer; font-weight: bold; font-size: 13px;
+                border: 2px solid; transition: all 0.2s;
             }
-            .tick-off {
-                background: #2d2d3a;
-                border-color: #555;
-                color: #888;
-            }
+            .tick-off { background: #2d2d3a; border-color: #555; color: #888; }
             .tick-off:hover { background: #3a3a4a; border-color: #777; color: #aaa; }
-            .tick-on {
-                background: #1b5e20;
-                border-color: #26a69a;
-                color: #26a69a;
-                box-shadow: 0 0 8px #26a69a44;
-            }
+            .tick-on  { background: #1b5e20; border-color: #26a69a; color: #26a69a;
+                        box-shadow: 0 0 8px #26a69a44; }
             .tick-on:hover { background: #2e7d32; }
-
             table { border-collapse: collapse; width: 100%; }
             th, td { padding: 12px; text-align: left; border-bottom: 1px solid #3d3d4a; }
             th { background: #3d3d4a; font-weight: bold; color: #00d4ff; }
@@ -890,7 +774,7 @@ app.index_string = '''
 # ========== RUN ==========
 
 if __name__ == '__main__':
-    print("\U0001f680 Starting IB Trading Platform v2.1.0...")
+    print("\U0001f680 Starting IB Trading Platform v2.4.0...")
     print(f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
     if ib.connect():
         print("\u2705 Connected to IB Gateway!")
