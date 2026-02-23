@@ -4,7 +4,7 @@ Professional trading platform with real-time market data,
 order execution, positions tracking, and TradingView Lightweight Charts.
 
 Author: Perplexity AI Assistant
-Version: 2.0.5 - clientside_callback logs every step to debug panel
+Version: 2.0.6 - textarea selectable, copy btn, immediate click log
 """
 
 import dash
@@ -128,6 +128,8 @@ app.layout = html.Div([
         dcc.Store(id='chart-trigger-store'),
         dcc.Store(id='test-chart-trigger'),
         dcc.Store(id='clear-log-trigger'),
+        dcc.Store(id='copy-log-trigger'),
+        dcc.Store(id='load-click-log'),   # okamzity log kliknuti tlacitka
 
     ], style={
         'padding': '20px', 'background': '#2d2d3a',
@@ -205,6 +207,7 @@ app.layout = html.Div([
         html.H3('\U0001f527 Debug Panel',
                 style={'marginBottom': '10px', 'color': '#ff9800'}),
 
+        # Python inspector
         html.Div([
             html.Span('Python \u2192 chart-data-store: ',
                       style={'fontWeight': 'bold', 'color': '#00d4ff'}),
@@ -214,14 +217,25 @@ app.layout = html.Div([
         ], style={'marginBottom': '12px', 'padding': '8px',
                   'background': '#0d0d1a', 'borderRadius': '5px'}),
 
+        # Tlacitka
         html.Div([
             html.Button(
-                '\U0001f9ea Test Chart (100 fake svicek - BEZ IB)',
+                '\U0001f9ea Test Chart (fake)',
                 id='test-chart-btn', n_clicks=0,
                 style={
                     'padding': '10px 20px', 'marginRight': '10px',
                     'background': '#ff9800', 'border': 'none',
                     'borderRadius': '5px', 'color': 'black',
+                    'cursor': 'pointer', 'fontWeight': 'bold', 'fontSize': '14px'
+                }
+            ),
+            html.Button(
+                '\U0001f4cb Zkopirovat log',
+                id='copy-log-btn', n_clicks=0,
+                style={
+                    'padding': '10px 20px', 'marginRight': '10px',
+                    'background': '#26a69a', 'border': 'none',
+                    'borderRadius': '5px', 'color': 'white',
                     'cursor': 'pointer', 'fontWeight': 'bold', 'fontSize': '14px'
                 }
             ),
@@ -235,8 +249,13 @@ app.layout = html.Div([
                     'cursor': 'pointer', 'fontSize': '14px'
                 }
             ),
+            html.Span(id='copy-status', style={
+                'marginLeft': '10px', 'color': '#26a69a',
+                'fontSize': '13px', 'fontStyle': 'italic'
+            })
         ], style={'marginBottom': '10px'}),
 
+        # JS log textarea - BEZ pointerEvents:none, lze oznacit a kopirovat
         html.Textarea(
             id='debug-log-area',
             rows=20,
@@ -246,13 +265,13 @@ app.layout = html.Div([
                 'background': '#0d0d0d', 'color': '#00ff00',
                 'fontFamily': 'monospace', 'fontSize': '12px',
                 'border': '1px solid #333', 'borderRadius': '5px',
-                'padding': '10px', 'resize': 'vertical',
-                'pointerEvents': 'none'
+                'padding': '10px', 'resize': 'vertical'
+                # readOnly reseno pres Python callback nize
             }
         ),
         html.Div(
-            '\u2139\ufe0f Legenda: [INIT]=inicializace grafu | [DATA]=data z Dash/IB | '
-            '[CB]=clientside_callback | [TEST]=test tlacitko | [ERR]=chyba',
+            '\u2139\ufe0f [INIT]=inicializace | [BTN]=klik tlacitka | '
+            '[CB]=callback Python\u2192JS | [DATA]=zpracovani dat | [ERR]=chyba',
             style={'marginTop': '8px', 'fontSize': '12px',
                    'color': '#888', 'fontStyle': 'italic'}
         )
@@ -361,11 +380,27 @@ def update_debug_python(data):
     )
 
 
-# ==================================================================
-# KLICOVY clientside callback:
-# chart-data-store -> lwcManager.loadData()
-# Lezi sem cely prubeh vcetne logu do debug panelu
-# ==================================================================
+# ------------------------------------------------------------------
+# Okamzity log: fires PRED Pythonem - jen JS, bez cekani na IB data
+# ------------------------------------------------------------------
+app.clientside_callback(
+    """
+    function(n) {
+        if (n > 0 && window.lwcDebug) {
+            window.lwcDebug('BTN', 'Load Chart kliknuto (n=' + n +
+                ') - Python bezi, cekam na IB data...');
+        }
+        return n;
+    }
+    """,
+    Output('load-click-log', 'data'),
+    Input('load-chart-btn', 'n_clicks')
+)
+
+
+# ------------------------------------------------------------------
+# Hlavni callback: store -> lwcManager.loadData()
+# ------------------------------------------------------------------
 app.clientside_callback(
     """
     function(storeData) {
@@ -374,36 +409,36 @@ app.clientside_callback(
         d('CB', '=== clientside_callback spusten ===');
 
         if (!storeData) {
-            d('CB', 'storeData je NULL/undefined -> no_update');
+            d('CB', 'storeData je NULL -> no_update');
             return window.dash_clientside.no_update;
         }
-
         if (!storeData.bars) {
-            d('CB', 'storeData.bars chybi -> no_update. Obsah: ' + JSON.stringify(storeData).slice(0, 200));
+            d('CB', 'storeData.bars chybi -> no_update. Data: ' +
+              JSON.stringify(storeData).slice(0, 200));
             return window.dash_clientside.no_update;
         }
 
-        d('CB', 'Data prijata: symbol=' + storeData.symbol +
+        d('CB', 'symbol=' + storeData.symbol +
           ' | baru=' + storeData.bars.length +
-          ' | prvni time=' + (storeData.bars[0] && storeData.bars[0].time) +
-          ' | prvni close=' + (storeData.bars[0] && storeData.bars[0].close));
+          ' | bars[0].time=' + (storeData.bars[0] && storeData.bars[0].time) +
+          ' | bars[0].close=' + (storeData.bars[0] && storeData.bars[0].close));
 
         if (!window.lwcManager) {
-            d('CB', 'lwcManager NENI definovano! Cekam 200ms a zkousim znovu (max 20x)...');
+            d('CB', 'lwcManager NENI pripraveno, retry za 200ms (max 20x)');
             var attempt = 0;
             var retry = setInterval(function() {
                 attempt++;
                 if (window.lwcManager) {
-                    d('CB', 'lwcManager nalezen po ' + attempt + ' pokusech, volam loadData()');
+                    d('CB', 'lwcManager nalezen po ' + attempt + 'x, volam loadData()');
                     window.lwcManager.loadData(storeData);
                     clearInterval(retry);
                 } else if (attempt > 20) {
-                    d('ERR', 'lwcManager stale neni! JS soubor se mozna nenacetl.');
+                    d('ERR', 'lwcManager stale neni dostupny!');
                     clearInterval(retry);
                 }
             }, 200);
         } else {
-            d('CB', 'lwcManager OK, volam loadData()...');
+            d('CB', 'lwcManager OK, volam loadData()');
             window.lwcManager.loadData(storeData);
         }
 
@@ -419,18 +454,39 @@ app.clientside_callback(
     """
     function(n) {
         if (n > 0) {
-            if (window.lwcManager) {
-                window.lwcManager.testChart();
-            } else {
-                var area = document.getElementById('debug-log-area');
-                if (area) { area.value = '[CHYBA] lwcManager neni definovano!\\n' + area.value; }
-            }
+            if (window.lwcManager) { window.lwcManager.testChart(); }
+            else if (window.lwcDebug) { window.lwcDebug('ERR', 'lwcManager neni!'); }
         }
         return n;
     }
     """,
     Output('test-chart-trigger', 'data'),
     Input('test-chart-btn', 'n_clicks')
+)
+
+
+# Zkopirovat log do schranky
+app.clientside_callback(
+    """
+    function(n) {
+        if (n > 0) {
+            var area = document.getElementById('debug-log-area');
+            if (area && area.value) {
+                navigator.clipboard.writeText(area.value).then(function() {
+                    var btn = document.getElementById('copy-status');
+                    // signal Dashi - pouzij dummy span
+                }).catch(function() {});
+                // Starsi metoda jako fallback
+                area.select();
+                try { document.execCommand('copy'); } catch(e) {}
+                area.setSelectionRange(0, 0);
+            }
+        }
+        return n > 0 ? 'Zkopirováno! ✓' : '';
+    }
+    """,
+    Output('copy-status', 'children'),
+    Input('copy-log-btn', 'n_clicks')
 )
 
 
