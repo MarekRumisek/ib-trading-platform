@@ -1,10 +1,9 @@
 """IB Trading Platform - Main Dash Application with Lightweight Charts
 
-Version: 2.0.7 - Kompletni diagnostika
-  - Flask API /api/diag, /api/test-hist, /api/cb-status
-  - 3 diagnosticka tlacitka v debug panelu (bypass Dash)
-  - Globalni _cb_status tracker pro sledovani stavu callbacku
-  - Intervaly zpomaleny (10s/30s) aby neblokovalyDash queue
+Version: 2.0.8
+  - TF buttony: aktivni CSS stav (clientside, okamzite)
+  - duration_map: spravna delka dat pro kazdy timeframe
+  - debug log pro kliknuti TF buttonu
 """
 
 import dash
@@ -27,23 +26,27 @@ app = dash.Dash(
 ib = IBConnector()
 server = app.server
 
-# ================================================================
-# GLOBALNI STATUS TRACKER - sleduje stav Python callbacku
-# aktualizuje se behem load_chart_data
-# citelny pres /api/cb-status (nezavisle na Dash)
-# ================================================================
 _cb_status = {
-    'step': 'idle',
-    'symbol': None,
-    'tf': None,
-    'bars': None,
-    'error': None,
-    'ts': None,
+    'step': 'idle', 'symbol': None, 'tf': None,
+    'bars': None, 'error': None, 'ts': None,
+}
+
+# ================================================================
+# TIMEFRAME -> DURATION MAP
+# IB ma limity: 1min max 1D, 5min max 1W, 1day max 1Y apod.
+# ================================================================
+DURATION_MAP = {
+    '1 min':   '1 D',    # ~390 svicek (cely den)
+    '5 mins':  '2 D',    # ~156 svicek (2 dny)
+    '15 mins': '5 D',    # ~130 svicek (tyden)
+    '30 mins': '10 D',   # ~130 svicek (2 tydny)
+    '1 hour':  '1 M',    # ~170 svicek (mesic)
+    '1 day':   '6 M',    # ~126 svicek (6 mesicu)
 }
 
 
 # ================================================================
-# FLASK API ENDPOINTY - testovatelne primo z prohlizece / JS
+# FLASK API
 # ================================================================
 
 @server.route('/api/tick/<symbol>')
@@ -57,45 +60,36 @@ def get_tick(symbol):
 
 @server.route('/api/diag')
 def api_diag():
-    """Diagnostika pripojeni - volej z JS nebo prohlizece."""
     return jsonify({
         'connected': ib.is_connected(),
         'account_id': ib.account_id,
         'cached_contracts': list(ib.contracts.keys()),
         'cached_tickers': len(ib.tickers),
         'cb_status': _cb_status,
+        'app_state': app_state,
         'time': datetime.now().strftime('%H:%M:%S')
     })
 
 
 @server.route('/api/test-hist/<symbol>')
 def api_test_hist(symbol):
-    """Primo testuje get_historical_data() - bypass Dash callbacku."""
     t0 = time.time()
     try:
         if not ib.is_connected():
-            return jsonify({'ok': False, 'error': 'NOT CONNECTED',
-                            'elapsed': 0})
-        bars = ib.get_historical_data(symbol.upper(), '1 D', '5 mins')
+            return jsonify({'ok': False, 'error': 'NOT CONNECTED', 'elapsed': 0})
+        bars = ib.get_historical_data(symbol.upper(), '2 D', '5 mins')
         elapsed = round(time.time() - t0, 2)
         if bars:
-            return jsonify({
-                'ok': True,
-                'bars': len(bars),
-                'elapsed': elapsed,
-                'first': bars[0],
-                'last': bars[-1]
-            })
-        return jsonify({'ok': False, 'error': 'EMPTY - 0 bars',
-                        'elapsed': elapsed})
+            return jsonify({'ok': True, 'bars': len(bars), 'elapsed': elapsed,
+                            'first': bars[0], 'last': bars[-1]})
+        return jsonify({'ok': False, 'error': 'EMPTY - 0 bars', 'elapsed': elapsed})
     except Exception as e:
-        elapsed = round(time.time() - t0, 2)
-        return jsonify({'ok': False, 'error': str(e), 'elapsed': elapsed})
+        return jsonify({'ok': False, 'error': str(e),
+                        'elapsed': round(time.time() - t0, 2)})
 
 
 @server.route('/api/cb-status')
 def api_cb_status():
-    """Vraci aktualni stav load_chart_data callbacku."""
     return jsonify(_cb_status)
 
 
@@ -165,8 +159,8 @@ app.layout = html.Div([
         html.Div([
             html.Span(id='price-display', children='Last: $0.00',
                       style={'fontSize': '20px', 'fontWeight': 'bold'}),
-            html.Span(id='price-change-display', children=' \u25b2 +$0.00 (+0.00%)',
-                      style={'fontSize': '16px', 'marginLeft': '15px', 'color': '#26a69a'})
+            html.Span(id='price-change-display', children='',
+                      style={'fontSize': '16px', 'marginLeft': '15px'})
         ], style={'display': 'inline-block'})
     ], style={
         'padding': '15px', 'background': '#2d2d3a',
@@ -175,6 +169,7 @@ app.layout = html.Div([
 
     # Chart panel
     html.Div([
+        # TF buttony - className se meni clientside okamzite
         html.Div([
             html.Button('1m',  id='tf-1m',  n_clicks=0, className='tf-btn'),
             html.Button('5m',  id='tf-5m',  n_clicks=0, className='tf-btn tf-active'),
@@ -199,6 +194,8 @@ app.layout = html.Div([
         dcc.Store(id='diag1-trigger'),
         dcc.Store(id='diag2-trigger'),
         dcc.Store(id='diag3-trigger'),
+        # Aktivni TF - sleduje ktery button je aktivni
+        dcc.Store(id='active-tf-store', data='tf-5m'),
 
     ], style={
         'padding': '20px', 'background': '#2d2d3a',
@@ -253,142 +250,86 @@ app.layout = html.Div([
 
     # Positions
     html.Div([
-        html.H3('\U0001f4ca Open Positions (Real-time P&L)', style={'marginBottom': '15px'}),
+        html.H3('\U0001f4ca Open Positions', style={'marginBottom': '15px'}),
         html.Div(id='positions-table')
-    ], style={
-        'padding': '20px', 'background': '#2d2d3a',
-        'borderRadius': '8px', 'marginBottom': '20px'
-    }),
+    ], style={'padding': '20px', 'background': '#2d2d3a',
+              'borderRadius': '8px', 'marginBottom': '20px'}),
 
     # Orders
     html.Div([
         html.H3('\U0001f4cb Recent Orders', style={'marginBottom': '15px'}),
         html.Div(id='orders-table')
-    ], style={
-        'padding': '20px', 'background': '#2d2d3a',
-        'borderRadius': '8px', 'marginBottom': '20px'
-    }),
+    ], style={'padding': '20px', 'background': '#2d2d3a',
+              'borderRadius': '8px', 'marginBottom': '20px'}),
 
-    # ================================================================
     # DEBUG PANEL
-    # ================================================================
     html.Div([
         html.H3('\U0001f527 Debug Panel',
                 style={'marginBottom': '10px', 'color': '#ff9800'}),
-
-        # Python callback status
         html.Div([
             html.Span('Python callback: ',
                       style={'fontWeight': 'bold', 'color': '#00d4ff'}),
-            html.Span(id='debug-python-info',
-                      children='(ceka na Load Chart...)',
+            html.Span(id='debug-python-info', children='(ceka na Load Chart...)',
                       style={'fontFamily': 'monospace', 'fontSize': '13px'})
         ], style={'marginBottom': '12px', 'padding': '8px',
                   'background': '#0d0d1a', 'borderRadius': '5px'}),
-
-        # ---- DIAGNOSTICKA TLACITKA (bypass Dash, volaji Flask API primo) ----
         html.Div([
-            html.Div('\U0001f9ea Diagnostika (nezavisla na Dash callbacks):',
+            html.Div('\U0001f9ea Diagnostika:',
                      style={'color': '#ff9800', 'fontWeight': 'bold',
                             'marginBottom': '8px', 'fontSize': '13px'}),
-            html.Button(
-                '1\ufe0f\u20e3 Test: IB Spojeni',
-                id='diag1-btn', n_clicks=0,
-                style={
-                    'padding': '10px 16px', 'marginRight': '8px',
-                    'background': '#1565c0', 'border': 'none',
-                    'borderRadius': '5px', 'color': 'white',
-                    'cursor': 'pointer', 'fontWeight': 'bold', 'fontSize': '13px'
-                }
-            ),
-            html.Button(
-                '2\ufe0f\u20e3 Test: Historicka data AAPL',
-                id='diag2-btn', n_clicks=0,
-                style={
-                    'padding': '10px 16px', 'marginRight': '8px',
-                    'background': '#6a1599', 'border': 'none',
-                    'borderRadius': '5px', 'color': 'white',
-                    'cursor': 'pointer', 'fontWeight': 'bold', 'fontSize': '13px'
-                }
-            ),
-            html.Button(
-                '3\ufe0f\u20e3 Nakreslit z API (bypass Dash)',
-                id='diag3-btn', n_clicks=0,
-                style={
-                    'padding': '10px 16px', 'marginRight': '8px',
-                    'background': '#1b5e20', 'border': 'none',
-                    'borderRadius': '5px', 'color': 'white',
-                    'cursor': 'pointer', 'fontWeight': 'bold', 'fontSize': '13px'
-                }
-            ),
+            html.Button('1\ufe0f\u20e3 IB Spojeni', id='diag1-btn', n_clicks=0,
+                        style={'padding': '10px 16px', 'marginRight': '8px',
+                               'background': '#1565c0', 'border': 'none',
+                               'borderRadius': '5px', 'color': 'white',
+                               'cursor': 'pointer', 'fontWeight': 'bold'}),
+            html.Button('2\ufe0f\u20e3 Hist. data AAPL', id='diag2-btn', n_clicks=0,
+                        style={'padding': '10px 16px', 'marginRight': '8px',
+                               'background': '#6a1599', 'border': 'none',
+                               'borderRadius': '5px', 'color': 'white',
+                               'cursor': 'pointer', 'fontWeight': 'bold'}),
+            html.Button('3\ufe0f\u20e3 Nakreslit z API', id='diag3-btn', n_clicks=0,
+                        style={'padding': '10px 16px', 'marginRight': '8px',
+                               'background': '#1b5e20', 'border': 'none',
+                               'borderRadius': '5px', 'color': 'white',
+                               'cursor': 'pointer', 'fontWeight': 'bold'}),
         ], style={'marginBottom': '12px', 'padding': '10px',
                   'background': '#0d1a2e', 'borderRadius': '5px',
                   'border': '1px solid #1565c0'}),
-
-        # ---- NORMALNI TLACITKA ----
         html.Div([
-            html.Button(
-                '\U0001f9ea Test Chart (fake)',
-                id='test-chart-btn', n_clicks=0,
-                style={
-                    'padding': '10px 20px', 'marginRight': '10px',
-                    'background': '#ff9800', 'border': 'none',
-                    'borderRadius': '5px', 'color': 'black',
-                    'cursor': 'pointer', 'fontWeight': 'bold', 'fontSize': '14px'
-                }
-            ),
-            html.Button(
-                '\U0001f4cb Zkopirovat log',
-                id='copy-log-btn', n_clicks=0,
-                style={
-                    'padding': '10px 20px', 'marginRight': '10px',
-                    'background': '#26a69a', 'border': 'none',
-                    'borderRadius': '5px', 'color': 'white',
-                    'cursor': 'pointer', 'fontWeight': 'bold', 'fontSize': '14px'
-                }
-            ),
-            html.Button(
-                '\U0001f5d1 Smazat log',
-                id='clear-log-btn', n_clicks=0,
-                style={
-                    'padding': '10px 20px',
-                    'background': '#555', 'border': 'none',
-                    'borderRadius': '5px', 'color': 'white',
-                    'cursor': 'pointer', 'fontSize': '14px'
-                }
-            ),
-            html.Span(id='copy-status', style={
-                'marginLeft': '10px', 'color': '#26a69a',
-                'fontSize': '13px', 'fontStyle': 'italic'
-            })
+            html.Button('\U0001f9ea Test Chart (fake)', id='test-chart-btn', n_clicks=0,
+                        style={'padding': '10px 20px', 'marginRight': '10px',
+                               'background': '#ff9800', 'border': 'none',
+                               'borderRadius': '5px', 'color': 'black',
+                               'cursor': 'pointer', 'fontWeight': 'bold'}),
+            html.Button('\U0001f4cb Zkopirovat log', id='copy-log-btn', n_clicks=0,
+                        style={'padding': '10px 20px', 'marginRight': '10px',
+                               'background': '#26a69a', 'border': 'none',
+                               'borderRadius': '5px', 'color': 'white',
+                               'cursor': 'pointer', 'fontWeight': 'bold'}),
+            html.Button('\U0001f5d1 Smazat log', id='clear-log-btn', n_clicks=0,
+                        style={'padding': '10px 20px', 'background': '#555',
+                               'border': 'none', 'borderRadius': '5px',
+                               'color': 'white', 'cursor': 'pointer'}),
+            html.Span(id='copy-status',
+                      style={'marginLeft': '10px', 'color': '#26a69a',
+                             'fontSize': '13px', 'fontStyle': 'italic'})
         ], style={'marginBottom': '10px'}),
-
         html.Textarea(
-            id='debug-log-area',
-            rows=22,
-            placeholder='Sem JS pise vsechny kroky...\nOtevri stranku a uvidis co se deje.',
-            style={
-                'width': '100%', 'boxSizing': 'border-box',
-                'background': '#0d0d0d', 'color': '#00ff00',
-                'fontFamily': 'monospace', 'fontSize': '12px',
-                'border': '1px solid #333', 'borderRadius': '5px',
-                'padding': '10px', 'resize': 'vertical'
-            }
+            id='debug-log-area', rows=22,
+            placeholder='JS debug log...',
+            style={'width': '100%', 'boxSizing': 'border-box',
+                   'background': '#0d0d0d', 'color': '#00ff00',
+                   'fontFamily': 'monospace', 'fontSize': '12px',
+                   'border': '1px solid #333', 'borderRadius': '5px',
+                   'padding': '10px', 'resize': 'vertical'}
         ),
-        html.Div(
-            '\u2139\ufe0f [INIT]=LWC | [BTN]=klik | [CB]=Dash callback | '
-            '[API]=Flask test | [DATA]=data | [ERR]=chyba',
-            style={'marginTop': '8px', 'fontSize': '12px',
-                   'color': '#888', 'fontStyle': 'italic'}
-        )
-    ], style={
-        'padding': '20px', 'background': '#1a1a2e',
-        'borderRadius': '8px', 'marginBottom': '20px',
-        'border': '2px solid #ff9800'
-    }),
+        html.Div('[INIT] [BTN] [CB] [TF] [API] [DATA] [ERR]',
+                 style={'marginTop': '8px', 'fontSize': '12px',
+                        'color': '#888', 'fontStyle': 'italic'})
+    ], style={'padding': '20px', 'background': '#1a1a2e',
+              'borderRadius': '8px', 'marginBottom': '20px',
+              'border': '2px solid #ff9800'}),
 
-    # Intervaly zpomalene: price 10s, positions 30s, conn 10s
-    # aby neblokovalyDash callback queue behem debugovani
     dcc.Interval(id='price-update-interval',     interval=10000, n_intervals=0),
     dcc.Interval(id='positions-update-interval', interval=30000, n_intervals=0),
     dcc.Interval(id='connection-check-interval', interval=10000, n_intervals=0),
@@ -401,7 +342,7 @@ app.layout = html.Div([
 })
 
 
-# ========== CALLBACKS ==========
+# ========== PYTHON CALLBACKS ==========
 
 @app.callback(
     Output('connection-status', 'children'),
@@ -452,41 +393,41 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, symbol):
     global _cb_status
     try:
         ctx = dash.callback_context
-        btn = ctx.triggered[0]['prop_id'].split('.')[0] if ctx.triggered else 'load-chart-btn'
+        btn = (ctx.triggered[0]['prop_id'].split('.')[0]
+               if ctx.triggered else 'load-chart-btn')
+
         tf_map = {
-            'tf-1m': '1 min', 'tf-5m': '5 mins', 'tf-15m': '15 mins',
-            'tf-30m': '30 mins', 'tf-1h': '1 hour', 'tf-1d': '1 day'
+            'tf-1m': '1 min',   'tf-5m': '5 mins',
+            'tf-15m': '15 mins', 'tf-30m': '30 mins',
+            'tf-1h': '1 hour',  'tf-1d': '1 day'
         }
-        app_state['current_timeframe'] = tf_map.get(btn, app_state['current_timeframe'])
+        if btn in tf_map:
+            app_state['current_timeframe'] = tf_map[btn]
+
         symbol = (symbol or 'AAPL').upper()
         app_state['current_symbol'] = symbol
+        tf = app_state['current_timeframe']
+        duration = DURATION_MAP.get(tf, '1 D')
 
-        # --- krok 1: callback zacal ---
-        _cb_status = {'step': 'started', 'symbol': symbol,
-                      'tf': app_state['current_timeframe'],
+        _cb_status = {'step': 'started', 'symbol': symbol, 'tf': tf,
                       'bars': None, 'error': None,
                       'ts': datetime.now().strftime('%H:%M:%S')}
-        print(f"[CB] load_chart_data START: {symbol} {app_state['current_timeframe']}")
+        print(f"[CB] START: {symbol} | {tf} | duration={duration}")
 
-        # --- krok 2: volame IB ---
         _cb_status['step'] = 'requesting_IB'
-        bars = ib.get_historical_data(symbol, '1 D', app_state['current_timeframe'])
+        bars = ib.get_historical_data(symbol, duration, tf)
 
-        # --- krok 3: IB odpovezel ---
         _cb_status['step'] = 'IB_returned'
         _cb_status['bars'] = len(bars)
-        print(f"[CB] load_chart_data IB returned {len(bars)} bars")
+        print(f"[CB] IB returned {len(bars)} bars")
 
-        result = {'symbol': symbol,
-                  'timeframe': app_state['current_timeframe'],
-                  'bars': bars}
         _cb_status['step'] = 'done'
-        return result
+        return {'symbol': symbol, 'timeframe': tf, 'bars': bars}
 
     except Exception as e:
         _cb_status['step'] = 'ERROR'
         _cb_status['error'] = str(e)
-        print(f"[CB] load_chart_data EXCEPTION: {e}")
+        print(f"[CB] EXCEPTION: {e}")
         return dash.no_update
 
 
@@ -499,24 +440,22 @@ def update_debug_python(data):
         return '(prazdne)'
     bars = data.get('bars', [])
     if not bars:
-        return f"\u26a0\ufe0f symbol={data.get('symbol')} | 0 BARU (IB timeout nebo trh zavreny)"
+        return (f"\u26a0\ufe0f {data.get('symbol')} | {data.get('timeframe')} "
+                f"| 0 BARU (trh zavreny nebo IB timeout)")
     b0 = bars[0]
-    return (
-        f"\u2705 {data.get('symbol')} | {data.get('timeframe')} | "
-        f"{len(bars)} baru | "
-        f"time[0]={b0['time']} close[0]={b0['close']} | "
-        f"close[-1]={bars[-1]['close']:.2f}"
-    )
+    return (f"\u2705 {data.get('symbol')} | {data.get('timeframe')} "
+            f"| {len(bars)} baru "
+            f"| close[0]={b0['close']} close[-1]={bars[-1]['close']:.2f}")
 
 
-# ---- Okamzity log kliknuti ----
+# ========== CLIENTSIDE CALLBACKS ==========
+
+# --- Okamzity log pro Load Chart ---
 app.clientside_callback(
     """
     function(n) {
-        if (n > 0 && window.lwcDebug) {
-            window.lwcDebug('BTN', 'Load Chart n=' + n +
-                ' - cekam na Python/IB...');
-        }
+        if (n > 0 && window.lwcDebug)
+            window.lwcDebug('BTN', 'Load Chart n=' + n + ' - cekam na Python/IB...');
         return n;
     }
     """,
@@ -525,38 +464,77 @@ app.clientside_callback(
 )
 
 
-# ---- Hlavni: chart-data-store -> lwcManager ----
+# ================================================================
+# TF BUTTONY - aktivni stav (okamzite, bez cekani na Python)
+# Krok 1: klik -> uloz aktivni ID do store + log
+# ================================================================
+app.clientside_callback(
+    """
+    function(n1m, n5m, n15m, n30m, n1h, n1d) {
+        var ctx = window.dash_clientside.callback_context;
+        if (!ctx || !ctx.triggered || ctx.triggered.length === 0)
+            return window.dash_clientside.no_update;
+
+        var tid = ctx.triggered_id || ctx.triggered[0].prop_id.split('.')[0];
+        var labels = {
+            'tf-1m': '1m', 'tf-5m': '5m', 'tf-15m': '15m',
+            'tf-30m': '30m', 'tf-1h': '1h', 'tf-1d': '1D'
+        };
+        if (window.lwcDebug)
+            window.lwcDebug('TF', 'Zmen timeframe -> ' + (labels[tid] || tid)
+                + ' (cekam na Python/IB data...)');
+        return tid;
+    }
+    """,
+    Output('active-tf-store', 'data'),
+    [Input('tf-1m', 'n_clicks'), Input('tf-5m', 'n_clicks'),
+     Input('tf-15m', 'n_clicks'), Input('tf-30m', 'n_clicks'),
+     Input('tf-1h', 'n_clicks'), Input('tf-1d', 'n_clicks')]
+)
+
+
+# ================================================================
+# TF BUTTONY - CSS aktivni stav
+# Krok 2: store zmena -> okamzita aktualizace vsech className
+# ================================================================
+app.clientside_callback(
+    """
+    function(activeTf) {
+        var ids = ['tf-1m', 'tf-5m', 'tf-15m', 'tf-30m', 'tf-1h', 'tf-1d'];
+        return ids.map(function(id) {
+            return id === activeTf ? 'tf-btn tf-active' : 'tf-btn';
+        });
+    }
+    """,
+    [Output('tf-1m',  'className'),
+     Output('tf-5m',  'className'),
+     Output('tf-15m', 'className'),
+     Output('tf-30m', 'className'),
+     Output('tf-1h',  'className'),
+     Output('tf-1d',  'className')],
+    Input('active-tf-store', 'data')
+)
+
+
+# ---- chart-data-store -> lwcManager ----
 app.clientside_callback(
     """
     function(storeData) {
         var d = window.lwcDebug || function() {};
         d('CB', '=== Dash clientside callback spusten ===');
-        if (!storeData) {
-            d('CB', 'storeData NULL -> no_update');
-            return window.dash_clientside.no_update;
-        }
-        if (!storeData.bars) {
-            d('CB', 'bars chybi -> no_update: ' + JSON.stringify(storeData).slice(0,100));
-            return window.dash_clientside.no_update;
-        }
-        d('CB', 'symbol=' + storeData.symbol + ' baru=' + storeData.bars.length +
-          ' time[0]=' + (storeData.bars[0] && storeData.bars[0].time) +
-          ' close[0]=' + (storeData.bars[0] && storeData.bars[0].close));
+        if (!storeData) { d('CB', 'storeData NULL -> no_update'); return window.dash_clientside.no_update; }
+        if (!storeData.bars) { d('CB', 'bars chybi'); return window.dash_clientside.no_update; }
+        d('CB', 'symbol=' + storeData.symbol + ' baru=' + storeData.bars.length
+          + ' time[0]=' + (storeData.bars[0] && storeData.bars[0].time)
+          + ' close[0]=' + (storeData.bars[0] && storeData.bars[0].close));
         if (window.lwcManager) {
             d('CB', 'volam lwcManager.loadData()');
             window.lwcManager.loadData(storeData);
         } else {
-            var a = 0;
-            var r = setInterval(function() {
+            var a = 0, r = setInterval(function() {
                 a++;
-                if (window.lwcManager) {
-                    d('CB', 'lwcManager nalezen po ' + a + 'x');
-                    window.lwcManager.loadData(storeData);
-                    clearInterval(r);
-                } else if (a > 20) {
-                    d('ERR', 'lwcManager nenalezen!');
-                    clearInterval(r);
-                }
+                if (window.lwcManager) { window.lwcManager.loadData(storeData); clearInterval(r); }
+                else if (a > 20) { d('ERR', 'lwcManager nenalezen!'); clearInterval(r); }
             }, 200);
         }
         return storeData.symbol || 'ok';
@@ -567,33 +545,22 @@ app.clientside_callback(
 )
 
 
-# ================================================================
-# DIAGNOSTIKA 1 - Test IB spojeni pres /api/diag
-# ================================================================
+# ---- Diagnostika 1 ----
 app.clientside_callback(
     """
     function(n) {
         if (n < 1) return n;
         var d = window.lwcDebug || function() {};
-        d('API', '=== TEST 1: IB spojeni (/api/diag) ===');
-        fetch('/api/diag')
-            .then(function(r) { return r.json(); })
-            .then(function(j) {
-                d('API', 'connected=' + j.connected
-                  + ' | account=' + j.account_id
-                  + ' | contracts=' + JSON.stringify(j.cached_contracts)
-                  + ' | time=' + j.time);
-                d('API', 'cb_status.step=' + (j.cb_status && j.cb_status.step)
-                  + ' error=' + (j.cb_status && j.cb_status.error));
-                if (!j.connected) {
-                    d('ERR', 'IB NENI PRIPOJENO! Zkontroluj TWS/Gateway.');
-                } else {
-                    d('API', 'TEST 1 OK - IB pripojeno.');
-                }
-            })
-            .catch(function(e) {
-                d('ERR', 'TEST 1 FETCH FAILED: ' + e);
-            });
+        d('API', '=== TEST 1: IB spojeni ===');
+        fetch('/api/diag').then(function(r){return r.json();}).then(function(j){
+            d('API', 'connected=' + j.connected + ' account=' + j.account_id
+              + ' tf=' + (j.app_state && j.app_state.current_timeframe)
+              + ' symbol=' + (j.app_state && j.app_state.current_symbol));
+            d('API', 'cb_status.step=' + (j.cb_status && j.cb_status.step)
+              + ' bars=' + (j.cb_status && j.cb_status.bars));
+            if (!j.connected) d('ERR', 'IB NENI PRIPOJENO!');
+            else d('API', 'TEST 1 OK');
+        }).catch(function(e){ d('ERR','FETCH FAIL: '+e); });
         return n;
     }
     """,
@@ -602,33 +569,20 @@ app.clientside_callback(
 )
 
 
-# ================================================================
-# DIAGNOSTIKA 2 - Test historickych dat pres /api/test-hist
-# ================================================================
+# ---- Diagnostika 2 ----
 app.clientside_callback(
     """
     function(n) {
         if (n < 1) return n;
         var d = window.lwcDebug || function() {};
         d('API', '=== TEST 2: Historicka data /api/test-hist/AAPL ===');
-        d('API', 'Posilam request... (muze trvat 5-15s)');
+        d('API', 'Posilam... (5-15s)');
         var t0 = Date.now();
-        fetch('/api/test-hist/AAPL')
-            .then(function(r) { return r.json(); })
-            .then(function(j) {
-                var elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-                if (j.ok) {
-                    d('API', 'TEST 2 OK: ' + j.bars + ' baru za ' + j.elapsed
-                      + 's (JS: ' + elapsed + 's)');
-                    d('API', 'Prvni bar: time=' + (j.first && j.first.time)
-                      + ' close=' + (j.first && j.first.close));
-                } else {
-                    d('ERR', 'TEST 2 FAILED: ' + j.error + ' (' + elapsed + 's)');
-                }
-            })
-            .catch(function(e) {
-                d('ERR', 'TEST 2 FETCH FAILED: ' + e);
-            });
+        fetch('/api/test-hist/AAPL').then(function(r){return r.json();}).then(function(j){
+            var el = ((Date.now()-t0)/1000).toFixed(1);
+            if (j.ok) d('API','TEST 2 OK: '+j.bars+' baru za '+j.elapsed+'s');
+            else d('ERR','TEST 2 FAIL: '+j.error+' ('+el+'s)');
+        }).catch(function(e){ d('ERR','FETCH FAIL: '+e); });
         return n;
     }
     """,
@@ -637,38 +591,19 @@ app.clientside_callback(
 )
 
 
-# ================================================================
-# DIAGNOSTIKA 3 - Nacti a nakresli PRES API (bez Dash callbacku)
-# ================================================================
+# ---- Diagnostika 3 ----
 app.clientside_callback(
     """
     function(n) {
         if (n < 1) return n;
         var d = window.lwcDebug || function() {};
-        d('API', '=== TEST 3: Fetch + nakreslit (bypass Dash) ===');
-        d('API', 'Stahuju /api/test-hist/AAPL...');
-        fetch('/api/test-hist/AAPL')
-            .then(function(r) { return r.json(); })
-            .then(function(j) {
-                if (!j.ok) {
-                    d('ERR', 'TEST 3 data FAIL: ' + j.error);
-                    return;
-                }
-                d('API', 'Data OK: ' + j.bars + ' baru, stahuji vsechna...');
-                // Potrebujeme vsechna data, ne jen first/last
-                // Zavolame /api/test-hist znovu a vezmeme vsechna data
-                // POZOR: test-hist vraci jen summary - volame Dash store manualne
-                if (window.lwcManager) {
-                    d('API', 'lwcManager dostupny, spoustim testChart() jako fallback');
-                    d('API', 'Pro plna IB data pouzij tlacitko Load Chart po fixu.');
-                    window.lwcManager.testChart();
-                } else {
-                    d('ERR', 'lwcManager neni dostupny!');
-                }
-            })
-            .catch(function(e) {
-                d('ERR', 'TEST 3 FAILED: ' + e);
-            });
+        d('API', '=== TEST 3: Fetch + nakreslit ===');
+        fetch('/api/test-hist/AAPL').then(function(r){return r.json();}).then(function(j){
+            if (!j.ok) { d('ERR','Data FAIL: '+j.error); return; }
+            d('API', 'Data OK: '+j.bars+' baru');
+            if (window.lwcManager) window.lwcManager.testChart();
+            else d('ERR','lwcManager neni!');
+        }).catch(function(e){ d('ERR','FETCH FAIL: '+e); });
         return n;
     }
     """,
@@ -678,49 +613,29 @@ app.clientside_callback(
 
 
 app.clientside_callback(
-    """
-    function(n) {
-        if (n > 0) {
-            if (window.lwcManager) { window.lwcManager.testChart(); }
-        }
-        return n;
-    }
-    """,
+    """function(n){if(n>0&&window.lwcManager)window.lwcManager.testChart();return n;}""",
     Output('test-chart-trigger', 'data'),
     Input('test-chart-btn', 'n_clicks')
 )
 
-
 app.clientside_callback(
     """
-    function(n) {
-        if (n > 0) {
-            var a = document.getElementById('debug-log-area');
-            if (a) {
-                a.select();
-                try { document.execCommand('copy'); } catch(e) {}
-                a.setSelectionRange(0,0);
-                navigator.clipboard && navigator.clipboard.writeText(a.value);
-            }
+    function(n){
+        if(n>0){
+            var a=document.getElementById('debug-log-area');
+            if(a){a.select();try{document.execCommand('copy');}catch(e){}
+                  a.setSelectionRange(0,0);
+                  navigator.clipboard&&navigator.clipboard.writeText(a.value);}
         }
-        return n > 0 ? 'Zkopirováno ✓' : '';
+        return n>0?'Zkopirov\u00e1no \u2713':'';
     }
     """,
     Output('copy-status', 'children'),
     Input('copy-log-btn', 'n_clicks')
 )
 
-
 app.clientside_callback(
-    """
-    function(n) {
-        if (n > 0) {
-            var a = document.getElementById('debug-log-area');
-            if (a) { a.value = ''; }
-        }
-        return n;
-    }
-    """,
+    """function(n){if(n>0){var a=document.getElementById('debug-log-area');if(a)a.value='';}return n;}""",
     Output('clear-log-trigger', 'data'),
     Input('clear-log-btn', 'n_clicks')
 )
@@ -744,7 +659,7 @@ def update_price_display(n, symbol):
     pct = (change / pc * 100) if pc > 0 else 0
     arrow = '\u25b2' if change >= 0 else '\u25bc'
     color = '#26a69a' if change >= 0 else '#ef5350'
-    sign  = '+' if change >= 0 else ''
+    sign = '+' if change >= 0 else ''
     return (
         f'Last: ${lp:.2f}',
         html.Span(f' {arrow} {sign}${change:.2f} ({sign}{pct:.2f}%)',
@@ -807,10 +722,10 @@ def update_positions_table(n):
     rows = []
     for pos in positions:
         pnl_c = '#26a69a' if pos['unrealized_pnl'] >= 0 else '#ef5350'
-        side  = 'LONG' if pos['position'] > 0 else 'SHORT'
         rows.append(html.Tr([
             html.Td(pos['symbol'], style={'fontWeight': 'bold'}),
-            html.Td(side, style={'color': '#00d4ff'}),
+            html.Td('LONG' if pos['position'] > 0 else 'SHORT',
+                    style={'color': '#00d4ff'}),
             html.Td(abs(pos['position'])),
             html.Td(f"${pos['avg_cost']:.2f}"),
             html.Td(f"${pos['market_value']:.2f}"),
@@ -834,17 +749,17 @@ def update_orders_table(n):
     orders = ib.get_recent_orders(limit=10)
     if not orders:
         return html.Div('No recent orders', style={'color': '#888'})
-    icons  = {'Filled': '\u2705', 'Submitted': '\u23f3',
-               'Cancelled': '\u274c', 'PendingSubmit': '\U0001f552'}
+    icons = {'Filled': '\u2705', 'Submitted': '\u23f3',
+             'Cancelled': '\u274c', 'PendingSubmit': '\U0001f552'}
     colors = {'Filled': '#26a69a', 'Submitted': '#ffa726',
-               'Cancelled': '#ef5350', 'PendingSubmit': '#42a5f5'}
+              'Cancelled': '#ef5350', 'PendingSubmit': '#42a5f5'}
     rows = []
     for o in orders:
         rows.append(html.Tr([
             html.Td(o['time']),
             html.Td(f"{o['action']} {o['quantity']} {o['symbol']}"),
             html.Td(f"@ {o['price']}"),
-            html.Td(f"{icons.get(o['status'], '?')} {o['status']}",
+            html.Td(f"{icons.get(o['status'],'?')} {o['status']}",
                     style={'color': colors.get(o['status'], '#888'), 'fontWeight': 'bold'})
         ]))
     return html.Table([
@@ -873,9 +788,10 @@ app.index_string = '''
                 background: #2d2d3a; border: 2px solid #667eea;
                 border-radius: 5px; color: white;
                 cursor: pointer; font-weight: bold;
+                transition: background 0.15s;
             }
-            .tf-btn:hover, .qty-btn:hover { background: #667eea; }
-            .tf-active { background: #667eea; }
+            .tf-btn:hover, .qty-btn:hover { background: #4a4a6a; }
+            .tf-active { background: #667eea !important; }
             table { border-collapse: collapse; width: 100%; }
             th, td { padding: 12px; text-align: left; border-bottom: 1px solid #3d3d4a; }
             th { background: #3d3d4a; font-weight: bold; color: #00d4ff; }
@@ -897,7 +813,7 @@ app.index_string = '''
 # ========== RUN ==========
 
 if __name__ == '__main__':
-    print("\U0001f680 Starting IB Trading Platform v2.0.7...")
+    print("\U0001f680 Starting IB Trading Platform v2.0.8...")
     print(f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
     if ib.connect():
         print("\u2705 Connected to IB Gateway!")
