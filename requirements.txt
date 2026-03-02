@@ -5,6 +5,7 @@
 dash==2.14.2
 plotly==5.18.0
 pandas==2.1.4
+pyarrow>=15.0.0
 
 # IB API
 ib-async==2.1.0

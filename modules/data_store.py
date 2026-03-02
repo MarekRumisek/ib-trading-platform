@@ -1,16 +1,15 @@
-"""Thread-safe in-memory OHLCV cache with TTL per bar size.
+"""Thread-safe in-memory OHLCV cache with TTL per bar size,
+plus Parquet-based incremental cache for long-term storage and Deep Load.
 
-Prevents hitting IB pacing limit (60 historical requests / 10 min)
-by caching bars per (symbol, bar_size) key with configurable TTL.
-
-Usage:
-    from modules.data_store import ohlcv_cache
-    bars = ohlcv_cache.get('AAPL', '5 mins')  # None if miss/expired
-    ohlcv_cache.set('AAPL', '5 mins', bars)
+Prevents hitting IB pacing limit.
 """
 
 import threading
 import time
+import os
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 # TTL in seconds per bar size - kratsi bar = kratsi cache
 _TTL = {
@@ -23,7 +22,6 @@ _TTL = {
 }
 _DEFAULT_TTL = 120
 
-
 class OHLCVCache:
     """Thread-safe in-memory cache for OHLCV bar data."""
 
@@ -33,7 +31,6 @@ class OHLCVCache:
         self._lock = threading.Lock()
 
     def get(self, symbol: str, bar_size: str):
-        """Return cached bars if still within TTL, else None."""
         key = (symbol.upper(), bar_size)
         with self._lock:
             entry = self._cache.get(key)
@@ -46,7 +43,6 @@ class OHLCVCache:
             return entry['bars']
 
     def set(self, symbol: str, bar_size: str, bars: list):
-        """Store bars in cache with current timestamp."""
         if not bars:
             return
         key = (symbol.upper(), bar_size)
@@ -54,12 +50,6 @@ class OHLCVCache:
             self._cache[key] = {'bars': bars, 'ts': time.time()}
 
     def invalidate(self, symbol: str = None, bar_size: str = None):
-        """Invalidate cache entries.
-        - No args: clear everything
-        - symbol only: clear all bar sizes for that symbol
-        - bar_size only: clear that bar size for all symbols
-        - both: clear specific entry
-        """
         with self._lock:
             if symbol is None and bar_size is None:
                 self._cache.clear()
@@ -73,7 +63,6 @@ class OHLCVCache:
                 del self._cache[k]
 
     def stats(self) -> dict:
-        """Return current cache stats (for debug)."""
         now = time.time()
         with self._lock:
             entries = []
@@ -90,6 +79,70 @@ class OHLCVCache:
                 })
         return {'count': len(entries), 'entries': entries}
 
+# Parquet Store
+class ParquetDataStore:
+    def __init__(self, data_dir='data/ohlcv'):
+        self.data_dir = data_dir
+        if not os.path.exists(self.data_dir):
+            os.makedirs(self.data_dir, exist_ok=True)
+        self._lock = threading.Lock()
 
-# Singleton - importuj vsude jako: from modules.data_store import ohlcv_cache
+    def _get_filename(self, symbol, timeframe):
+        tf_clean = timeframe.replace(' ', '_')
+        return os.path.join(self.data_dir, f"{symbol}_{tf_clean}.parquet")
+
+    def get_cache_status(self, symbol, timeframe):
+        filename = self._get_filename(symbol, timeframe)
+        if not os.path.exists(filename):
+            return {'cached': False, 'total_bars': 0, 'age_seconds': 999999999, 'is_fresh': False}
+        
+        try:
+            mtime = os.path.getmtime(filename)
+            age = time.time() - mtime
+            fresh_threshold = _TTL.get(timeframe, _DEFAULT_TTL)
+            
+            pq_file = pq.ParquetFile(filename)
+            return {
+                'cached': True, 
+                'total_bars': pq_file.metadata.num_rows, 
+                'age_seconds': age, 
+                'is_fresh': age < fresh_threshold
+            }
+        except Exception:
+            return {'cached': False, 'total_bars': 0, 'age_seconds': 999999999, 'is_fresh': False}
+
+    def get_bars(self, symbol, timeframe):
+        filename = self._get_filename(symbol, timeframe)
+        if not os.path.exists(filename):
+            return []
+        with self._lock:
+            try:
+                table = pq.read_table(filename)
+                df = table.to_pandas()
+                df = df.sort_values('time').drop_duplicates(subset=['time'], keep='last')
+                return df.to_dict('records')
+            except Exception as e:
+                print(f"[PARQUET] Error reading {filename}: {e}")
+                return []
+
+    def append_bars(self, symbol, timeframe, new_bars):
+        if not new_bars: return
+        filename = self._get_filename(symbol, timeframe)
+        new_df = pd.DataFrame(new_bars)
+        
+        with self._lock:
+            try:
+                if os.path.exists(filename):
+                    old_df = pq.read_table(filename).to_pandas()
+                    combined_df = pd.concat([old_df, new_df])
+                else:
+                    combined_df = new_df
+                    
+                combined_df = combined_df.sort_values('time').drop_duplicates(subset=['time'], keep='last')
+                table = pa.Table.from_pandas(combined_df)
+                pq.write_table(table, filename)
+            except Exception as e:
+                print(f"[PARQUET] Error writing {filename}: {e}")
+
 ohlcv_cache = OHLCVCache()
+data_store = ParquetDataStore()
