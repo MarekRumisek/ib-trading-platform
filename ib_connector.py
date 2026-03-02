@@ -1,6 +1,6 @@
 """IB API Connector using ib_async
 
-Version: 2.8.0 - OHLCV in-memory cache (modules/data_store.py)
+Version: 2.9.0 - Incremental Parquet Cache & Deep Load
 
 HIERARCHIE FALLBACKU:
   1. STREAMING   reqMktData(snapshot=False)  -> okamzity update
@@ -13,8 +13,8 @@ Error 162   -> bylo zpusobeno useRTH=False + 300S (prilis kratka doba).
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder
-from datetime import datetime
-from modules.data_store import ohlcv_cache
+from datetime import datetime, timedelta
+from modules.data_store import data_store
 import config
 import time
 import threading
@@ -353,9 +353,23 @@ class _HistWorker:
         self._thread.start()
         print(f"[HIST] Worker thread spusten (clientId={client_id})")
 
+        self._deep_load_status = {}
+        
+    def get_deep_load_status(self):
+        return self._deep_load_status.copy()
+
+    def start_deep_load(self, symbol, timeframe):
+        key = f"{symbol}_{timeframe}"
+        if self._deep_load_status.get(key, {}).get('status') == 'running':
+            return False
+            
+        self._deep_load_status[key] = {'progress': '0%', 'status': 'running', 'msg': 'Inicializace...'}
+        self._queue.put(('deep_load', symbol, timeframe, key, None, None))
+        return True
+
     def fetch(self, symbol, duration='1 D', bar_size='5 mins', timeout=15):
         result, done = [], threading.Event()
-        self._queue.put((symbol, duration, bar_size, result, done))
+        self._queue.put(('fetch', symbol, duration, bar_size, result, done))
         done.wait(timeout=timeout)
         return result
 
@@ -368,24 +382,79 @@ class _HistWorker:
         while True:
             item = self._queue.get()
             if item is None: break
-            latest = item
-            while not self._queue.empty():
+            
+            cmd = item[0]
+            if cmd == 'fetch':
+                _, symbol, duration, bar_size, result, done = item
                 try:
-                    newer = self._queue.get_nowait()
-                    if newer is None:
-                        _, _, _, _, d = latest; d.set(); return
-                    _, _, _, _, skip_done = latest; skip_done.set()
-                    latest = newer
-                except queue.Empty:
+                    bars = self._fetch_fresh(symbol, duration, bar_size)
+                    result.extend(bars)
+                except Exception as e:
+                    print(f"[HIST] Chyba pro {symbol}: {e}")
+                finally:
+                    done.set()
+            elif cmd == 'deep_load':
+                _, symbol, timeframe, key, _, _ = item
+                try:
+                    self._run_deep_load(symbol, timeframe, key)
+                except Exception as e:
+                    self._deep_load_status[key] = {'progress': 'ERROR', 'status': 'error', 'msg': str(e)}
+
+    def _run_deep_load(self, symbol, timeframe, key):
+        CHUNKS = {
+            '1 min': {'duration': '5 D', 'steps': 6},
+            '5 mins': {'duration': '10 D', 'steps': 6},
+            '15 mins': {'duration': '1 M', 'steps': 6},
+            '30 mins': {'duration': '2 M', 'steps': 6},
+            '1 hour': {'duration': '3 M', 'steps': 4},
+            '1 day': {'duration': '5 Y', 'steps': 1}
+        }
+        
+        cfg = CHUNKS.get(timeframe, {'duration': '10 D', 'steps': 3})
+        duration_str = cfg['duration']
+        steps = cfg['steps']
+        
+        ib = IB()
+        try:
+            ib.connect(self._host, self._port, clientId=self._client_id+10, timeout=10)
+            ib.reqMarketDataType(4)
+            contract = Stock(symbol, 'SMART', 'USD')
+            ib.qualifyContracts(contract)
+            
+            end_date = ''
+            
+            for i in range(steps):
+                self._deep_load_status[key] = {'progress': f"{int(i/steps*100)}%", 'status': 'running', 'msg': f'Krok {i+1}/{steps}'}
+                print(f"[DEEP LOAD] {symbol} {timeframe} - Krok {i+1}/{steps}")
+                
+                bars = ib.reqHistoricalData(
+                    contract, endDateTime=end_date, durationStr=duration_str,
+                    barSizeSetting=timeframe, whatToShow='TRADES',
+                    useRTH=True, formatDate=1, timeout=30
+                )
+                
+                if not bars:
+                    print(f"[DEEP LOAD] Zadne dalsi data z IB pro {symbol}.")
                     break
-            symbol, duration, bar_size, result, done = latest
-            try:
-                bars = self._fetch_fresh(symbol, duration, bar_size)
-                result.extend(bars)
-            except Exception as e:
-                print(f"[HIST] Chyba pro {symbol}: {e}")
-            finally:
-                done.set()
+                    
+                result = [{'time': _bar_date_to_unix(b.date), 'open': b.open, 'high': b.high, 'low': b.low, 'close': b.close, 'volume': b.volume} for b in bars]
+                data_store.append_bars(symbol, timeframe, result)
+                
+                first_bar_time = bars[0].date
+                if hasattr(first_bar_time, 'timestamp'):
+                    end_date = first_bar_time - timedelta(seconds=1)
+                else:
+                    break
+                    
+                if i < steps - 1:
+                    time.sleep(2.0)
+            
+            self._deep_load_status[key] = {'progress': '100%', 'status': 'done', 'msg': 'Dokonceno'}
+            print(f"[DEEP LOAD] {symbol} {timeframe} Dokoncen uspesne.")
+            
+        finally:
+            try: ib.disconnect()
+            except: pass
 
     def _fetch_fresh(self, symbol, duration, bar_size):
         ib = IB()
@@ -449,7 +518,7 @@ class IBConnector:
         try:
             if config.DEBUG_CONNECTION:
                 print("=" * 60)
-                print(f"\U0001f4e1 CONNECTING | {config.CONNECTION_LABEL}")
+                print(f"📡 CONNECTING | {config.CONNECTION_LABEL}")
                 print(f"Host={config.IB_HOST} Port={config.IB_PORT} ClientId={config.IB_CLIENT_ID}")
                 print("=" * 60)
             self.ib.connect(
@@ -463,11 +532,11 @@ class IBConnector:
             try:
                 self.executions = self.ib.reqExecutions()
             except Exception as e:
-                print(f"\u26a0\ufe0f Executions: {e}")
-            print(f"\u2705 Connected | Account: {self.account_id}")
+                print(f"⚠️ Executions: {e}")
+            print(f"✅ Connected | Account: {self.account_id}")
             return True
         except Exception as e:
-            print(f"\u274c Connection failed: {e}")
+            print(f"❌ Connection failed: {e}")
             self.connected = False
             return False
 
@@ -494,28 +563,37 @@ class IBConnector:
         return self._tick_sub.get_price(sym)
 
     def get_historical_data(self, symbol, duration='1 D', bar_size='5 mins'):
-        """Fetch OHLCV bars with in-memory cache to avoid IB pacing limit.
-
-        Cache TTL per bar_size:
-          1 min=60s | 5 mins=120s | 15 mins=300s |
-          30 mins=600s | 1 hour=1800s | 1 day=3600s
-        """
+        """Incremental Parquet Fetch: vraci z disku/pameti. Pokud jsou data stara, dotahne jen chybejici kousek."""
         if not self.is_connected(): return []
         sym = symbol.upper()
         self._tick_sub.subscribe(sym)
 
-        # Cache check
-        cached = ohlcv_cache.get(sym, bar_size)
-        if cached is not None:
-            print(f"[CACHE] HIT: {sym} | {bar_size} | {len(cached)} bars")
-            return cached
+        status = data_store.get_cache_status(sym, bar_size)
+        
+        if status['cached'] and status['is_fresh']:
+            print(f"[CACHE] HIT: {sym} | {bar_size} | {status['total_bars']} bars | FRESH")
+            return data_store.get_bars(sym, bar_size)
+            
+        fetch_duration = duration
+        if status['cached'] and status['age_seconds'] < 86400 * 7:
+            missing_sec = status['age_seconds']
+            fetch_duration = f"{int(missing_sec + 3600)} S"
+            print(f"[CACHE] INCR: {sym} | {bar_size} | {status['total_bars']} bars existuji | Dotahuji chybejicich {fetch_duration}")
+        else:
+            print(f"[CACHE] MISS/STALE: {sym} | {bar_size} | Stahuji celou defaultni delku: {duration}")
 
-        # Cache miss -> fetch from IB
-        bars = self._hist_worker.fetch(sym, duration, bar_size)
-        if bars:
-            ohlcv_cache.set(sym, bar_size, bars)
-            print(f"[CACHE] SET: {sym} | {bar_size} | {len(bars)} bars")
-        return bars
+        new_bars = self._hist_worker.fetch(sym, fetch_duration, bar_size)
+        
+        if new_bars:
+            data_store.append_bars(sym, bar_size, new_bars)
+            
+        return data_store.get_bars(sym, bar_size)
+
+    def get_deep_load_status(self, symbol, timeframe):
+        return self._hist_worker.get_deep_load_status().get(f"{symbol}_{timeframe}", {'status': 'idle'})
+
+    def start_deep_load(self, symbol, timeframe):
+        return self._hist_worker.start_deep_load(symbol, timeframe)
 
     def get_account_info(self):
         if not self.is_connected(): return {}
@@ -531,7 +609,7 @@ class IBConnector:
                     info['cash_balance'] = float(av.value)
             return info
         except Exception as e:
-            print(f"\u274c account info: {e}"); return {}
+            print(f"❌ account info: {e}"); return {}
 
     def place_order(self, symbol, action, quantity, order_type='MARKET',
                     limit_price=None, timeout=None):
@@ -589,7 +667,7 @@ class IBConnector:
                 })
             return result
         except Exception as e:
-            print(f"\u274c positions: {e}"); return []
+            print(f"❌ positions: {e}"); return []
 
     def get_recent_orders(self, limit=10):
         if not self.is_connected(): return []
@@ -619,7 +697,7 @@ class IBConnector:
                 })
             return result[::-1][-limit:]
         except Exception as e:
-            print(f"\u274c orders: {e}"); return []
+            print(f"❌ orders: {e}"); return []
 
     def __del__(self):
         self.disconnect()
