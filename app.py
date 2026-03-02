@@ -1,11 +1,3 @@
-"""IB Trading Platform - Main Dash Application
-
-Version: 2.7.0 - Incremental Parquet & Deep Load Integration
-  - /api/diag/tick/<symbol>  - plna diagnostika vcetne IB erroru
-  - /api/test/snapshot/<sym> - testuje reqTickersAsync primo
-  - _TickSubscriber: auto-fallback streaming->snapshot
-"""
-
 import dash
 from dash import dcc, html, Input, Output, State
 from datetime import datetime, timedelta
@@ -69,15 +61,13 @@ def api_diag_tick(symbol):
         'pending':            list(ts._pending),
         'latest':             ts._latest.get(sym, {}),
         'raw_fields':         ts.get_raw_data(sym),
-        'ib_errors':          ts.get_last_errors(),  # <- KLIC: IB chyby
+        'ib_errors':          ts.get_last_errors(),
         'time':               datetime.now().strftime('%H:%M:%S')
     })
 
 
 @server.route('/api/test/snapshot/<symbol>')
 def api_test_snapshot(symbol):
-    """Testuje reqTickersAsync primo - BYPASS _TickSubscriber.
-    Pouzivej pro diagnostiku kdyz streaming nefunguje."""
     import asyncio
     from ib_async import IB, Stock
 
@@ -93,7 +83,7 @@ def api_test_snapshot(symbol):
         try:
             await ib_test.connectAsync(
                 config.IB_HOST, config.IB_PORT,
-                clientId=config.IB_CLIENT_ID + 9  # dedikovanej testovaci clientId
+                clientId=config.IB_CLIENT_ID + 9
             )
             ib_test.reqMarketDataType(3)
             contract = Stock(sym, 'SMART', 'USD')
@@ -267,6 +257,7 @@ app.layout = html.Div([
         dcc.Store(id='diag-snap-trigger'),
         dcc.Store(id='active-tf-store', data='tf-5m'),
         dcc.Store(id='tick-enabled-store', data=False),
+        dcc.Store(id='deep-load-finished-trigger', data=False),
 
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
@@ -430,34 +421,43 @@ def update_account_info(n):
     [Input('load-chart-btn', 'n_clicks'),
      Input('tf-1m',  'n_clicks'), Input('tf-5m',  'n_clicks'),
      Input('tf-15m', 'n_clicks'), Input('tf-30m', 'n_clicks'),
-     Input('tf-1h',  'n_clicks'), Input('tf-1d',  'n_clicks')],
+     Input('tf-1h',  'n_clicks'), Input('tf-1d',  'n_clicks'),
+     Input('deep-load-finished-trigger', 'data')],
     State('symbol-input', 'value'),
     prevent_initial_call=True
 )
-def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, symbol):
+def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger, symbol):
     global _cb_status
     try:
         ctx = dash.callback_context
         btn = (ctx.triggered[0]['prop_id'].split('.')[0]
                if ctx.triggered else 'load-chart-btn')
+        
         tf_map = {'tf-1m': '1 min', 'tf-5m': '5 mins',
                   'tf-15m': '15 mins', 'tf-30m': '30 mins',
                   'tf-1h': '1 hour', 'tf-1d': '1 day'}
         if btn in tf_map:
             app_state['current_timeframe'] = tf_map[btn]
+            
         symbol = (symbol or 'AAPL').upper()
         app_state['current_symbol'] = symbol
         tf       = app_state['current_timeframe']
+        
+        # When triggered by deep-load-finished, just load whatever is in the cache/parquet
+        # DURATION_MAP is mostly for initial API call if cache miss
         duration = DURATION_MAP.get(tf, '1 D')
+        
         _cb_status = {'step': 'started', 'symbol': symbol, 'tf': tf,
                       'bars': None, 'error': None,
                       'ts': datetime.now().strftime('%H:%M:%S')}
-        print(f"[CB] START: {symbol} | {tf} | duration={duration}")
+        print(f"[CB] START: {symbol} | {tf} | duration={duration} | Trigger={btn}")
         _cb_status['step'] = 'requesting_IB'
+        
         bars = ib.get_historical_data(symbol, duration, tf)
+        
         _cb_status['step'] = 'IB_returned'
         _cb_status['bars'] = len(bars)
-        print(f"[CB] IB returned {len(bars)} bars")
+        print(f"[CB] IB/Cache returned {len(bars)} bars")
         _cb_status['step'] = 'done'
         return {'symbol': symbol, 'timeframe': tf, 'bars': bars}
     except Exception as e:
@@ -493,23 +493,40 @@ def start_deep_load(n, symbol):
         ib.start_deep_load(symbol.upper(), tf)
     return dash.no_update
 
+# Misto vraceni jen statusu, vratime i signal, jestli jsme zrovna dokoncili stahovani
 @app.callback(
-    Output('cache-status-indicator', 'children'),
+    [Output('cache-status-indicator', 'children'),
+     Output('deep-load-finished-trigger', 'data')],
     Input('cache-update-interval', 'n_intervals'),
-    State('symbol-input', 'value')
+    [State('symbol-input', 'value'),
+     State('deep-load-finished-trigger', 'data')]
 )
-def update_cache_status(n, symbol):
-    if not symbol: return "Vyberte symbol"
+def update_cache_status(n, symbol, last_dl_state):
+    if not symbol: return "Vyberte symbol", dash.no_update
     sym = symbol.upper()
     tf = app_state.get('current_timeframe', '5 mins')
     
     dl_status = ib.get_deep_load_status(sym, tf)
-    if dl_status.get('status') == 'running':
-        return html.Span(f"⏳ Stahuji historii: {dl_status.get('progress', '0%')} ({dl_status.get('msg', '')})", style={'color': '#ff9800'})
+    current_dl_state = dl_status.get('status')
+    
+    # Detekce zmeny stavu z "running" na "done" -> odpali refresh grafu
+    trigger_refresh = dash.no_update
+    if current_dl_state == 'done':
+        # Uchovavame si custom string abysme poznali zmenu (treba pres timestamp)
+        new_dl_trigger = f"{sym}_{tf}_done_{time.time()}"
+        # Trigger jen kdyz se to poprve dokonci a nebylo to "done" uz v minulem tiku
+        if not str(last_dl_state).startswith(f"{sym}_{tf}_done"):
+            trigger_refresh = new_dl_trigger
+            last_dl_state = new_dl_trigger
+    elif current_dl_state == 'running':
+        last_dl_state = "running"
+        
+    if current_dl_state == 'running':
+        return html.Span(f"⏳ Stahuji historii: {dl_status.get('progress', '0%')} ({dl_status.get('msg', '')})", style={'color': '#ff9800'}), trigger_refresh
     
     status = data_store.get_cache_status(sym, tf)
     if not status['cached']:
-        return html.Span("Cache: Prázdná", style={'color': '#888', 'background': '#333'})
+        return html.Span("Cache: Prázdná", style={'color': '#888', 'background': '#333'}), trigger_refresh
         
     bars_str = f"{status['total_bars']:,}".replace(',', ' ')
     age = status['age_seconds']
@@ -519,9 +536,9 @@ def update_cache_status(n, symbol):
     else: age_str = f"{int(age//86400)}d"
 
     if status['is_fresh']:
-        return html.Span(f"💾 Parquet: {bars_str} barů | Aktuální", style={'color': '#4caf50', 'background': '#1b5e20'})
+        return html.Span(f"💾 Parquet: {bars_str} barů | Aktuální", style={'color': '#4caf50', 'background': '#1b5e20'}), trigger_refresh
     else:
-        return html.Span(f"💾 Parquet: {bars_str} barů | {age_str} staré", style={'color': '#ffeb3b', 'background': '#e65100'})
+        return html.Span(f"💾 Parquet: {bars_str} barů | {age_str} staré", style={'color': '#ffeb3b', 'background': '#e65100'}), trigger_refresh
 
 app.clientside_callback(
     """function(n){if(n>0&&window.lwcDebug)window.lwcDebug('BTN','Load Chart n='+n+' - cekam na Python/IB...');return n;}""",
@@ -627,10 +644,15 @@ app.clientside_callback(
 # Loading indikator
 app.clientside_callback(
     """
-    function(n1m, n5m, n15m, n30m, n1h, n1d, nLoad) {
+    function(n1m, n5m, n15m, n30m, n1h, n1d, nLoad, dlTrigger) {
         var ctx = window.dash_clientside.callback_context;
         if (!ctx || !ctx.triggered || ctx.triggered.length === 0) return '';
         var tid = ctx.triggered_id || ctx.triggered[0].prop_id.split('.')[0];
+        
+        if (tid === 'deep-load-finished-trigger') {
+            return '✅ Data z cache načtena';
+        }
+        
         var labels = {'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m',
                       'tf-30m':'30m','tf-1h':'1h','tf-1d':'1D','load-chart-btn':'Load'};
         return '⏳ Načítám ' + (labels[tid]||tid) + '…';
@@ -640,7 +662,7 @@ app.clientside_callback(
     [Input('tf-1m', 'n_clicks'), Input('tf-5m', 'n_clicks'),
      Input('tf-15m', 'n_clicks'), Input('tf-30m', 'n_clicks'),
      Input('tf-1h', 'n_clicks'), Input('tf-1d', 'n_clicks'),
-     Input('load-chart-btn', 'n_clicks')]
+     Input('load-chart-btn', 'n_clicks'), Input('deep-load-finished-trigger', 'data')]
 )
 
 app.clientside_callback(
@@ -683,7 +705,7 @@ app.clientside_callback(
         var d = window.lwcDebug || function() {};
         d('CB', '=== Dash clientside callback spusten ===');
         var li = document.getElementById('chart-loading-indicator');
-        if (li) li.textContent = '';
+        if (li && !li.textContent.includes('✅')) li.textContent = '';
         if (!storeData) { d('CB', 'storeData NULL -> no_update'); return window.dash_clientside.no_update; }
         if (!storeData.bars || storeData.bars.length === 0) { d('CB', 'bars prazdne -> no_update'); return window.dash_clientside.no_update; }
         d('CB', 'symbol=' + storeData.symbol + ' tf=' + storeData.timeframe
@@ -909,5 +931,5 @@ if __name__ == '__main__':
         print("✅ Connected to IB Gateway!")
     else:
         print("❌ Failed to connect")
-    print("http://localhost:8050  |  Ctrl+C to stop\n")
+    print("http://localhost:8050  |  Ctrl+C to stop\\n")
     app.run_server(debug=True, use_reloader=False, host='0.0.0.0', port=8050)
