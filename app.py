@@ -1,6 +1,6 @@
 """IB Trading Platform - Main Dash Application
 
-Version: 2.6.0
+Version: 2.7.0 - Incremental Parquet & Deep Load Integration
   - /api/diag/tick/<symbol>  - plna diagnostika vcetne IB erroru
   - /api/test/snapshot/<sym> - testuje reqTickersAsync primo
   - _TickSubscriber: auto-fallback streaming->snapshot
@@ -8,10 +8,11 @@ Version: 2.6.0
 
 import dash
 from dash import dcc, html, Input, Output, State
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import jsonify
 from ib_connector import IBConnector
 import config
+from modules.data_store import data_store
 import time
 
 app = dash.Dash(
@@ -48,6 +49,10 @@ def get_tick(symbol):
     sym   = symbol.upper()
     price = ib.get_latest_price(sym)
     return jsonify({'time': int(datetime.now().timestamp()), 'price': price})
+
+@server.route('/api/deep_load_status/<symbol>/<tf>')
+def deep_load_status(symbol, tf):
+    return jsonify(ib.get_deep_load_status(symbol.upper(), tf.replace('_', ' ')))
 
 
 @server.route('/api/diag/tick/<symbol>')
@@ -173,7 +178,7 @@ app_state = {'current_symbol': 'AAPL', 'current_timeframe': '5 mins'}
 
 app.layout = html.Div([
     html.Div([
-        html.H1("\U0001f680 IB Trading Platform v2.0",
+        html.H1("🚀 IB Trading Platform v2.7",
                 style={'display': 'inline-block', 'margin': 0, 'color': '#00d4ff'}),
         html.Div(id='connection-status',
                  style={'display': 'inline-block', 'float': 'right', 'fontSize': 18})
@@ -182,13 +187,13 @@ app.layout = html.Div([
               'borderRadius': '10px', 'marginBottom': '20px'}),
 
     html.Div([
-        html.Div([html.Span("\U0001f4bc Account: ", style={'fontWeight': 'bold'}),
+        html.Div([html.Span("💼 Account: ", style={'fontWeight': 'bold'}),
                   html.Span(id='account-id', children='Connecting...')],
                  style={'display': 'inline-block', 'marginRight': '30px'}),
-        html.Div([html.Span("\U0001f4b0 Balance: ", style={'fontWeight': 'bold'}),
+        html.Div([html.Span("💰 Balance: ", style={'fontWeight': 'bold'}),
                   html.Span(id='account-balance', children='$0.00')],
                  style={'display': 'inline-block', 'marginRight': '30px'}),
-        html.Div([html.Span("\U0001f4c8 Buying Power: ", style={'fontWeight': 'bold'}),
+        html.Div([html.Span("📈 Buying Power: ", style={'fontWeight': 'bold'}),
                   html.Span(id='buying-power', children='$0.00')],
                  style={'display': 'inline-block'})
     ], style={'padding': '15px', 'background': '#2d2d3a',
@@ -229,16 +234,18 @@ app.layout = html.Div([
                 html.Button('30m', id='tf-30m', n_clicks=0, className='tf-btn'),
                 html.Button('1h',  id='tf-1h',  n_clicks=0, className='tf-btn'),
                 html.Button('1D',  id='tf-1d',  n_clicks=0, className='tf-btn'),
+                html.Button('📥 Stáhnout historii', id='deep-load-btn', n_clicks=0, style={'marginLeft': '20px', 'padding': '8px 15px', 'background': '#ff9800', 'color': 'black', 'border': 'none', 'borderRadius': '5px', 'cursor': 'pointer', 'fontWeight': 'bold'}),
                 html.Span(id='chart-loading-indicator', children='',
                           style={'marginLeft': '15px', 'fontSize': '13px',
                                  'color': '#ffa726', 'fontStyle': 'italic',
                                  'verticalAlign': 'middle'})
             ], style={'display': 'inline-block'}),
             html.Div([
-                html.Span('\u26a0\ufe0f 15min delay na demo',
+                html.Div(id='cache-status-indicator', children='Cache: Zjišťuji...', style={'display': 'inline-block', 'marginRight': '15px', 'fontSize': '12px', 'color': '#4caf50', 'padding': '5px 10px', 'background': '#1b5e20', 'borderRadius': '4px'}),
+                html.Span('⚠️ 15min delay na demo',
                           style={'fontSize': '11px', 'color': '#666',
                                  'marginRight': '10px', 'verticalAlign': 'middle'}),
-                html.Button('\u26a1 TICK: OFF', id='tick-toggle-btn',
+                html.Button('⚡ TICK: OFF', id='tick-toggle-btn',
                             n_clicks=0, className='tick-btn tick-off')
             ], style={'display': 'inline-block', 'float': 'right'})
         ], style={'marginBottom': '10px', 'overflow': 'hidden'}),
@@ -265,7 +272,7 @@ app.layout = html.Div([
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
     html.Div([
-        html.H3('\U0001f4e4 Order Entry', style={'marginBottom': '15px'}),
+        html.H3('📥 Order Entry', style={'marginBottom': '15px'}),
         html.Div([
             html.Label('Quantity:', style={'marginRight': '10px', 'fontWeight': 'bold'}),
             html.Button('1',   id='qty-1',   n_clicks=0, className='qty-btn'),
@@ -279,13 +286,13 @@ app.layout = html.Div([
                              'background': '#1e1e2e', 'color': 'white'})
         ], style={'marginBottom': '15px'}),
         html.Div([
-            html.Button('\U0001f7e2 BUY MARKET', id='buy-btn', n_clicks=0,
+            html.Button('🟢 BUY MARKET', id='buy-btn', n_clicks=0,
                         style={'padding': '15px 40px',
                                'background': 'linear-gradient(135deg, #26a69a 0%, #1a7f6f 100%)',
                                'border': 'none', 'borderRadius': '8px', 'color': 'white',
                                'fontSize': '18px', 'fontWeight': 'bold',
                                'cursor': 'pointer', 'marginRight': '15px'}),
-            html.Button('\U0001f534 SELL MARKET', id='sell-btn', n_clicks=0,
+            html.Button('🔴 SELL MARKET', id='sell-btn', n_clicks=0,
                         style={'padding': '15px 40px',
                                'background': 'linear-gradient(135deg, #ef5350 0%, #c62828 100%)',
                                'border': 'none', 'borderRadius': '8px', 'color': 'white',
@@ -296,20 +303,20 @@ app.layout = html.Div([
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
     html.Div([
-        html.H3('\U0001f4ca Open Positions', style={'marginBottom': '15px'}),
+        html.H3('📊 Open Positions', style={'marginBottom': '15px'}),
         html.Div(id='positions-table')
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
     html.Div([
-        html.H3('\U0001f4cb Recent Orders', style={'marginBottom': '15px'}),
+        html.H3('📋 Recent Orders', style={'marginBottom': '15px'}),
         html.Div(id='orders-table')
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
     # DEBUG PANEL
     html.Div([
-        html.H3('\U0001f527 Debug Panel',
+        html.H3('🔧 Debug Panel',
                 style={'marginBottom': '10px', 'color': '#ff9800'}),
         html.Div([
             html.Span('Python callback: ', style={'fontWeight': 'bold', 'color': '#00d4ff'}),
@@ -318,27 +325,27 @@ app.layout = html.Div([
         ], style={'marginBottom': '12px', 'padding': '8px',
                   'background': '#0d0d1a', 'borderRadius': '5px'}),
         html.Div([
-            html.Div('\U0001f9ea Diagnostika:',
+            html.Div('🧪 Diagnostika:',
                      style={'color': '#ff9800', 'fontWeight': 'bold',
                             'marginBottom': '8px', 'fontSize': '13px'}),
-            html.Button('1\ufe0f\u20e3 IB Spojeni', id='diag1-btn', n_clicks=0,
+            html.Button('1️⃣ IB Spojeni', id='diag1-btn', n_clicks=0,
                         style={'padding': '10px 14px', 'marginRight': '6px',
                                'background': '#1565c0', 'border': 'none',
                                'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
-            html.Button('2\ufe0f\u20e3 Hist. data', id='diag2-btn', n_clicks=0,
+            html.Button('2️⃣ Hist. data', id='diag2-btn', n_clicks=0,
                         style={'padding': '10px 14px', 'marginRight': '6px',
                                'background': '#6a1599', 'border': 'none',
                                'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
-            html.Button('3\ufe0f\u20e3 Nakreslit', id='diag3-btn', n_clicks=0,
+            html.Button('3️⃣ Nakreslit', id='diag3-btn', n_clicks=0,
                         style={'padding': '10px 14px', 'marginRight': '6px',
                                'background': '#1b5e20', 'border': 'none',
                                'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
-            html.Button('\U0001f50d Tick Diag', id='diag-tick-btn', n_clicks=0,
+            html.Button('🔍 Tick Diag', id='diag-tick-btn', n_clicks=0,
                         style={'padding': '10px 14px', 'marginRight': '6px',
                                'background': '#4a148c', 'border': 'none',
                                'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer',
                                'fontWeight': 'bold'}),
-            html.Button('\U0001f4f8 Snapshot Test', id='diag-snap-btn', n_clicks=0,
+            html.Button('📸 Snapshot Test', id='diag-snap-btn', n_clicks=0,
                         style={'padding': '10px 14px', 'marginRight': '6px',
                                'background': '#b71c1c', 'border': 'none',
                                'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer',
@@ -347,15 +354,15 @@ app.layout = html.Div([
                   'background': '#0d1a2e', 'borderRadius': '5px',
                   'border': '1px solid #1565c0'}),
         html.Div([
-            html.Button('\U0001f9ea Test Chart', id='test-chart-btn', n_clicks=0,
+            html.Button('🧪 Test Chart', id='test-chart-btn', n_clicks=0,
                         style={'padding': '10px 20px', 'marginRight': '10px',
                                'background': '#ff9800', 'border': 'none',
                                'borderRadius': '5px', 'color': 'black', 'cursor': 'pointer'}),
-            html.Button('\U0001f4cb Zkopirovat', id='copy-log-btn', n_clicks=0,
+            html.Button('📋 Zkopirovat', id='copy-log-btn', n_clicks=0,
                         style={'padding': '10px 20px', 'marginRight': '10px',
                                'background': '#26a69a', 'border': 'none',
                                'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
-            html.Button('\U0001f5d1 Smazat', id='clear-log-btn', n_clicks=0,
+            html.Button('🗑️ Smazat', id='clear-log-btn', n_clicks=0,
                         style={'padding': '10px 20px', 'background': '#555',
                                'border': 'none', 'borderRadius': '5px',
                                'color': 'white', 'cursor': 'pointer'}),
@@ -377,10 +384,12 @@ app.layout = html.Div([
               'borderRadius': '8px', 'marginBottom': '20px',
               'border': '2px solid #ff9800'}),
 
+    dcc.Interval(id='cache-update-interval', interval=2000, n_intervals=0),
     dcc.Interval(id='price-update-interval',     interval=10000, n_intervals=0),
     dcc.Interval(id='positions-update-interval', interval=30000, n_intervals=0),
     dcc.Interval(id='connection-check-interval', interval=10000, n_intervals=0),
-    html.Div(id='hidden-state', style={'display': 'none'})
+    html.Div(id='hidden-state', style={'display': 'none'}),
+    html.Div(id='deep-load-trigger-dummy', style={'display': 'none'})
 
 ], style={'maxWidth': '1400px', 'margin': '0 auto', 'padding': '20px',
           'background': '#1e1e2e', 'minHeight': '100vh',
@@ -395,9 +404,9 @@ app.layout = html.Div([
 )
 def update_connection_status(n):
     if ib.is_connected():
-        return html.Span([html.Span('\u26ac', style={'color': '#26a69a', 'marginRight': '5px'}),
+        return html.Span([html.Span('⚪', style={'color': '#26a69a', 'marginRight': '5px'}),
                           html.Span('Connected to IB Gateway')])
-    return html.Span([html.Span('\u26ac', style={'color': '#ef5350', 'marginRight': '5px'}),
+    return html.Span([html.Span('⚪', style={'color': '#ef5350', 'marginRight': '5px'}),
                       html.Span('Disconnected')])
 
 
@@ -466,13 +475,53 @@ def update_debug_python(data):
     if not data: return '(prazdne)'
     bars = data.get('bars', [])
     if not bars:
-        return f"\u26a0\ufe0f {data.get('symbol')} | {data.get('timeframe')} | 0 BARU"
+        return f"⚠️ {data.get('symbol')} | {data.get('timeframe')} | 0 BARU"
     b0 = bars[0]
-    return (f"\u2705 {data.get('symbol')} | {data.get('timeframe')} "
+    return (f"✅ {data.get('symbol')} | {data.get('timeframe')} "
             f"| {len(bars)} baru | close[0]={b0['close']} close[-1]={bars[-1]['close']:.2f}")
 
 
-# ========== CLIENTSIDE CALLBACKS ==========
+# --- DEEP LOAD LOGIC ---
+@app.callback(
+    Output('deep-load-trigger-dummy', 'children'),
+    Input('deep-load-btn', 'n_clicks'),
+    State('symbol-input', 'value')
+)
+def start_deep_load(n, symbol):
+    if n > 0 and symbol:
+        tf = app_state.get('current_timeframe', '5 mins')
+        ib.start_deep_load(symbol.upper(), tf)
+    return dash.no_update
+
+@app.callback(
+    Output('cache-status-indicator', 'children'),
+    Input('cache-update-interval', 'n_intervals'),
+    State('symbol-input', 'value')
+)
+def update_cache_status(n, symbol):
+    if not symbol: return "Vyberte symbol"
+    sym = symbol.upper()
+    tf = app_state.get('current_timeframe', '5 mins')
+    
+    dl_status = ib.get_deep_load_status(sym, tf)
+    if dl_status.get('status') == 'running':
+        return html.Span(f"⏳ Stahuji historii: {dl_status.get('progress', '0%')} ({dl_status.get('msg', '')})", style={'color': '#ff9800'})
+    
+    status = data_store.get_cache_status(sym, tf)
+    if not status['cached']:
+        return html.Span("Cache: Prázdná", style={'color': '#888', 'background': '#333'})
+        
+    bars_str = f"{status['total_bars']:,}".replace(',', ' ')
+    age = status['age_seconds']
+    if age < 60: age_str = f"{int(age)}s"
+    elif age < 3600: age_str = f"{int(age//60)}m"
+    elif age < 86400: age_str = f"{int(age//3600)}h"
+    else: age_str = f"{int(age//86400)}d"
+
+    if status['is_fresh']:
+        return html.Span(f"💾 Parquet: {bars_str} barů | Aktuální", style={'color': '#4caf50', 'background': '#1b5e20'})
+    else:
+        return html.Span(f"💾 Parquet: {bars_str} barů | {age_str} staré", style={'color': '#ffeb3b', 'background': '#e65100'})
 
 app.clientside_callback(
     """function(n){if(n>0&&window.lwcDebug)window.lwcDebug('BTN','Load Chart n='+n+' - cekam na Python/IB...');return n;}""",
@@ -486,9 +535,9 @@ app.clientside_callback(
         if (n > 0) {
             if (window.lwcManager) window.lwcManager.setTickEnabled(enabled);
             if (window.lwcDebug)
-                window.lwcDebug('TICK', 'Tick ' + (enabled ? 'ZAPNUT \u26a1 (15min delay na demo!)' : 'VYPNUT'));
+                window.lwcDebug('TICK', 'Tick ' + (enabled ? 'ZAPNUT ⚡ (15min delay na demo!)' : 'VYPNUT'));
         }
-        var label = '\u26a1 TICK: ' + (enabled ? 'ON' : 'OFF');
+        var label = '⚡ TICK: ' + (enabled ? 'ON' : 'OFF');
         var cls   = 'tick-btn ' + (enabled ? 'tick-on' : 'tick-off');
         return [enabled, label, cls];
     }
@@ -584,7 +633,7 @@ app.clientside_callback(
         var tid = ctx.triggered_id || ctx.triggered[0].prop_id.split('.')[0];
         var labels = {'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m',
                       'tf-30m':'30m','tf-1h':'1h','tf-1d':'1D','load-chart-btn':'Load'};
-        return '\u23f3 Na\u010d\u00edt\u00e1m ' + (labels[tid]||tid) + '\u2026';
+        return '⏳ Načítám ' + (labels[tid]||tid) + '…';
     }
     """,
     Output('chart-loading-indicator', 'children'),
@@ -673,7 +722,7 @@ app.clientside_callback(
     Output('test-chart-trigger', 'data'), Input('test-chart-btn', 'n_clicks')
 )
 app.clientside_callback(
-    """function(n){if(n>0){var a=document.getElementById('debug-log-area');if(a){a.select();try{document.execCommand('copy');}catch(e){}a.setSelectionRange(0,0);navigator.clipboard&&navigator.clipboard.writeText(a.value);}}return n>0?'Zkopirov\u00e1no \u2713':'';}""" ,
+    """function(n){if(n>0){var a=document.getElementById('debug-log-area');if(a){a.select();try{document.execCommand('copy');}catch(e){}a.setSelectionRange(0,0);navigator.clipboard&&navigator.clipboard.writeText(a.value);}}return n>0?'Zkopírováno ✓':'';}""" ,
     Output('copy-status', 'children'), Input('copy-log-btn', 'n_clicks')
 )
 app.clientside_callback(
@@ -697,7 +746,7 @@ def update_price_display(n, symbol):
     if lp <= 0: return 'Last: $0.00', ''
     change = lp - pc
     pct    = (change / pc * 100) if pc > 0 else 0
-    arrow  = '\u25b2' if change >= 0 else '\u25bc'
+    arrow  = '▲' if change >= 0 else '▼'
     color  = '#26a69a' if change >= 0 else '#ef5350'
     sign   = '+' if change >= 0 else ''
     return (
@@ -732,12 +781,12 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity):
     elif btn == 'sell-btn' and sell_clicks > 0: action, color = 'SELL', '#ef5350'
     else: return ''
     if not ib.is_connected():
-        return html.Div('\u274c Not connected!', style={'color': '#ef5350', 'fontWeight': 'bold'})
+        return html.Div('❌ Not connected!', style={'color': '#ef5350', 'fontWeight': 'bold'})
     result = ib.place_market_order(symbol, action, quantity)
     if result['success']:
-        return html.Div(f'\u2705 {action} {quantity} {symbol} @ Market',
+        return html.Div(f'✅ {action} {quantity} {symbol} @ Market',
                         style={'color': color, 'fontWeight': 'bold'})
-    return html.Div(f'\u274c {result["error"]}',
+    return html.Div(f'❌ {result["error"]}',
                     style={'color': '#ef5350', 'fontWeight': 'bold'})
 
 
@@ -780,8 +829,8 @@ def update_orders_table(n):
     orders = ib.get_recent_orders(limit=10)
     if not orders:
         return html.Div('No recent orders', style={'color': '#888'})
-    icons  = {'Filled': '\u2705', 'Submitted': '\u23f3',
-               'Cancelled': '\u274c', 'PendingSubmit': '\U0001f552'}
+    icons  = {'Filled': '✅', 'Submitted': '⏳',
+               'Cancelled': '❌', 'PendingSubmit': '🕒'}
     colors = {'Filled': '#26a69a', 'Submitted': '#ffa726',
                'Cancelled': '#ef5350', 'PendingSubmit': '#42a5f5'}
     rows = []
@@ -854,11 +903,11 @@ app.index_string = '''
 # ========== RUN ==========
 
 if __name__ == '__main__':
-    print("\U0001f680 Starting IB Trading Platform v2.6.0...")
+    print("🚀 Starting IB Trading Platform v2.7.0...")
     print(f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
     if ib.connect():
-        print("\u2705 Connected to IB Gateway!")
+        print("✅ Connected to IB Gateway!")
     else:
-        print("\u274c Failed to connect")
+        print("❌ Failed to connect")
     print("http://localhost:8050  |  Ctrl+C to stop\n")
     app.run_server(debug=True, use_reloader=False, host='0.0.0.0', port=8050)
