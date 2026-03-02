@@ -1,6 +1,6 @@
 """IB API Connector using ib_async
 
-Version: 2.7.1 - hist_poll fix: mdt=4 + useRTH=True + 3600S
+Version: 2.8.0 - OHLCV in-memory cache (modules/data_store.py)
 
 HIERARCHIE FALLBACKU:
   1. STREAMING   reqMktData(snapshot=False)  -> okamzity update
@@ -14,6 +14,7 @@ Error 162   -> bylo zpusobeno useRTH=False + 300S (prilis kratka doba).
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder
 from datetime import datetime
+from modules.data_store import ohlcv_cache
 import config
 import time
 import threading
@@ -493,9 +494,28 @@ class IBConnector:
         return self._tick_sub.get_price(sym)
 
     def get_historical_data(self, symbol, duration='1 D', bar_size='5 mins'):
+        """Fetch OHLCV bars with in-memory cache to avoid IB pacing limit.
+
+        Cache TTL per bar_size:
+          1 min=60s | 5 mins=120s | 15 mins=300s |
+          30 mins=600s | 1 hour=1800s | 1 day=3600s
+        """
         if not self.is_connected(): return []
-        self._tick_sub.subscribe(symbol.upper())
-        return self._hist_worker.fetch(symbol, duration, bar_size)
+        sym = symbol.upper()
+        self._tick_sub.subscribe(sym)
+
+        # Cache check
+        cached = ohlcv_cache.get(sym, bar_size)
+        if cached is not None:
+            print(f"[CACHE] HIT: {sym} | {bar_size} | {len(cached)} bars")
+            return cached
+
+        # Cache miss -> fetch from IB
+        bars = self._hist_worker.fetch(sym, duration, bar_size)
+        if bars:
+            ohlcv_cache.set(sym, bar_size, bars)
+            print(f"[CACHE] SET: {sym} | {bar_size} | {len(bars)} bars")
+        return bars
 
     def get_account_info(self):
         if not self.is_connected(): return {}
