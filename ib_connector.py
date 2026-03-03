@@ -1,6 +1,6 @@
 """IB API Connector using ib_async
 
-Version: 2.9.2 - thread-safe positions
+Version: 2.9.3 - IB event pump thread
 
 HIERARCHIE FALLBACKU:
   1. STREAMING   reqMktData(snapshot=False)  -> okamzity update
@@ -14,9 +14,15 @@ Error 162   -> bylo zpusobeno useRTH=False + 300S (prilis kratka doba).
 v2.9.1 zmeny:
   - place_order: PendingSubmit je platny stav -> success=True
 v2.9.2 zmeny:
-  - get_positions: odstranen reqPositions()+sleep() - NENI thread-safe v Flask threadech
+  - get_positions: odstranen reqPositions()+sleep() - NEIN thread-safe v Flask threadech
     ib.positions() vraci IB-managed cache, ktera se automaticky aktualizuje pri fillovani
   - _positions_cache: background thread pravidelne refreshuje pozice pres IB event loop
+v2.9.3 zmeny:
+  - OPRAVA: po place_order se nikdo nepumpoval IB event loop -> fill events cekaly ve fronte
+    -> positionEvent se nikdy nespustil -> _positions_cache zastarala
+  - Pridano: _ib_sleep_lock (threading.Lock) - jen jeden thread naraz smi volat ib.sleep()
+  - Pridano: _positions_bg_loop - background thread, pumpuje loop + refreshuje pozice kazdych 3s
+  - Uprava:  place_order pouziva _ib_sleep_safe() misto ib.sleep()
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder
@@ -508,9 +514,13 @@ class IBConnector:
         self.contracts  = {}
         self.executions = []
 
-        # Thread-safe positions cache — aktualizovana z IB event-loop threadu
-        self._positions_cache: list  = []
-        self._positions_lock         = threading.Lock()
+        # Thread-safe positions cache
+        self._positions_cache: list = []
+        self._positions_lock        = threading.Lock()
+
+        # Lock pro ib.sleep() — jen jeden thread naraz smi pumpovat IB event loop
+        # (ib_async sync wrapper: ib.sleep() spousti asyncio event loop; vice vlaken = crash)
+        self._ib_sleep_lock = threading.Lock()
 
         self._hist_worker = _HistWorker(
             host=config.IB_HOST, port=config.IB_PORT,
@@ -521,11 +531,57 @@ class IBConnector:
             client_id=config.IB_CLIENT_ID + 2
         )
 
+    # ------------------------------------------------------------------
+    # IB event pump — klicova oprava v2.9.3
+    # ------------------------------------------------------------------
+
+    def _ib_sleep_safe(self, secs: float):
+        """
+        Thread-safe obal pro ib.sleep().
+        ib_async synchronni wrapper pouziva asyncio event loop;
+        pokud ho vola vice vlaken najednou, dochazi ke kolizim.
+        Lock zajisti ze v jednom okamziku pumpe loop vzdy jen jeden thread.
+        """
+        with self._ib_sleep_lock:
+            try:
+                self.ib.sleep(secs)
+            except Exception as e:
+                print(f"[IB-PUMP] sleep error: {e}")
+
+    def _positions_bg_loop(self):
+        """
+        Background thread (spusti se po connect).
+
+        Proc existuje:
+          ib_async v sync rezimu zpracovava IB zpravy (fills, position updates)
+          POUZE kdyz nekdo vola ib.sleep(). Po navratu place_order() (na stav
+          PendingSubmit) uz nikdo sleep() nevola -> fill event zustane ve fronte
+          -> positionEvent nikdy nezabehne -> _positions_cache zastarala.
+
+          Tento thread pumpe loop kazdych 3s -> fill se zpracuje do 3s od arrivalu.
+        """
+        print("[POS-BG] Event pump + position refresh started (interval=3s)")
+        while True:
+            time.sleep(3)
+            if not (self.connected and self.ib.isConnected()):
+                continue
+            try:
+                # Pumpni IB event loop -> zpracuji se pending fill/position zpravy
+                self._ib_sleep_safe(0.3)
+                # Precteme aktualní pozice z IB modelu (uz updatovaneho event loopem)
+                self._refresh_positions_cache()
+            except Exception as e:
+                print(f"[POS-BG] Error: {e}")
+
+    # ------------------------------------------------------------------
+    # Connect / disconnect
+    # ------------------------------------------------------------------
+
     def connect(self):
         try:
             if config.DEBUG_CONNECTION:
                 print("=" * 60)
-                print(f"📡 CONNECTING | {config.CONNECTION_LABEL}")
+                print(f"\U0001f4e1 CONNECTING | {config.CONNECTION_LABEL}")
                 print(f"Host={config.IB_HOST} Port={config.IB_PORT} ClientId={config.IB_CLIENT_ID}")
                 print("=" * 60)
             self.ib.connect(
@@ -537,27 +593,35 @@ class IBConnector:
             self.account_id = accounts[0] if accounts else None
             self.ib.reqMarketDataType(4)
 
-            # Registruj position event handler — aktualizuje cache kdykoli IB posle update
-            self.ib.positionEvent += self._on_position_event
+            # Registruj event handlery
+            self.ib.positionEvent    += self._on_position_event
+            self.ib.orderStatusEvent += self._on_order_status_event
 
-            # Nacti existujici pozice hned po spojeni (bezpecne - jsme v IB threadu)
+            # Nacti existujici pozice po spojeni
             self._refresh_positions_cache()
+
+            # Spust background event pump
+            threading.Thread(
+                target=self._positions_bg_loop,
+                daemon=True,
+                name='IB-PosBG'
+            ).start()
 
             try:
                 self.executions = self.ib.reqExecutions()
             except Exception as e:
-                print(f"⚠️ Executions: {e}")
-            print(f"✅ Connected | Account: {self.account_id}")
+                print(f"\u26a0\ufe0f Executions: {e}")
+            print(f"\u2705 Connected | Account: {self.account_id}")
             return True
         except Exception as e:
-            print(f"❌ Connection failed: {e}")
+            print(f"\u274c Connection failed: {e}")
             self.connected = False
             return False
 
     def _refresh_positions_cache(self):
-        """Vola se POUZE z IB event loop threadu (connect, positionEvent)."""
+        """Cte aktualní pozice z IB interniho modelu a ulozi do cache."""
         try:
-            raw = self.ib.positions()
+            raw    = self.ib.positions()
             result = []
             for pos in raw:
                 if pos.position == 0:
@@ -576,15 +640,32 @@ class IBConnector:
                     'unrealized_pnl':     upnl,
                     'unrealized_pnl_pct': (upnl / abs(cb) * 100) if cb else 0
                 })
+            prev_syms = {p['symbol'] for p in self._positions_cache}
+            new_syms  = {p['symbol'] for p in result}
             with self._positions_lock:
                 self._positions_cache = result
-            print(f"[POS] Cache refresh: {len(result)} pozic")
+            # Log jen pri zmene (aby nezahlcoval konzoli)
+            if prev_syms != new_syms:
+                print(f"[POS] Cache ZMENENA: {prev_syms} -> {new_syms} | {len(result)} pozic")
         except Exception as e:
-            print(f"⚠️ _refresh_positions_cache: {e}")
+            print(f"\u26a0\ufe0f _refresh_positions_cache: {e}")
 
     def _on_position_event(self, account, contract, position, avgCost):
         """Callback z IB event loop — aktualizuje cache po kazde zmene pozice."""
+        print(f"[POS] positionEvent: {contract.symbol} pos={position} avgCost={avgCost}")
         self._refresh_positions_cache()
+
+    def _on_order_status_event(self, trade):
+        """Loguje zmeny stavu orderu — uzitecne pro debug."""
+        s = trade.orderStatus
+        print(
+            f"[ORDER-EVENT] {trade.contract.symbol} {trade.order.action}"
+            f" | status={s.status} filled={s.filled} remaining={s.remaining}"
+            f" avgFill={s.avgFillPrice}"
+        )
+        # Po fillu okamzite refresh pozic (doplnkove k positionEvent)
+        if s.status == 'Filled':
+            self._refresh_positions_cache()
 
     def disconnect(self):
         if self.connected:
@@ -593,6 +674,10 @@ class IBConnector:
 
     def is_connected(self):
         return self.connected and self.ib.isConnected()
+
+    # ------------------------------------------------------------------
+    # Ticker / price
+    # ------------------------------------------------------------------
 
     def get_ticker(self, symbol):
         if not self.is_connected(): return None
@@ -607,6 +692,10 @@ class IBConnector:
         sym = symbol.upper()
         self._tick_sub.subscribe(sym)
         return self._tick_sub.get_price(sym)
+
+    # ------------------------------------------------------------------
+    # Historical data
+    # ------------------------------------------------------------------
 
     def get_historical_data(self, symbol, duration='1 D', bar_size='5 mins'):
         if not self.is_connected(): return []
@@ -638,6 +727,10 @@ class IBConnector:
     def start_deep_load(self, symbol, timeframe):
         return self._hist_worker.start_deep_load(symbol, timeframe)
 
+    # ------------------------------------------------------------------
+    # Account
+    # ------------------------------------------------------------------
+
     def get_account_info(self):
         if not self.is_connected(): return {}
         try:
@@ -652,20 +745,17 @@ class IBConnector:
                     info['cash_balance'] = float(av.value)
             return info
         except Exception as e:
-            print(f"❌ account info: {e}"); return {}
+            print(f"\u274c account info: {e}"); return {}
+
+    # ------------------------------------------------------------------
+    # Orders
+    # ------------------------------------------------------------------
 
     def place_order(self, symbol, action, quantity, order_type='MARKET',
                     limit_price=None, timeout=None):
         """
         Odesle order do IB a ceka na potvrzeni.
-
-        Stavy IB orderu:
-          PendingSubmit  -> TWS prijal order, posilaji na exchange
-          PreSubmitted   -> ceka na potvrzeni odeslani
-          Submitted      -> exchange potvrdila prijeti
-          Filled         -> zaplneno
-
-        FIX v2.9.1: PendingSubmit je platny stav = order byl uspesne oddan do IB.
+        Pouziva _ib_sleep_safe() — thread-safe ib.sleep() s lockem.
         """
         if not self.is_connected():
             return {'success': False, 'error': 'Not connected to IB'}
@@ -682,7 +772,7 @@ class IBConnector:
             start       = time.time()
             last_status = None
             while time.time() - start < timeout:
-                self.ib.sleep(1)
+                self._ib_sleep_safe(1)   # thread-safe — jeden thread naraz
                 cs = trade.orderStatus.status
                 if cs != last_status:
                     print(f"  [ORDER] {symbol} {action} {quantity} -> {cs}")
@@ -725,14 +815,24 @@ class IBConnector:
     def place_market_order(self, symbol, action, quantity):
         return self.place_order(symbol, action, quantity, 'MARKET')
 
+    # ------------------------------------------------------------------
+    # Positions
+    # ------------------------------------------------------------------
+
     def get_positions(self):
         """
         Thread-safe cteni pozic z cache.
-        Cache je aktualizovana z IB event loop threadu (positionEvent + connect).
-        Zadne async volani zde -> bezpecne z Flask request threadu.
+        Cache je aktualizovana:
+          - _on_position_event  (IB callback po fill/zmene)
+          - _on_order_status_event (pri Filled)
+          - _positions_bg_loop  (background pump kazdych 3s)
         """
         with self._positions_lock:
             return list(self._positions_cache)
+
+    # ------------------------------------------------------------------
+    # Recent orders
+    # ------------------------------------------------------------------
 
     def get_recent_orders(self, limit=10):
         if not self.is_connected(): return []
@@ -762,7 +862,7 @@ class IBConnector:
                 })
             return result[::-1][-limit:]
         except Exception as e:
-            print(f"❌ orders: {e}"); return []
+            print(f"\u274c orders: {e}"); return []
 
     def __del__(self):
         self.disconnect()
