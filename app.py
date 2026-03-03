@@ -894,19 +894,33 @@ def close_all_positions(n, refresh_counter):
         return '❌ Not connected', dash.no_update, dbg
 
     positions = ib.get_positions() or []
-    errors    = []
-    closed    = 0
+
+    # Načteme sadu symbolů kde TT stále eviduje open trade.
+    # Pokud symbol v open_trade_symbols NENÍ, znamená to že SELL byl již
+    # odeslán (např. tlačítkem ✖ Close) a čeká na IB fill.
+    # V takovém případě PŘESKOČÍME – jinak bychom otevřeli nechtěný SHORT.
+    open_trade_symbols = {t['symbol'] for t in trade_tracker.get_open_trades()}
+
+    errors  = []
+    closed  = 0
+    skipped = 0
 
     for pos in positions:
         qty = abs(pos['position'])
         if qty <= 0:
             continue
+        sym = pos['symbol']
+        if sym not in open_trade_symbols:
+            # SELL pro tento symbol byl již odeslán → přeskočit
+            skipped += 1
+            print(f'[CLOSE-ALL] SKIP {sym} — TT nema open trade, SELL uz odeslan nebo ext. pozice')
+            continue
         action = 'SELL' if pos['position'] > 0 else 'BUY'
-        res = ib.place_market_order(pos['symbol'], action, qty)
+        res = ib.place_market_order(sym, action, qty)
         if res['success']:
             closed += 1
         else:
-            errors.append(pos['symbol'])
+            errors.append(sym)
 
     exit_prices = {}
     for pos in positions:
@@ -917,14 +931,15 @@ def close_all_positions(n, refresh_counter):
             exit_prices[sym] = p
     trade_tracker.close_all_open(exit_prices)
 
-    err_txt = f' | chyba u: {", ".join(errors)}' if errors else ''
-    dbg_msg = (f'[TRADE] CLOSE ALL → {closed}/{len(positions)} pozic zavřeno'
-               f'{" | ERR: " + ", ".join(errors) if errors else " | OK"}')
+    skip_txt = f' | přeskočeno {skipped} (SELL čeká na fill)' if skipped else ''
+    dbg_msg  = (f'[TRADE] CLOSE ALL → {closed}/{len(positions)} pozic zavřeno'
+                f'{skip_txt}'
+                f'{" | ERR: " + ", ".join(errors) if errors else " | OK"}')
     dbg = {'msg': dbg_msg, 'ts': time.time()}
 
     if errors:
         return f'⚠️ Zavřeno {closed}, chyba: {", ".join(errors)}', (refresh_counter or 0) + 1, dbg
-    return f'✅ Zavřeno {closed} pozic', (refresh_counter or 0) + 1, dbg
+    return f'✅ Zavřeno {closed} pozic{skip_txt}', (refresh_counter or 0) + 1, dbg
 
 
 # ------------------------------------------------------------------
