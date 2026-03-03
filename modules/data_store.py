@@ -2,16 +2,22 @@
 plus Parquet-based incremental cache for long-term storage and Deep Load.
 
 Prevents hitting IB pacing limit.
+
+Fixes v1.1:
+  - Atomicky zapis Parquet (write temp -> rename) -> zadna korupce pri crashu
+  - pa.Table.from_pandas(..., preserve_index=False) -> zadny __index_level_0__ sloupec
+  - get_bars() vraci time jako Python int -> bezpecna JSON serializace
 """
 
+import os
 import threading
 import time
-import os
+
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-# TTL in seconds per bar size - kratsi bar = kratsi cache
+# TTL in seconds per bar size
 _TTL = {
     '1 min':   60,
     '5 mins':  120,
@@ -22,11 +28,24 @@ _TTL = {
 }
 _DEFAULT_TTL = 120
 
+# Parquet schema - explicitni typy, zadne surprisy
+_SCHEMA = pa.schema([
+    pa.field('time',   pa.int64()),
+    pa.field('open',   pa.float64()),
+    pa.field('high',   pa.float64()),
+    pa.field('low',    pa.float64()),
+    pa.field('close',  pa.float64()),
+    pa.field('volume', pa.float64()),
+])
+
+
+# ======================================================
+# In-memory cache (krátkodobá, TTL per bar size)
+# ======================================================
 class OHLCVCache:
     """Thread-safe in-memory cache for OHLCV bar data."""
 
     def __init__(self):
-        # key: (symbol_upper, bar_size) -> {'bars': [...], 'ts': float}
         self._cache: dict = {}
         self._lock = threading.Lock()
 
@@ -67,8 +86,8 @@ class OHLCVCache:
         with self._lock:
             entries = []
             for (sym, bs), entry in self._cache.items():
-                ttl    = _TTL.get(bs, _DEFAULT_TTL)
-                age    = now - entry['ts']
+                ttl = _TTL.get(bs, _DEFAULT_TTL)
+                age = now - entry['ts']
                 entries.append({
                     'symbol':   sym,
                     'bar_size': bs,
@@ -79,70 +98,127 @@ class OHLCVCache:
                 })
         return {'count': len(entries), 'entries': entries}
 
-# Parquet Store
+
+# ======================================================
+# Parquet Store (dlouhodobá cache na disku)
+# ======================================================
 class ParquetDataStore:
-    def __init__(self, data_dir='data/ohlcv'):
+    def __init__(self, data_dir: str = 'data/ohlcv'):
         self.data_dir = data_dir
-        if not os.path.exists(self.data_dir):
-            os.makedirs(self.data_dir, exist_ok=True)
+        os.makedirs(self.data_dir, exist_ok=True)
         self._lock = threading.Lock()
 
-    def _get_filename(self, symbol, timeframe):
+    # --------------------------------------------------
+    # Helpers
+    # --------------------------------------------------
+    def _get_filename(self, symbol: str, timeframe: str) -> str:
         tf_clean = timeframe.replace(' ', '_')
-        return os.path.join(self.data_dir, f"{symbol}_{tf_clean}.parquet")
+        return os.path.join(self.data_dir, f"{symbol.upper()}_{tf_clean}.parquet")
 
-    def get_cache_status(self, symbol, timeframe):
+    def _df_to_table(self, df: pd.DataFrame) -> pa.Table:
+        """Převod DataFrame na PyArrow Table se správným schematem.
+        preserve_index=False zabraňuje zápisu pandas indexu jako extra sloupce.
+        """
+        # Zajisti spravne sloupce a typy
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col in df.columns:
+                df[col] = df[col].astype(float)
+        df['time'] = df['time'].astype('int64')
+        return pa.Table.from_pandas(df[list(_SCHEMA.names)],
+                                    schema=_SCHEMA,
+                                    preserve_index=False)
+
+    def _write_atomic(self, table: pa.Table, filename: str):
+        """Atomický zápis: write -> temp soubor -> os.replace().
+        Pokud proces spadne uprostřed zápisu, cílový soubor zůstane neporušen.
+        """
+        tmp = filename + '.tmp'
+        try:
+            pq.write_table(table, tmp,
+                           compression='snappy',
+                           write_statistics=False)
+            os.replace(tmp, filename)   # atomická operace na všech OS
+        except Exception:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except OSError:
+                    pass
+            raise
+
+    # --------------------------------------------------
+    # Public API
+    # --------------------------------------------------
+    def get_cache_status(self, symbol: str, timeframe: str) -> dict:
         filename = self._get_filename(symbol, timeframe)
         if not os.path.exists(filename):
-            return {'cached': False, 'total_bars': 0, 'age_seconds': 999999999, 'is_fresh': False}
-        
+            return {'cached': False, 'total_bars': 0,
+                    'age_seconds': 999_999_999, 'is_fresh': False}
         try:
             mtime = os.path.getmtime(filename)
-            age = time.time() - mtime
+            age   = time.time() - mtime
             fresh_threshold = _TTL.get(timeframe, _DEFAULT_TTL)
-            
             pq_file = pq.ParquetFile(filename)
             return {
-                'cached': True, 
-                'total_bars': pq_file.metadata.num_rows, 
-                'age_seconds': age, 
-                'is_fresh': age < fresh_threshold
+                'cached':     True,
+                'total_bars': pq_file.metadata.num_rows,
+                'age_seconds': age,
+                'is_fresh':   age < fresh_threshold
             }
         except Exception:
-            return {'cached': False, 'total_bars': 0, 'age_seconds': 999999999, 'is_fresh': False}
+            return {'cached': False, 'total_bars': 0,
+                    'age_seconds': 999_999_999, 'is_fresh': False}
 
-    def get_bars(self, symbol, timeframe):
+    def get_bars(self, symbol: str, timeframe: str) -> list:
+        """Načte bary z Parquet a vrátí jako list diktů.
+        'time' je vždy Python int (bezpečné pro JSON serializaci).
+        """
         filename = self._get_filename(symbol, timeframe)
         if not os.path.exists(filename):
             return []
         with self._lock:
             try:
-                table = pq.read_table(filename)
-                df = table.to_pandas()
-                df = df.sort_values('time').drop_duplicates(subset=['time'], keep='last')
-                return df.to_dict('records')
+                df = pq.read_table(filename).to_pandas()
+                df = (df.sort_values('time')
+                        .drop_duplicates(subset=['time'], keep='last')
+                        .reset_index(drop=True))
+                # Explicitni konverze: numpy int64 -> Python int
+                # Flask jsonify bez problemu, JS dostane cislo (ne stringy)
+                df['time'] = df['time'].astype('int64')
+                records = df.to_dict('records')
+                for r in records:
+                    r['time'] = int(r['time'])
+                return records
             except Exception as e:
                 print(f"[PARQUET] Error reading {filename}: {e}")
                 return []
 
-    def append_bars(self, symbol, timeframe, new_bars):
-        if not new_bars: return
+    def append_bars(self, symbol: str, timeframe: str, new_bars: list):
+        """Přidá nové bary do Parquet souboru (merge + dedup + atomický zápis)."""
+        if not new_bars:
+            return
         filename = self._get_filename(symbol, timeframe)
-        new_df = pd.DataFrame(new_bars)
-        
+        new_df   = pd.DataFrame(new_bars)
+
         with self._lock:
             try:
                 if os.path.exists(filename):
                     old_df = pq.read_table(filename).to_pandas()
-                    combined_df = pd.concat([old_df, new_df])
+                    combined_df = pd.concat([old_df, new_df], ignore_index=True)
                 else:
-                    combined_df = new_df
-                    
-                combined_df = combined_df.sort_values('time').drop_duplicates(subset=['time'], keep='last')
-                table = pa.Table.from_pandas(combined_df)
-                pq.write_table(table, filename)
+                    combined_df = new_df.copy()
+
+                combined_df = (combined_df
+                               .sort_values('time')
+                               .drop_duplicates(subset=['time'], keep='last')
+                               .reset_index(drop=True))
+
+                table = self._df_to_table(combined_df)
+                self._write_atomic(table, filename)
             except Exception as e:
                 print(f"[PARQUET] Error writing {filename}: {e}")
 
+
+# Globální instance
 ohlcv_cache = OHLCVCache()
-data_store = ParquetDataStore()
+data_store  = ParquetDataStore()
