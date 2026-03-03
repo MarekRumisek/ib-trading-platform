@@ -1,6 +1,6 @@
 """IB API Connector using ib_async
 
-Version: 2.9.1 - PendingSubmit fix + positions refresh
+Version: 2.9.2 - thread-safe positions
 
 HIERARCHIE FALLBACKU:
   1. STREAMING   reqMktData(snapshot=False)  -> okamzity update
@@ -13,7 +13,10 @@ Error 162   -> bylo zpusobeno useRTH=False + 300S (prilis kratka doba).
 
 v2.9.1 zmeny:
   - place_order: PendingSubmit je platny stav -> success=True
-  - get_positions: po kazdem volani vynuti refresh positions cache
+v2.9.2 zmeny:
+  - get_positions: odstranen reqPositions()+sleep() - NENI thread-safe v Flask threadech
+    ib.positions() vraci IB-managed cache, ktera se automaticky aktualizuje pri fillovani
+  - _positions_cache: background thread pravidelne refreshuje pozice pres IB event loop
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder
@@ -505,6 +508,10 @@ class IBConnector:
         self.contracts  = {}
         self.executions = []
 
+        # Thread-safe positions cache — aktualizovana z IB event-loop threadu
+        self._positions_cache: list  = []
+        self._positions_lock         = threading.Lock()
+
         self._hist_worker = _HistWorker(
             host=config.IB_HOST, port=config.IB_PORT,
             client_id=config.IB_CLIENT_ID + 1
@@ -529,6 +536,13 @@ class IBConnector:
             accounts        = self.ib.managedAccounts()
             self.account_id = accounts[0] if accounts else None
             self.ib.reqMarketDataType(4)
+
+            # Registruj position event handler — aktualizuje cache kdykoli IB posle update
+            self.ib.positionEvent += self._on_position_event
+
+            # Nacti existujici pozice hned po spojeni (bezpecne - jsme v IB threadu)
+            self._refresh_positions_cache()
+
             try:
                 self.executions = self.ib.reqExecutions()
             except Exception as e:
@@ -539,6 +553,38 @@ class IBConnector:
             print(f"❌ Connection failed: {e}")
             self.connected = False
             return False
+
+    def _refresh_positions_cache(self):
+        """Vola se POUZE z IB event loop threadu (connect, positionEvent)."""
+        try:
+            raw = self.ib.positions()
+            result = []
+            for pos in raw:
+                if pos.position == 0:
+                    continue
+                sym  = pos.contract.symbol
+                cp   = self._tick_sub.get_price(sym) or pos.avgCost
+                mv   = pos.position * cp
+                cb   = pos.position * pos.avgCost
+                upnl = mv - cb
+                result.append({
+                    'symbol':             sym,
+                    'position':           pos.position,
+                    'avg_cost':           pos.avgCost,
+                    'market_price':       cp,
+                    'market_value':       mv,
+                    'unrealized_pnl':     upnl,
+                    'unrealized_pnl_pct': (upnl / abs(cb) * 100) if cb else 0
+                })
+            with self._positions_lock:
+                self._positions_cache = result
+            print(f"[POS] Cache refresh: {len(result)} pozic")
+        except Exception as e:
+            print(f"⚠️ _refresh_positions_cache: {e}")
+
+    def _on_position_event(self, account, contract, position, avgCost):
+        """Callback z IB event loop — aktualizuje cache po kazde zmene pozice."""
+        self._refresh_positions_cache()
 
     def disconnect(self):
         if self.connected:
@@ -620,7 +666,6 @@ class IBConnector:
           Filled         -> zaplneno
 
         FIX v2.9.1: PendingSubmit je platny stav = order byl uspesne oddan do IB.
-        Paper ucet casto zustava v PendingSubmit nez prejde do Submitted/Filled.
         """
         if not self.is_connected():
             return {'success': False, 'error': 'Not connected to IB'}
@@ -642,30 +687,25 @@ class IBConnector:
                 if cs != last_status:
                     print(f"  [ORDER] {symbol} {action} {quantity} -> {cs}")
                     last_status = cs
-                # Ukonci loop jakmile jsme v terminalni stavu
                 if cs in _ORDER_TERMINAL_STATUSES:
                     break
 
             fs  = trade.orderStatus.status
             oid = trade.order.orderId if trade.order else None
-
             print(f"  [ORDER] Final status: {fs} | orderId={oid}")
 
             if fs in _ORDER_SUCCESS_STATUSES:
-                # Pro PendingSubmit/PreSubmitted fill_price zatim nezname -
-                # pouzijeme avgFillPrice pokud je k dispozici, jinak 0
                 fill_price = trade.orderStatus.avgFillPrice or 0.0
                 return {
-                    'success':   True,
-                    'order_id':  oid,
-                    'status':    fs,
-                    'filled':    trade.orderStatus.filled,
-                    'remaining': trade.orderStatus.remaining,
+                    'success':    True,
+                    'order_id':   oid,
+                    'status':     fs,
+                    'filled':     trade.orderStatus.filled,
+                    'remaining':  trade.orderStatus.remaining,
                     'fill_price': fill_price,
-                    'error':     None
+                    'error':      None
                 }
 
-            # Skutecna chyba (Cancelled, Inactive, ...)
             msgs = [
                 f"Error {e.errorCode}: {e.message}"
                 for e in (trade.log or [])
@@ -687,35 +727,12 @@ class IBConnector:
 
     def get_positions(self):
         """
-        Vraci aktualni pozice z IB.
-        FIX v2.9.1: vynucuje refresh positions cache pred ctenim.
+        Thread-safe cteni pozic z cache.
+        Cache je aktualizovana z IB event loop threadu (positionEvent + connect).
+        Zadne async volani zde -> bezpecne z Flask request threadu.
         """
-        if not self.is_connected(): return []
-        try:
-            # Vynuti refresh — zajisti ze po novem plneni vidime aktualni stav
-            self.ib.reqPositions()
-            self.ib.sleep(0.3)
-
-            result = []
-            for pos in self.ib.positions():
-                if pos.position == 0:
-                    continue
-                cp   = self._tick_sub.get_price(pos.contract.symbol) or pos.avgCost
-                mv   = pos.position * cp
-                cb   = pos.position * pos.avgCost
-                upnl = mv - cb
-                result.append({
-                    'symbol':             pos.contract.symbol,
-                    'position':           pos.position,
-                    'avg_cost':           pos.avgCost,
-                    'market_price':       cp,
-                    'market_value':       mv,
-                    'unrealized_pnl':     upnl,
-                    'unrealized_pnl_pct': (upnl / abs(cb) * 100) if cb else 0
-                })
-            return result
-        except Exception as e:
-            print(f"❌ positions: {e}"); return []
+        with self._positions_lock:
+            return list(self._positions_cache)
 
     def get_recent_orders(self, limit=10):
         if not self.is_connected(): return []
