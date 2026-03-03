@@ -1,11 +1,12 @@
 import dash
 from dash import dcc, html, Input, Output, State
 from datetime import datetime, timedelta
-from flask import jsonify
+from flask import jsonify, request as freq
 from ib_connector import IBConnector
 import config
 from modules.data_store import data_store
 from modules.indicators import SMA, EMA, RSI, MACD
+from modules.trade_tracker import trade_tracker
 import time
 
 app = dash.Dash(
@@ -161,15 +162,8 @@ def api_cb_status():
     return jsonify(_cb_status)
 
 
-# ----------------------------------------------------------------
-# INDICATORS ENDPOINT
-# GET /api/indicators/<SYMBOL>/<TF>?active=sma,ema,rsi,macd
-#     &sma_p=20 &ema_p=20 &rsi_p=14
-# Vraci JSON s vypocitanymi hodnotami indikatorů z Parquet cache.
-# ----------------------------------------------------------------
 @server.route('/api/indicators/<symbol>/<tf>')
 def api_indicators(symbol, tf):
-    from flask import request as freq
     sym       = symbol.upper()
     timeframe = tf.replace('_', ' ')
     active    = [x.strip() for x in freq.args.get('active', 'ema,rsi').split(',') if x.strip()]
@@ -183,33 +177,100 @@ def api_indicators(symbol, tf):
     try:
         if 'sma' in active:
             p = int(freq.args.get('sma_p', 20))
-            result['sma']  = SMA(period=p).calculate(bars)
+            result['sma']        = SMA(period=p).calculate(bars)
             result['sma_period'] = p
         if 'ema' in active:
             p = int(freq.args.get('ema_p', 20))
-            result['ema']  = EMA(period=p).calculate(bars)
+            result['ema']        = EMA(period=p).calculate(bars)
             result['ema_period'] = p
         if 'rsi' in active:
             p = int(freq.args.get('rsi_p', 14))
-            result['rsi']  = RSI(period=p).calculate(bars)
+            result['rsi']        = RSI(period=p).calculate(bars)
             result['rsi_period'] = p
         if 'macd' in active:
-            result['macd'] = MACD().calculate(bars)
+            fast = int(freq.args.get('macd_fast', 12))
+            slow = int(freq.args.get('macd_slow', 26))
+            sig  = int(freq.args.get('macd_sig',   9))
+            result['macd'] = MACD(fast=fast, slow=slow, signal=sig).calculate(bars)
     except Exception as e:
+        result['ok']      = False
         result['warning'] = str(e)
 
     return jsonify(result)
 
 
-# ================================================================
+# ----------------------------------------------------------------
+# TRADE API
+# ----------------------------------------------------------------
 
+@server.route('/api/trades/open', methods=['GET'])
+def api_trades_open():
+    trades = trade_tracker.get_open_trades()
+    for t in trades:
+        t['entry_time_fmt'] = trade_tracker.fmt_time(t.get('entry_time'))
+    return jsonify({'ok': True, 'trades': trades})
+
+
+@server.route('/api/trades/history', methods=['GET'])
+def api_trades_history():
+    limit  = int(freq.args.get('limit', 50))
+    trades = trade_tracker.get_history(limit=limit)
+    for t in trades:
+        t['entry_time_fmt'] = trade_tracker.fmt_time(t.get('entry_time'))
+        t['exit_time_fmt']  = trade_tracker.fmt_time(t.get('exit_time'))
+    return jsonify({'ok': True, 'trades': trades})
+
+
+@server.route('/api/trades/close/<trade_id>', methods=['POST'])
+def api_trade_close(trade_id):
+    body       = freq.get_json(silent=True) or {}
+    exit_price = body.get('exit_price')
+
+    # Pokud cena nebyla poskytnuta, zkus získat z IB
+    if not exit_price:
+        trade = trade_tracker.get_trade(trade_id)
+        if trade:
+            ticker = ib.get_ticker(trade['symbol'])
+            if ticker:
+                exit_price = ticker.get('price') or ticker.get('last') or trade.get('entry_price')
+
+    if not exit_price:
+        return jsonify({'ok': False, 'error': 'exit_price_missing'}), 400
+
+    updated = trade_tracker.close_trade(trade_id, exit_price)
+    if not updated:
+        return jsonify({'ok': False, 'error': 'trade_not_found_or_already_closed'}), 404
+
+    updated['exit_time_fmt']  = trade_tracker.fmt_time(updated.get('exit_time'))
+    updated['entry_time_fmt'] = trade_tracker.fmt_time(updated.get('entry_time'))
+    return jsonify({'ok': True, 'trade': updated})
+
+
+@server.route('/api/trades/close_all', methods=['POST'])
+def api_trades_close_all():
+    # Sesbírej aktuální ceny z IB pro všechny open pozice
+    open_trades  = trade_tracker.get_open_trades()
+    symbols      = list({t['symbol'] for t in open_trades})
+    exit_prices  = {}
+    for sym in symbols:
+        ticker = ib.get_ticker(sym)
+        if ticker:
+            p = ticker.get('price') or ticker.get('last')
+            if p:
+                exit_prices[sym] = p
+
+    closed = trade_tracker.close_all_open(exit_prices)
+    return jsonify({'ok': True, 'closed': len(closed), 'trades': closed})
+
+
+# ================================================================
 app_state = {'current_symbol': 'AAPL', 'current_timeframe': '5 mins'}
 
 # ========== LAYOUT ==========
 
 app.layout = html.Div([
     html.Div([
-        html.H1("🚀 IB Trading Platform v2.8",
+        html.H1("🚀 IB Trading Platform v2.9",
                 style={'display': 'inline-block', 'margin': 0, 'color': '#00d4ff'}),
         html.Div(id='connection-status',
                  style={'display': 'inline-block', 'float': 'right', 'fontSize': 18})
@@ -230,6 +291,7 @@ app.layout = html.Div([
     ], style={'padding': '15px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px', 'fontSize': '16px'}),
 
+    # Symbol + cena
     html.Div([
         html.Div([
             html.Label('Symbol:', style={'marginRight': '10px', 'fontWeight': 'bold'}),
@@ -256,6 +318,7 @@ app.layout = html.Div([
     ], style={'padding': '15px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
+    # Graf
     html.Div([
         html.Div([
             html.Div([
@@ -265,14 +328,22 @@ app.layout = html.Div([
                 html.Button('30m', id='tf-30m', n_clicks=0, className='tf-btn'),
                 html.Button('1h',  id='tf-1h',  n_clicks=0, className='tf-btn'),
                 html.Button('1D',  id='tf-1d',  n_clicks=0, className='tf-btn'),
-                html.Button('📥 Stáhnout historii', id='deep-load-btn', n_clicks=0, style={'marginLeft': '20px', 'padding': '8px 15px', 'background': '#ff9800', 'color': 'black', 'border': 'none', 'borderRadius': '5px', 'cursor': 'pointer', 'fontWeight': 'bold'}),
+                html.Button('📥 Stáhnout historii', id='deep-load-btn', n_clicks=0,
+                            style={'marginLeft': '20px', 'padding': '8px 15px',
+                                   'background': '#ff9800', 'color': 'black',
+                                   'border': 'none', 'borderRadius': '5px',
+                                   'cursor': 'pointer', 'fontWeight': 'bold'}),
                 html.Span(id='chart-loading-indicator', children='',
                           style={'marginLeft': '15px', 'fontSize': '13px',
                                  'color': '#ffa726', 'fontStyle': 'italic',
                                  'verticalAlign': 'middle'})
             ], style={'display': 'inline-block'}),
             html.Div([
-                html.Div(id='cache-status-indicator', children='Cache: Zjišťuji...', style={'display': 'inline-block', 'marginRight': '15px', 'fontSize': '12px', 'color': '#4caf50', 'padding': '5px 10px', 'background': '#1b5e20', 'borderRadius': '4px'}),
+                html.Div(id='cache-status-indicator', children='Cache: Zjišťuji...',
+                         style={'display': 'inline-block', 'marginRight': '15px',
+                                'fontSize': '12px', 'color': '#4caf50',
+                                'padding': '5px 10px', 'background': '#1b5e20',
+                                'borderRadius': '4px'}),
                 html.Span('⚠️ 15min delay na demo',
                           style={'fontSize': '11px', 'color': '#666',
                                  'marginRight': '10px', 'verticalAlign': 'middle'}),
@@ -281,14 +352,10 @@ app.layout = html.Div([
             ], style={'display': 'inline-block', 'float': 'right'})
         ], style={'marginBottom': '10px', 'overflow': 'hidden'}),
 
-        # ----------------------------------------------------------
-        # INDICATOR TOGGLE PANEL
-        # ----------------------------------------------------------
         html.Div([
             html.Span('📊 Indikátory:',
                       style={'fontWeight': 'bold', 'marginRight': '12px',
-                             'fontSize': '13px', 'color': '#aaa',
-                             'verticalAlign': 'middle'}),
+                             'fontSize': '13px', 'color': '#aaa', 'verticalAlign': 'middle'}),
             html.Button('SMA 20',  id='ind-sma-btn',  n_clicks=0, className='ind-btn',
                         title='Simple Moving Average (20)'),
             html.Button('EMA 20',  id='ind-ema-btn',  n_clicks=1, className='ind-btn ind-active',
@@ -302,7 +369,6 @@ app.layout = html.Div([
                              'color': '#888', 'fontStyle': 'italic'}),
         ], style={'marginBottom': '10px', 'paddingTop': '10px',
                   'borderTop': '1px solid #3d3d4a'}),
-        # ----------------------------------------------------------
 
         html.Div(id='lwc-container',
                  style={'width': '100%', 'height': '500px', 'position': 'relative',
@@ -322,28 +388,91 @@ app.layout = html.Div([
         dcc.Store(id='active-tf-store', data='tf-5m'),
         dcc.Store(id='tick-enabled-store', data=False),
         dcc.Store(id='deep-load-finished-trigger', data=False),
-        # Indicator stores
         dcc.Store(id='indicator-settings-store',
                   data={'sma': False, 'ema': True, 'rsi': True, 'macd': False}),
         dcc.Store(id='indicators-data-store'),
+        dcc.Store(id='trade-refresh-store', data=0),
 
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
+    # ================================================================
+    # ORDER ENTRY – v2.9
+    # ================================================================
     html.Div([
         html.H3('📥 Order Entry', style={'marginBottom': '15px'}),
+
+        # Řádek 1: Qty
         html.Div([
-            html.Label('Quantity:', style={'marginRight': '10px', 'fontWeight': 'bold'}),
+            html.Label('Množství:', style={'marginRight': '10px', 'fontWeight': 'bold',
+                                           'fontSize': '13px', 'color': '#aaa'}),
             html.Button('1',   id='qty-1',   n_clicks=0, className='qty-btn'),
             html.Button('5',   id='qty-5',   n_clicks=0, className='qty-btn'),
             html.Button('10',  id='qty-10',  n_clicks=0, className='qty-btn'),
             html.Button('25',  id='qty-25',  n_clicks=0, className='qty-btn'),
             html.Button('100', id='qty-100', n_clicks=0, className='qty-btn'),
             dcc.Input(id='qty-custom', type='number', value=1, min=1,
+                      placeholder='Vlastní',
                       style={'width': '80px', 'marginLeft': '10px', 'padding': '8px',
                              'borderRadius': '5px', 'border': '2px solid #667eea',
                              'background': '#1e1e2e', 'color': 'white'})
-        ], style={'marginBottom': '15px'}),
+        ], style={'marginBottom': '14px'}),
+
+        # Řádek 2: Risk management (SL / TP)
+        html.Div([
+            html.Div([
+                html.Span('🛡️ Stop-Loss:',
+                          style={'fontSize': '13px', 'color': '#ef9a9a',
+                                 'fontWeight': 'bold', 'marginRight': '8px'}),
+                dcc.Input(id='sl-price-input', type='number', placeholder='Cena $',
+                          min=0, step=0.01,
+                          style={'width': '90px', 'padding': '6px', 'marginRight': '6px',
+                                 'borderRadius': '5px', 'border': '2px solid #ef5350',
+                                 'background': '#1e1e2e', 'color': 'white', 'fontSize': '13px'}),
+                html.Span('nebo', style={'color': '#555', 'marginRight': '6px', 'fontSize': '12px'}),
+                dcc.Input(id='sl-pct-input', type='number', placeholder='%',
+                          min=0, max=100, step=0.1,
+                          style={'width': '65px', 'padding': '6px', 'marginRight': '20px',
+                                 'borderRadius': '5px', 'border': '2px solid #ef5350',
+                                 'background': '#1e1e2e', 'color': 'white', 'fontSize': '13px'}),
+
+                html.Span('🎯 Take-Profit:',
+                          style={'fontSize': '13px', 'color': '#a5d6a7',
+                                 'fontWeight': 'bold', 'marginRight': '8px'}),
+                dcc.Input(id='tp-price-input', type='number', placeholder='Cena $',
+                          min=0, step=0.01,
+                          style={'width': '90px', 'padding': '6px', 'marginRight': '6px',
+                                 'borderRadius': '5px', 'border': '2px solid #26a69a',
+                                 'background': '#1e1e2e', 'color': 'white', 'fontSize': '13px'}),
+                html.Span('nebo', style={'color': '#555', 'marginRight': '6px', 'fontSize': '12px'}),
+                dcc.Input(id='tp-pct-input', type='number', placeholder='%',
+                          min=0, step=0.1,
+                          style={'width': '65px', 'padding': '6px',
+                                 'borderRadius': '5px', 'border': '2px solid #26a69a',
+                                 'background': '#1e1e2e', 'color': 'white', 'fontSize': '13px'}),
+            ], style={'display': 'inline-block', 'marginRight': '20px'}),
+
+            # Poznámka
+            html.Div([
+                html.Span('📝', style={'marginRight': '6px', 'fontSize': '13px'}),
+                dcc.Input(id='order-note-input', type='text', placeholder='Poznámka (volitelné)',
+                          maxLength=100,
+                          style={'width': '200px', 'padding': '6px',
+                                 'borderRadius': '5px', 'border': '2px solid #555',
+                                 'background': '#1e1e2e', 'color': 'white', 'fontSize': '13px'})
+            ], style={'display': 'inline-block'}),
+        ], style={'marginBottom': '12px', 'padding': '12px',
+                  'background': '#1a1a2e', 'borderRadius': '8px',
+                  'border': '1px solid #3d3d4a'}),
+
+        # Řádek 3: Preview
+        html.Div(id='order-preview',
+                 style={'marginBottom': '14px', 'padding': '8px 14px',
+                        'background': '#0d1a2e', 'borderRadius': '6px',
+                        'fontSize': '13px', 'color': '#90caf9',
+                        'fontFamily': 'monospace', 'minHeight': '28px'}),
+
+        # Řádek 4: Tlačítka
         html.Div([
             html.Button('🟢 BUY MARKET', id='buy-btn', n_clicks=0,
                         style={'padding': '15px 40px',
@@ -358,15 +487,41 @@ app.layout = html.Div([
                                'fontSize': '18px', 'fontWeight': 'bold', 'cursor': 'pointer'})
         ]),
         html.Div(id='order-feedback', style={'marginTop': '15px', 'fontSize': '16px'})
+
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
+    # ================================================================
+    # OPEN POSITIONS
+    # ================================================================
     html.Div([
-        html.H3('📊 Open Positions', style={'marginBottom': '15px'}),
+        html.Div([
+            html.H3('📊 Open Positions',
+                    style={'display': 'inline-block', 'marginBottom': '0', 'marginRight': '20px'}),
+            html.Button('❌ Close All Positions', id='close-all-btn', n_clicks=0,
+                        style={'padding': '8px 18px', 'background': '#b71c1c',
+                               'border': 'none', 'borderRadius': '6px', 'color': 'white',
+                               'fontWeight': 'bold', 'cursor': 'pointer', 'fontSize': '13px'}),
+            html.Span(id='close-all-feedback', children='',
+                      style={'marginLeft': '12px', 'fontSize': '13px', 'color': '#ff8a65'})
+        ], style={'marginBottom': '15px', 'display': 'flex',
+                  'alignItems': 'center', 'flexWrap': 'wrap', 'gap': '10px'}),
         html.Div(id='positions-table')
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
+    # ================================================================
+    # TRADE HISTORY
+    # ================================================================
+    html.Div([
+        html.H3('📈 Trade History', style={'marginBottom': '15px'}),
+        html.Div(id='trade-history-table')
+    ], style={'padding': '20px', 'background': '#2d2d3a',
+              'borderRadius': '8px', 'marginBottom': '20px'}),
+
+    # ================================================================
+    # RECENT ORDERS (IB)
+    # ================================================================
     html.Div([
         html.H3('📋 Recent Orders', style={'marginBottom': '15px'}),
         html.Div(id='orders-table')
@@ -437,16 +592,17 @@ app.layout = html.Div([
                    'border': '1px solid #333', 'borderRadius': '5px',
                    'padding': '10px', 'resize': 'vertical'}
         ),
-        html.Div('[INIT] [BTN] [CB] [TF] [TICK] [API] [DATA] [IND] [ERR] | v2.8',
+        html.Div('[INIT] [BTN] [CB] [TF] [TICK] [API] [DATA] [IND] [TRADE] [ERR] | v2.9',
                  style={'marginTop': '8px', 'fontSize': '12px', 'color': '#888'})
     ], style={'padding': '20px', 'background': '#1a1a2e',
               'borderRadius': '8px', 'marginBottom': '20px',
               'border': '2px solid #ff9800'}),
 
-    dcc.Interval(id='cache-update-interval', interval=2000, n_intervals=0),
+    dcc.Interval(id='cache-update-interval',     interval=2000,  n_intervals=0),
     dcc.Interval(id='price-update-interval',     interval=10000, n_intervals=0),
     dcc.Interval(id='positions-update-interval', interval=30000, n_intervals=0),
     dcc.Interval(id='connection-check-interval', interval=10000, n_intervals=0),
+    dcc.Interval(id='trades-refresh-interval',   interval=5000,  n_intervals=0),
     html.Div(id='hidden-state', style={'display': 'none'}),
     html.Div(id='deep-load-trigger-dummy', style={'display': 'none'})
 
@@ -500,26 +656,21 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger, s
         ctx = dash.callback_context
         btn = (ctx.triggered[0]['prop_id'].split('.')[0]
                if ctx.triggered else 'load-chart-btn')
-
         tf_map = {'tf-1m': '1 min', 'tf-5m': '5 mins',
                   'tf-15m': '15 mins', 'tf-30m': '30 mins',
                   'tf-1h': '1 hour', 'tf-1d': '1 day'}
         if btn in tf_map:
             app_state['current_timeframe'] = tf_map[btn]
-
         symbol   = (symbol or 'AAPL').upper()
         app_state['current_symbol'] = symbol
         tf       = app_state['current_timeframe']
         duration = DURATION_MAP.get(tf, '1 D')
-
         _cb_status = {'step': 'started', 'symbol': symbol, 'tf': tf,
                       'bars': None, 'error': None,
                       'ts': datetime.now().strftime('%H:%M:%S')}
         print(f"[CB] START: {symbol} | {tf} | duration={duration} | Trigger={btn}")
         _cb_status['step'] = 'requesting_IB'
-
         bars = ib.get_historical_data(symbol, duration, tf)
-
         _cb_status['step'] = 'IB_returned'
         _cb_status['bars'] = len(bars)
         print(f"[CB] IB/Cache returned {len(bars)} bars")
@@ -546,7 +697,6 @@ def update_debug_python(data):
             f"| {len(bars)} baru | close[0]={b0['close']} close[-1]={bars[-1]['close']:.2f}")
 
 
-# --- DEEP LOAD LOGIC ---
 @app.callback(
     Output('deep-load-trigger-dummy', 'children'),
     Input('deep-load-btn', 'n_clicks'),
@@ -570,36 +720,30 @@ def update_cache_status(n, symbol, last_dl_state):
     if not symbol: return "Vyberte symbol", dash.no_update
     sym = symbol.upper()
     tf  = app_state.get('current_timeframe', '5 mins')
-
     dl_status        = ib.get_deep_load_status(sym, tf)
     current_dl_state = dl_status.get('status')
-
-    trigger_refresh = dash.no_update
+    trigger_refresh  = dash.no_update
     if current_dl_state == 'done':
         new_dl_trigger = f"{sym}_{tf}_done_{time.time()}"
         if not str(last_dl_state).startswith(f"{sym}_{tf}_done"):
             trigger_refresh = new_dl_trigger
             last_dl_state   = new_dl_trigger
     elif current_dl_state == 'running':
-        last_dl_state = "running"
-
+        last_dl_state = 'running'
     if current_dl_state == 'running':
         return html.Span(
             f"⏳ Stahuji historii: {dl_status.get('progress', '0%')} ({dl_status.get('msg', '')})",
             style={'color': '#ff9800'}
         ), trigger_refresh
-
     status = data_store.get_cache_status(sym, tf)
     if not status['cached']:
-        return html.Span("Cache: Prázdná", style={'color': '#888', 'background': '#333'}), trigger_refresh
-
+        return html.Span('Cache: Prázdná', style={'color': '#888', 'background': '#333'}), trigger_refresh
     bars_str = f"{status['total_bars']:,}".replace(',', ' ')
     age = status['age_seconds']
-    if age < 60:     age_str = f"{int(age)}s"
-    elif age < 3600: age_str = f"{int(age//60)}m"
-    elif age < 86400:age_str = f"{int(age//3600)}h"
-    else:            age_str = f"{int(age//86400)}d"
-
+    if age < 60:      age_str = f"{int(age)}s"
+    elif age < 3600:  age_str = f"{int(age//60)}m"
+    elif age < 86400: age_str = f"{int(age//3600)}h"
+    else:             age_str = f"{int(age//86400)}d"
     if status['is_fresh']:
         return html.Span(f"💾 Parquet: {bars_str} barů | Aktuální",
                          style={'color': '#4caf50', 'background': '#1b5e20'}), trigger_refresh
@@ -607,7 +751,359 @@ def update_cache_status(n, symbol, last_dl_state):
                      style={'color': '#ffeb3b', 'background': '#e65100'}), trigger_refresh
 
 
-# ========== CLIENTSIDE CALLBACKS ==========
+# ------------------------------------------------------------------
+# ORDER ENTRY: live preview (clientside)
+# ------------------------------------------------------------------
+app.clientside_callback(
+    """
+    function(qty, slPrice, slPct, tpPrice, tpPct, symbol, priceTxt) {
+        var sym  = (symbol || 'AAPL').toUpperCase();
+        var q    = qty || 1;
+        // Pokus o parsování aktuální ceny z price-display ("Last: $185.30")
+        var cur  = 0;
+        if (priceTxt) {
+            var m = priceTxt.match(/\$([\d.]+)/);
+            if (m) cur = parseFloat(m[1]);
+        }
+
+        var sl = slPrice ? parseFloat(slPrice) : null;
+        var tp = tpPrice ? parseFloat(tpPrice) : null;
+
+        // Přepočet % → $
+        if (!sl && slPct && cur > 0)
+            sl = Math.round(cur * (1 - slPct / 100) * 100) / 100;
+        if (!tp && tpPct && cur > 0)
+            tp = Math.round(cur * (1 + tpPct / 100) * 100) / 100;
+
+        var parts = ['📋 ' + q + '× ' + sym + ' @ Market'];
+        if (sl) parts.push('🛡️ SL $' + sl.toFixed(2));
+        if (tp) parts.push('🎯 TP $' + tp.toFixed(2));
+        if (cur > 0 && sl) {
+            var risk = Math.round(Math.abs(cur - sl) * q * 100) / 100;
+            parts.push('Risk: $' + risk);
+        }
+        return parts.join('  |  ');
+    }
+    """,
+    Output('order-preview', 'children'),
+    [Input('qty-custom', 'value'),
+     Input('sl-price-input', 'value'),
+     Input('sl-pct-input', 'value'),
+     Input('tp-price-input', 'value'),
+     Input('tp-pct-input', 'value'),
+     Input('symbol-input', 'value'),
+     Input('price-display', 'children')]
+)
+
+
+# ------------------------------------------------------------------
+# PLACE ORDER – BUY / SELL + záznam do TradeTracker
+# ------------------------------------------------------------------
+@app.callback(
+    [Output('order-feedback', 'children'),
+     Output('trade-refresh-store', 'data')],
+    [Input('buy-btn', 'n_clicks'), Input('sell-btn', 'n_clicks')],
+    [State('symbol-input',   'value'),
+     State('qty-custom',     'value'),
+     State('sl-price-input', 'value'),
+     State('sl-pct-input',   'value'),
+     State('tp-price-input', 'value'),
+     State('tp-pct-input',   'value'),
+     State('order-note-input','value'),
+     State('trade-refresh-store', 'data')]
+)
+def place_order(buy_clicks, sell_clicks, symbol, quantity,
+                sl_price, sl_pct, tp_price, tp_pct, note, refresh_counter):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return '', dash.no_update
+    btn = ctx.triggered[0]['prop_id'].split('.')[0]
+    if btn == 'buy-btn' and buy_clicks > 0:
+        action, color = 'BUY', '#26a69a'
+    elif btn == 'sell-btn' and sell_clicks > 0:
+        action, color = 'SELL', '#ef5350'
+    else:
+        return '', dash.no_update
+
+    if not ib.is_connected():
+        return html.Div('❌ Not connected!',
+                        style={'color': '#ef5350', 'fontWeight': 'bold'}), dash.no_update
+
+    # Aktuální cena pro výpočet SL/TP z %
+    ticker    = ib.get_ticker(symbol) or {}
+    cur_price = ticker.get('price') or ticker.get('last') or 0
+
+    # Vyřeš SL
+    sl = None
+    if sl_price:
+        sl = float(sl_price)
+    elif sl_pct and cur_price:
+        mult = (1 - float(sl_pct) / 100) if action == 'BUY' else (1 + float(sl_pct) / 100)
+        sl   = round(cur_price * mult, 2)
+
+    # Vyřeš TP
+    tp = None
+    if tp_price:
+        tp = float(tp_price)
+    elif tp_pct and cur_price:
+        mult = (1 + float(tp_pct) / 100) if action == 'BUY' else (1 - float(tp_pct) / 100)
+        tp   = round(cur_price * mult, 2)
+
+    result = ib.place_market_order(symbol, action, quantity)
+    if not result['success']:
+        return html.Div(f'❌ {result["error"]}',
+                        style={'color': '#ef5350', 'fontWeight': 'bold'}), dash.no_update
+
+    # Zaznamenat do TradeTracker
+    fill_price = result.get('fill_price') or cur_price
+    trade_tracker.open_trade(
+        symbol=symbol, side=action, qty=quantity,
+        entry_price=fill_price,
+        sl=sl, tp=tp,
+        note=note or ''
+    )
+
+    sl_txt = f' | SL ${sl:.2f}' if sl else ''
+    tp_txt = f' | TP ${tp:.2f}' if tp else ''
+    return (
+        html.Div(f'✅ {action} {quantity} {symbol} @ Market{sl_txt}{tp_txt}',
+                 style={'color': color, 'fontWeight': 'bold'}),
+        (refresh_counter or 0) + 1
+    )
+
+
+# ------------------------------------------------------------------
+# CLOSE ALL POSITIONS
+# ------------------------------------------------------------------
+@app.callback(
+    [Output('close-all-feedback', 'children'),
+     Output('trade-refresh-store', 'data', allow_duplicate=True)],
+    Input('close-all-btn', 'n_clicks'),
+    State('trade-refresh-store', 'data'),
+    prevent_initial_call=True
+)
+def close_all_positions(n, refresh_counter):
+    if not n:
+        return '', dash.no_update
+    if not ib.is_connected():
+        return '❌ Not connected', dash.no_update
+
+    # Zavři přes IB
+    positions = ib.get_positions()
+    errors = []
+    for pos in (positions or []):
+        qty = abs(pos['position'])
+        if qty <= 0:
+            continue
+        action = 'SELL' if pos['position'] > 0 else 'BUY'
+        res = ib.place_market_order(pos['symbol'], action, qty)
+        if not res['success']:
+            errors.append(pos['symbol'])
+
+    # Zavři v TradeTracker
+    import requests as _req  # interní call na vlastní API
+    try:
+        _req.post('http://localhost:8050/api/trades/close_all', timeout=3)
+    except Exception:
+        pass
+
+    if errors:
+        return f'⚠️ Chyba u: {", ".join(errors)}', (refresh_counter or 0) + 1
+    cnt = len(positions) if positions else 0
+    return f'✅ Zavřeno {cnt} pozic', (refresh_counter or 0) + 1
+
+
+# ------------------------------------------------------------------
+# OPEN POSITIONS TABLE
+# ------------------------------------------------------------------
+@app.callback(
+    Output('positions-table', 'children'),
+    [Input('positions-update-interval', 'n_intervals'),
+     Input('trade-refresh-store', 'data')]
+)
+def update_positions_table(n, _refresh):
+    if not ib.is_connected():
+        return html.Div('Not connected', style={'color': '#888'})
+    positions = ib.get_positions()
+    if not positions:
+        return html.Div('Žádné otevřené pozice', style={'color': '#888'})
+
+    # Obohacení o entry_time z TradeTracker
+    open_trades = {t['symbol']: t for t in trade_tracker.get_open_trades()}
+
+    rows = []
+    for pos in positions:
+        pnl_c = '#26a69a' if pos['unrealized_pnl'] >= 0 else '#ef5350'
+        sym   = pos['symbol']
+        tt    = open_trades.get(sym, {})
+        entry_t = trade_tracker.fmt_time(tt.get('entry_time')) if tt else '–'
+        sl_txt  = f"${tt['sl']:.2f}"  if tt.get('sl')  else '–'
+        tp_txt  = f"${tt['tp']:.2f}"  if tt.get('tp')  else '–'
+        trade_id = tt.get('id', '')
+        rows.append(html.Tr([
+            html.Td(sym, style={'fontWeight': 'bold'}),
+            html.Td('LONG' if pos['position'] > 0 else 'SHORT',
+                    style={'color': '#00d4ff'}),
+            html.Td(abs(pos['position'])),
+            html.Td(f"${pos['avg_cost']:.2f}"),
+            html.Td(f"${pos['market_value']:.2f}"),
+            html.Td(f"${pos['unrealized_pnl']:.2f} ({pos['unrealized_pnl_pct']:.2f}%)",
+                    style={'color': pnl_c, 'fontWeight': 'bold'}),
+            html.Td(entry_t, style={'color': '#aaa', 'fontSize': '12px'}),
+            html.Td(sl_txt,  style={'color': '#ef9a9a', 'fontSize': '12px'}),
+            html.Td(tp_txt,  style={'color': '#a5d6a7', 'fontSize': '12px'}),
+            html.Td(
+                html.Button('✖ Close', id={'type': 'close-pos-btn', 'trade_id': trade_id},
+                            n_clicks=0,
+                            style={'padding': '4px 10px', 'background': '#b71c1c',
+                                   'border': 'none', 'borderRadius': '4px',
+                                   'color': 'white', 'cursor': 'pointer',
+                                   'fontSize': '12px'})
+                if trade_id else html.Span('–', style={'color': '#555'})
+            ),
+        ]))
+
+    return html.Table([
+        html.Thead(html.Tr([
+            html.Th('Symbol'), html.Th('Side'), html.Th('Qty'),
+            html.Th('Avg Cost'), html.Th('Market Value'), html.Th('P&L'),
+            html.Th('Vstup'), html.Th('SL'), html.Th('TP'), html.Th('')
+        ])),
+        html.Tbody(rows)
+    ], style={'width': '100%', 'borderCollapse': 'collapse'})
+
+
+# ------------------------------------------------------------------
+# CLOSE SINGLE POSITION (pattern-matching callback)
+# ------------------------------------------------------------------
+@app.callback(
+    Output('order-feedback', 'children', allow_duplicate=True),
+    Input({'type': 'close-pos-btn', 'trade_id': dash.ALL}, 'n_clicks'),
+    prevent_initial_call=True
+)
+def close_single_position(n_clicks_list):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return dash.no_update
+    triggered = ctx.triggered[0]
+    if not triggered['value']:
+        return dash.no_update
+
+    import json as _json
+    prop_id   = triggered['prop_id']
+    id_part   = prop_id.split('.')[0]
+    trade_id  = _json.loads(id_part).get('trade_id', '')
+    if not trade_id:
+        return dash.no_update
+
+    trade = trade_tracker.get_trade(trade_id)
+    if not trade:
+        return html.Div('❌ Trade nenalezen', style={'color': '#ef5350'})
+
+    sym = trade['symbol']
+    qty = trade['qty']
+    act = 'SELL' if trade['side'] == 'BUY' else 'BUY'
+
+    if not ib.is_connected():
+        return html.Div('❌ Not connected', style={'color': '#ef5350'})
+
+    res = ib.place_market_order(sym, act, qty)
+    ticker     = ib.get_ticker(sym) or {}
+    exit_price = ticker.get('price') or ticker.get('last') or trade.get('entry_price', 0)
+    trade_tracker.close_trade(trade_id, exit_price)
+
+    pnl_txt = ''
+    updated = trade_tracker.get_trade(trade_id)
+    if updated and updated.get('pnl') is not None:
+        pnl = updated['pnl']
+        pnl_txt = f" | P&L: {'+'if pnl>=0 else ''}${pnl:.2f}"
+
+    color = '#26a69a' if res['success'] else '#ef5350'
+    msg   = f"✅ Closed {sym} {qty}x{pnl_txt}" if res['success'] else f"❌ {res['error']}"
+    return html.Div(msg, style={'color': color, 'fontWeight': 'bold'})
+
+
+# ------------------------------------------------------------------
+# TRADE HISTORY TABLE
+# ------------------------------------------------------------------
+@app.callback(
+    Output('trade-history-table', 'children'),
+    [Input('trades-refresh-interval', 'n_intervals'),
+     Input('trade-refresh-store', 'data')]
+)
+def update_trade_history(_n, _refresh):
+    history = trade_tracker.get_history(limit=50)
+    if not history:
+        return html.Div('Zatím žádná uzavřená pozice', style={'color': '#888'})
+
+    rows = []
+    for i, t in enumerate(history, 1):
+        pnl    = t.get('pnl')
+        pnl_c  = '#26a69a' if (pnl or 0) >= 0 else '#ef5350'
+        pnl_s  = f"{'+'if (pnl or 0)>=0 else ''}${pnl:.2f}" if pnl is not None else '–'
+        sl_txt = f"${t['sl']:.2f}"  if t.get('sl')  else '–'
+        tp_txt = f"${t['tp']:.2f}"  if t.get('tp')  else '–'
+        rows.append(html.Tr([
+            html.Td(str(i),  style={'color': '#555', 'fontSize': '12px'}),
+            html.Td(t['symbol'], style={'fontWeight': 'bold'}),
+            html.Td(t['side'],   style={'color': '#00d4ff'}),
+            html.Td(t['qty']),
+            html.Td(f"${t['entry_price']:.2f}" if t.get('entry_price') else '–'),
+            html.Td(trade_tracker.fmt_time(t.get('entry_time')),
+                    style={'color': '#aaa', 'fontSize': '12px'}),
+            html.Td(f"${t['exit_price']:.2f}" if t.get('exit_price') else '–'),
+            html.Td(trade_tracker.fmt_time(t.get('exit_time')),
+                    style={'color': '#aaa', 'fontSize': '12px'}),
+            html.Td(sl_txt, style={'color': '#ef9a9a', 'fontSize': '12px'}),
+            html.Td(tp_txt, style={'color': '#a5d6a7', 'fontSize': '12px'}),
+            html.Td(t.get('note', ''), style={'color': '#888', 'fontSize': '12px'}),
+            html.Td(pnl_s, style={'color': pnl_c, 'fontWeight': 'bold'}),
+        ]))
+
+    return html.Table([
+        html.Thead(html.Tr([
+            html.Th('#'), html.Th('Symbol'), html.Th('Side'), html.Th('Qty'),
+            html.Th('Entry $'), html.Th('Vstup'),
+            html.Th('Exit $'),  html.Th('Výstup'),
+            html.Th('SL'), html.Th('TP'), html.Th('Poznámka'), html.Th('P&L')
+        ])),
+        html.Tbody(rows)
+    ], style={'width': '100%', 'borderCollapse': 'collapse'})
+
+
+# ------------------------------------------------------------------
+# ORDERS TABLE (IB)
+# ------------------------------------------------------------------
+@app.callback(
+    Output('orders-table', 'children'),
+    Input('positions-update-interval', 'n_intervals')
+)
+def update_orders_table(n):
+    if not ib.is_connected():
+        return html.Div('Not connected', style={'color': '#888'})
+    orders = ib.get_recent_orders(limit=10)
+    if not orders:
+        return html.Div('No recent orders', style={'color': '#888'})
+    icons  = {'Filled': '✅', 'Submitted': '⏳', 'Cancelled': '❌', 'PendingSubmit': '🕒'}
+    colors = {'Filled': '#26a69a', 'Submitted': '#ffa726',
+               'Cancelled': '#ef5350', 'PendingSubmit': '#42a5f5'}
+    rows = []
+    for o in orders:
+        rows.append(html.Tr([
+            html.Td(o['time']),
+            html.Td(f"{o['action']} {o['quantity']} {o['symbol']}"),
+            html.Td(f"@ {o['price']}"),
+            html.Td(f"{icons.get(o['status'],'?')} {o['status']}",
+                    style={'color': colors.get(o['status'], '#888'), 'fontWeight': 'bold'})
+        ]))
+    return html.Table([
+        html.Thead(html.Tr([html.Th('Time'), html.Th('Order'),
+                            html.Th('Price'), html.Th('Status')])),
+        html.Tbody(rows)
+    ], style={'width': '100%', 'borderCollapse': 'collapse'})
+
+
+# ========== CLIENTSIDE CALLBACKS (beze změn) ==========
 
 app.clientside_callback(
     """function(n){if(n>0&&window.lwcDebug)window.lwcDebug('BTN','Load Chart n='+n+' - cekam na Python/IB...');return n;}""",
@@ -621,11 +1117,10 @@ app.clientside_callback(
         if (n > 0) {
             if (window.lwcManager) window.lwcManager.setTickEnabled(enabled);
             if (window.lwcDebug)
-                window.lwcDebug('TICK', 'Tick ' + (enabled ? 'ZAPNUT ⚡ (15min delay na demo!)' : 'VYPNUT'));
+                window.lwcDebug('TICK', 'Tick ' + (enabled ? 'ZAPNUT ⚡' : 'VYPNUT'));
         }
-        var label = '⚡ TICK: ' + (enabled ? 'ON' : 'OFF');
-        var cls   = 'tick-btn ' + (enabled ? 'tick-on' : 'tick-off');
-        return [enabled, label, cls];
+        return [enabled, '⚡ TICK: ' + (enabled ? 'ON' : 'OFF'),
+                'tick-btn ' + (enabled ? 'tick-on' : 'tick-off')];
     }
     """,
     [Output('tick-enabled-store', 'data'),
@@ -635,9 +1130,6 @@ app.clientside_callback(
     State('tick-enabled-store', 'data')
 )
 
-# ----------------------------------------------------------
-# INDICATOR TOGGLE: aktualizuje settings store + CSS třídy
-# ----------------------------------------------------------
 app.clientside_callback(
     """
     function(nSma, nEma, nRsi, nMacd, settings) {
@@ -648,14 +1140,12 @@ app.clientside_callback(
                     settings.ema  ? 'ind-btn ind-active' : 'ind-btn',
                     settings.rsi  ? 'ind-btn ind-active' : 'ind-btn',
                     settings.macd ? 'ind-btn ind-active' : 'ind-btn'];
-
         var tid = ctx.triggered_id || ctx.triggered[0].prop_id.split('.')[0];
         var s = Object.assign({}, settings);
         if (tid === 'ind-sma-btn')  s.sma  = !s.sma;
         if (tid === 'ind-ema-btn')  s.ema  = !s.ema;
         if (tid === 'ind-rsi-btn')  s.rsi  = !s.rsi;
         if (tid === 'ind-macd-btn') s.macd = !s.macd;
-
         if (window.lwcDebug) {
             var on = Object.keys(s).filter(function(k){return s[k];});
             window.lwcDebug('IND', 'Toggle -> ' + (on.length ? on.join(',') : 'zadny'));
@@ -668,29 +1158,19 @@ app.clientside_callback(
     }
     """,
     [Output('indicator-settings-store', 'data'),
-     Output('ind-sma-btn',  'className'),
-     Output('ind-ema-btn',  'className'),
-     Output('ind-rsi-btn',  'className'),
-     Output('ind-macd-btn', 'className')],
-    [Input('ind-sma-btn',  'n_clicks'),
-     Input('ind-ema-btn',  'n_clicks'),
-     Input('ind-rsi-btn',  'n_clicks'),
-     Input('ind-macd-btn', 'n_clicks')],
+     Output('ind-sma-btn', 'className'), Output('ind-ema-btn', 'className'),
+     Output('ind-rsi-btn', 'className'), Output('ind-macd-btn', 'className')],
+    [Input('ind-sma-btn', 'n_clicks'), Input('ind-ema-btn', 'n_clicks'),
+     Input('ind-rsi-btn', 'n_clicks'), Input('ind-macd-btn', 'n_clicks')],
     State('indicator-settings-store', 'data')
 )
 
-# ----------------------------------------------------------
-# FETCH INDICATORS: spusti se kdyz se zmeni data grafu NEBO settings
-# Vola /api/indicators a predava data do lwcManager.setIndicators()
-# ----------------------------------------------------------
 app.clientside_callback(
     """
     function(chartData, settings) {
         var d = window.lwcDebug || function() {};
-
         if (!chartData || !chartData.bars || chartData.bars.length === 0)
             return window.dash_clientside.no_update;
-
         var sym    = chartData.symbol;
         var tf     = chartData.timeframe.replace(/ /g, '_');
         var active = [];
@@ -698,222 +1178,155 @@ app.clientside_callback(
         if (settings.ema)  active.push('ema');
         if (settings.rsi)  active.push('rsi');
         if (settings.macd) active.push('macd');
-
-        // Zrus indikatory kdyz jsou vsechny vypnute
         if (active.length === 0) {
             d('IND', 'Vsechny indikatory vypnuty');
             if (window.lwcManager && window.lwcManager.setIndicators)
-                window.lwcManager.setIndicators({ok: true, sma: null, ema: null,
-                                                  rsi: null, macd: null});
+                window.lwcManager.setIndicators({ok:true,sma:null,ema:null,rsi:null,macd:null});
             return null;
         }
-
         var url = '/api/indicators/' + sym + '/' + tf + '?active=' + active.join(',');
         d('IND', 'Fetching: ' + url);
-
-        fetch(url)
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (!data.ok) {
-                    d('ERR', 'IND FAIL: ' + (data.error || 'unknown'));
-                    return;
-                }
-                d('IND', 'OK: ' + active.join(',') + ' | parquet bars=' + data.bars);
-                if (window.lwcManager && window.lwcManager.setIndicators) {
-                    window.lwcManager.setIndicators(data);
-                } else {
-                    d('ERR', 'lwcManager.setIndicators() neexistuje - nutno pridat do assets JS');
-                }
-            })
-            .catch(function(e) { d('ERR', 'IND fetch error: ' + e); });
-
+        fetch(url).then(function(r){return r.json();}).then(function(data){
+            if (!data.ok){d('ERR','IND FAIL: '+(data.error||'unknown'));return;}
+            d('IND','OK: '+active.join(',')+' | bars='+data.bars);
+            if (window.lwcManager && window.lwcManager.setIndicators)
+                window.lwcManager.setIndicators(data);
+            else d('ERR','lwcManager.setIndicators() neexistuje');
+        }).catch(function(e){d('ERR','IND fetch error: '+e);});
         return window.dash_clientside.no_update;
     }
     """,
     Output('indicators-data-store', 'data'),
-    [Input('chart-data-store',        'data'),
-     Input('indicator-settings-store','data')]
+    [Input('chart-data-store', 'data'), Input('indicator-settings-store', 'data')]
 )
 
-# Tick Diag
 app.clientside_callback(
     """
     function(n) {
         if (n < 1) return n;
         var d = window.lwcDebug || function() {};
-        var sym = (document.getElementById('symbol-input') &&
-                   document.getElementById('symbol-input').value || 'AAPL').toUpperCase();
-        d('API', '=== TICK DIAG: ' + sym + ' ===');
-        fetch('/api/diag/tick/' + sym)
-            .then(function(r) { return r.json(); })
-            .then(function(j) {
-                d('API', 'connected=' + j.tick_sub_connected
-                    + '  iter=' + j.iterations
-                    + '  mdt='  + j.mdt
-                    + '  mode=' + j.mode);
-                d('API', 'subscribed=' + JSON.stringify(j.subscribed_symbols));
-                var lx = j.latest;
-                d('API', 'LATEST: price=' + (lx.price||0)
-                    + '  last=' + (lx.last||0) + '  close=' + (lx.close||0)
-                    + '  bid='  + (lx.bid||0)  + '  ask='   + (lx.ask||0));
-                var rf = j.raw_fields;
-                if (rf.error) {
-                    d('ERR', 'RAW: ' + rf.error);
-                } else {
-                    d('API', 'RAW: last=' + rf.last + '  close=' + rf.close
-                        + '  bid=' + rf.bid + '  ask=' + rf.ask);
-                }
-                if (j.ib_errors && j.ib_errors.length > 0) {
-                    d('ERR', '=== IB ERRORY (' + j.ib_errors.length + ') ===');
-                    j.ib_errors.forEach(function(e) { d('ERR', 'IB: ' + e); });
-                } else {
-                    d('API', 'IB errory: zadne');
-                }
-            })
-            .catch(function(e) { d('ERR', 'TICK DIAG FAIL: ' + e); });
+        var sym = (document.getElementById('symbol-input')&&document.getElementById('symbol-input').value||'AAPL').toUpperCase();
+        d('API','=== TICK DIAG: '+sym+' ===');
+        fetch('/api/diag/tick/'+sym).then(function(r){return r.json();}).then(function(j){
+            d('API','connected='+j.tick_sub_connected+'  iter='+j.iterations+'  mdt='+j.mdt+'  mode='+j.mode);
+            d('API','subscribed='+JSON.stringify(j.subscribed_symbols));
+            var lx=j.latest;
+            d('API','LATEST: price='+(lx.price||0)+'  last='+(lx.last||0)+'  close='+(lx.close||0)+'  bid='+(lx.bid||0)+'  ask='+(lx.ask||0));
+            var rf=j.raw_fields;
+            if(rf.error)d('ERR','RAW: '+rf.error);
+            else d('API','RAW: last='+rf.last+'  close='+rf.close+'  bid='+rf.bid+'  ask='+rf.ask);
+            if(j.ib_errors&&j.ib_errors.length>0){d('ERR','=== IB ERRORY ('+j.ib_errors.length+') ===');j.ib_errors.forEach(function(e){d('ERR','IB: '+e);});}
+            else d('API','IB errory: zadne');
+        }).catch(function(e){d('ERR','TICK DIAG FAIL: '+e);});
         return n;
     }
     """,
-    Output('diag-tick-trigger', 'data'),
-    Input('diag-tick-btn', 'n_clicks')
+    Output('diag-tick-trigger', 'data'), Input('diag-tick-btn', 'n_clicks')
 )
 
-# Snapshot Test
 app.clientside_callback(
     """
     function(n) {
         if (n < 1) return n;
         var d = window.lwcDebug || function() {};
-        var sym = (document.getElementById('symbol-input') &&
-                   document.getElementById('symbol-input').value || 'AAPL').toUpperCase();
-        d('API', '=== SNAPSHOT TEST: ' + sym + ' (ceka ~3s...) ===');
-        fetch('/api/test/snapshot/' + sym)
-            .then(function(r) { return r.json(); })
-            .then(function(j) {
-                if (j.ok) {
-                    d('API', 'SNAP OK: last=' + j.last + '  close=' + j.close
-                        + '  bid=' + j.bid + '  ask=' + j.ask
-                        + '  vol=' + j.volume + '  conId=' + j.conId);
-                } else {
-                    d('ERR', 'SNAP FAIL: ' + j.error);
-                }
-                if (j.errors && j.errors.length > 0) {
-                    d('ERR', 'Snapshot IB errory: ' + JSON.stringify(j.errors));
-                }
-            })
-            .catch(function(e) { d('ERR', 'SNAP TEST FAIL: ' + e); });
+        var sym = (document.getElementById('symbol-input')&&document.getElementById('symbol-input').value||'AAPL').toUpperCase();
+        d('API','=== SNAPSHOT TEST: '+sym+' (ceka ~3s...) ===');
+        fetch('/api/test/snapshot/'+sym).then(function(r){return r.json();}).then(function(j){
+            if(j.ok)d('API','SNAP OK: last='+j.last+'  close='+j.close+'  bid='+j.bid+'  ask='+j.ask+'  vol='+j.volume+'  conId='+j.conId);
+            else d('ERR','SNAP FAIL: '+j.error);
+            if(j.errors&&j.errors.length>0)d('ERR','Snapshot IB errory: '+JSON.stringify(j.errors));
+        }).catch(function(e){d('ERR','SNAP TEST FAIL: '+e);});
         return n;
     }
     """,
-    Output('diag-snap-trigger', 'data'),
-    Input('diag-snap-btn', 'n_clicks')
+    Output('diag-snap-trigger', 'data'), Input('diag-snap-btn', 'n_clicks')
 )
 
-# Loading indikator
 app.clientside_callback(
     """
-    function(n1m, n5m, n15m, n30m, n1h, n1d, nLoad, dlTrigger) {
-        var ctx = window.dash_clientside.callback_context;
-        if (!ctx || !ctx.triggered || ctx.triggered.length === 0) return '';
-        var tid = ctx.triggered_id || ctx.triggered[0].prop_id.split('.')[0];
-        if (tid === 'deep-load-finished-trigger') return '✅ Data z cache načtena';
-        var labels = {'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m',
-                      'tf-30m':'30m','tf-1h':'1h','tf-1d':'1D','load-chart-btn':'Load'};
-        return '⏳ Načítám ' + (labels[tid]||tid) + '\u2026';
+    function(n1m,n5m,n15m,n30m,n1h,n1d,nLoad,dlTrigger){
+        var ctx=window.dash_clientside.callback_context;
+        if(!ctx||!ctx.triggered||ctx.triggered.length===0)return '';
+        var tid=ctx.triggered_id||ctx.triggered[0].prop_id.split('.')[0];
+        if(tid==='deep-load-finished-trigger')return '✅ Data z cache načtena';
+        var labels={'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m','tf-30m':'30m','tf-1h':'1h','tf-1d':'1D','load-chart-btn':'Load'};
+        return '⏳ Načítám '+(labels[tid]||tid)+'\u2026';
     }
     """,
     Output('chart-loading-indicator', 'children'),
-    [Input('tf-1m', 'n_clicks'), Input('tf-5m', 'n_clicks'),
-     Input('tf-15m', 'n_clicks'), Input('tf-30m', 'n_clicks'),
-     Input('tf-1h', 'n_clicks'), Input('tf-1d', 'n_clicks'),
-     Input('load-chart-btn', 'n_clicks'), Input('deep-load-finished-trigger', 'data')]
+    [Input('tf-1m','n_clicks'),Input('tf-5m','n_clicks'),Input('tf-15m','n_clicks'),
+     Input('tf-30m','n_clicks'),Input('tf-1h','n_clicks'),Input('tf-1d','n_clicks'),
+     Input('load-chart-btn','n_clicks'),Input('deep-load-finished-trigger','data')]
 )
 
 app.clientside_callback(
     """
-    function(n1m, n5m, n15m, n30m, n1h, n1d) {
-        var ctx = window.dash_clientside.callback_context;
-        if (!ctx || !ctx.triggered || ctx.triggered.length === 0)
-            return window.dash_clientside.no_update;
-        var tid = ctx.triggered_id || ctx.triggered[0].prop_id.split('.')[0];
-        if (window.lwcDebug) {
-            var lbl = {'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m',
-                       'tf-30m':'30m','tf-1h':'1h','tf-1d':'1D'};
-            window.lwcDebug('TF', 'Zmen -> ' + (lbl[tid]||tid) + ' (cekam na IB...)');
-        }
+    function(n1m,n5m,n15m,n30m,n1h,n1d){
+        var ctx=window.dash_clientside.callback_context;
+        if(!ctx||!ctx.triggered||ctx.triggered.length===0)return window.dash_clientside.no_update;
+        var tid=ctx.triggered_id||ctx.triggered[0].prop_id.split('.')[0];
+        if(window.lwcDebug){var lbl={'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m','tf-30m':'30m','tf-1h':'1h','tf-1d':'1D'};window.lwcDebug('TF','Zmen -> '+(lbl[tid]||tid)+' (cekam na IB...)');}
         return tid;
     }
     """,
     Output('active-tf-store', 'data'),
-    [Input('tf-1m', 'n_clicks'), Input('tf-5m', 'n_clicks'),
-     Input('tf-15m', 'n_clicks'), Input('tf-30m', 'n_clicks'),
-     Input('tf-1h', 'n_clicks'), Input('tf-1d', 'n_clicks')]
+    [Input('tf-1m','n_clicks'),Input('tf-5m','n_clicks'),Input('tf-15m','n_clicks'),
+     Input('tf-30m','n_clicks'),Input('tf-1h','n_clicks'),Input('tf-1d','n_clicks')]
 )
 
 app.clientside_callback(
     """
-    function(activeTf) {
-        var ids = ['tf-1m','tf-5m','tf-15m','tf-30m','tf-1h','tf-1d'];
-        return ids.map(function(id) { return id===activeTf?'tf-btn tf-active':'tf-btn'; });
+    function(activeTf){
+        var ids=['tf-1m','tf-5m','tf-15m','tf-30m','tf-1h','tf-1d'];
+        return ids.map(function(id){return id===activeTf?'tf-btn tf-active':'tf-btn';});
     }
     """,
-    [Output('tf-1m',  'className'), Output('tf-5m',  'className'),
-     Output('tf-15m', 'className'), Output('tf-30m', 'className'),
-     Output('tf-1h',  'className'), Output('tf-1d',  'className')],
-    Input('active-tf-store', 'data')
+    [Output('tf-1m','className'),Output('tf-5m','className'),Output('tf-15m','className'),
+     Output('tf-30m','className'),Output('tf-1h','className'),Output('tf-1d','className')],
+    Input('active-tf-store','data')
 )
 
 app.clientside_callback(
     """
-    function(storeData) {
-        var d = window.lwcDebug || function() {};
-        d('CB', '=== Dash clientside callback spusten ===');
-        var li = document.getElementById('chart-loading-indicator');
-        if (li && !li.textContent.includes('✅')) li.textContent = '';
-        if (!storeData) { d('CB', 'storeData NULL -> no_update'); return window.dash_clientside.no_update; }
-        if (!storeData.bars || storeData.bars.length === 0) { d('CB', 'bars prazdne -> no_update'); return window.dash_clientside.no_update; }
-        d('CB', 'symbol=' + storeData.symbol + ' tf=' + storeData.timeframe
-          + ' baru=' + storeData.bars.length + ' close[0]=' + storeData.bars[0].close);
-        if (window.lwcManager) {
-            d('CB', 'volam lwcManager.loadData()');
-            window.lwcManager.loadData(storeData);
-        } else {
-            var a=0, r=setInterval(function(){
-                a++;
-                if(window.lwcManager){window.lwcManager.loadData(storeData);clearInterval(r);}
-                else if(a>20){d('ERR','lwcManager nenalezen!');clearInterval(r);}
-            },200);
-        }
+    function(storeData){
+        var d=window.lwcDebug||function(){};
+        d('CB','=== Dash clientside callback spusten ===');
+        var li=document.getElementById('chart-loading-indicator');
+        if(li&&!li.textContent.includes('✅'))li.textContent='';
+        if(!storeData){d('CB','storeData NULL -> no_update');return window.dash_clientside.no_update;}
+        if(!storeData.bars||storeData.bars.length===0){d('CB','bars prazdne -> no_update');return window.dash_clientside.no_update;}
+        d('CB','symbol='+storeData.symbol+' tf='+storeData.timeframe+' baru='+storeData.bars.length+' close[0]='+storeData.bars[0].close);
+        if(window.lwcManager){d('CB','volam lwcManager.loadData()');window.lwcManager.loadData(storeData);}
+        else{var a=0,r=setInterval(function(){a++;if(window.lwcManager){window.lwcManager.loadData(storeData);clearInterval(r);}else if(a>20){d('ERR','lwcManager nenalezen!');clearInterval(r);}},200);}
         return storeData.symbol||'ok';
     }
     """,
-    Output('chart-trigger-store', 'data'),
-    Input('chart-data-store', 'data')
+    Output('chart-trigger-store', 'data'), Input('chart-data-store', 'data')
 )
 
 app.clientside_callback(
     """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};d('API','=== TEST 1: IB spojeni ===');fetch('/api/diag').then(r=>r.json()).then(j=>{d('API','connected='+j.connected+' account='+j.account_id);d('API','tick_sub: connected='+j.tick_sub.connected+' iter='+j.tick_sub.iterations+' mdt='+j.tick_sub.mdt+' mode='+j.tick_sub.mode);if(j.tick_sub.ib_errors&&j.tick_sub.ib_errors.length>0){d('ERR','IB errory: '+JSON.stringify(j.tick_sub.ib_errors));}}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
-    Output('diag1-trigger', 'data'), Input('diag1-btn', 'n_clicks')
+    Output('diag1-trigger','data'), Input('diag1-btn','n_clicks')
 )
 app.clientside_callback(
     """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};d('API','TEST 2: Hist. data...');fetch('/api/test-hist/AAPL').then(r=>r.json()).then(j=>{if(j.ok)d('API','OK: '+j.bars+' baru za '+j.elapsed+'s');else d('ERR','FAIL: '+j.error);}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
-    Output('diag2-trigger', 'data'), Input('diag2-btn', 'n_clicks')
+    Output('diag2-trigger','data'), Input('diag2-btn','n_clicks')
 )
 app.clientside_callback(
     """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};d('API','TEST 3: Fetch+nakreslit...');fetch('/api/test-hist/AAPL').then(r=>r.json()).then(j=>{if(!j.ok){d('ERR','Fail: '+j.error);return;}d('API','OK: '+j.bars+' baru');if(window.lwcManager)window.lwcManager.testChart();}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
-    Output('diag3-trigger', 'data'), Input('diag3-btn', 'n_clicks')
+    Output('diag3-trigger','data'), Input('diag3-btn','n_clicks')
 )
 app.clientside_callback(
     """function(n){if(n>0&&window.lwcManager)window.lwcManager.testChart();return n;}""",
-    Output('test-chart-trigger', 'data'), Input('test-chart-btn', 'n_clicks')
+    Output('test-chart-trigger','data'), Input('test-chart-btn','n_clicks')
 )
 app.clientside_callback(
     """function(n){if(n>0){var a=document.getElementById('debug-log-area');if(a){a.select();try{document.execCommand('copy');}catch(e){}a.setSelectionRange(0,0);navigator.clipboard&&navigator.clipboard.writeText(a.value);}}return n>0?'Zkopírováno ✓':'';}""" ,
-    Output('copy-status', 'children'), Input('copy-log-btn', 'n_clicks')
+    Output('copy-status','children'), Input('copy-log-btn','n_clicks')
 )
 app.clientside_callback(
     """function(n){if(n>0){var a=document.getElementById('debug-log-area');if(a)a.value='';}return n;}""",
-    Output('clear-log-trigger', 'data'), Input('clear-log-btn', 'n_clicks')
+    Output('clear-log-trigger','data'), Input('clear-log-btn','n_clicks')
 )
 
 
@@ -943,96 +1356,14 @@ def update_price_display(n, symbol):
 
 @app.callback(
     Output('qty-custom', 'value'),
-    [Input('qty-1', 'n_clicks'), Input('qty-5', 'n_clicks'),
-     Input('qty-10', 'n_clicks'), Input('qty-25', 'n_clicks'),
-     Input('qty-100', 'n_clicks')]
+    [Input('qty-1','n_clicks'),Input('qty-5','n_clicks'),
+     Input('qty-10','n_clicks'),Input('qty-25','n_clicks'),Input('qty-100','n_clicks')]
 )
-def update_quantity(q1, q5, q10, q25, q100):
+def update_quantity(q1,q5,q10,q25,q100):
     ctx = dash.callback_context
     if not ctx.triggered: return 1
     btn = ctx.triggered[0]['prop_id'].split('.')[0]
-    return {'qty-1': 1, 'qty-5': 5, 'qty-10': 10, 'qty-25': 25, 'qty-100': 100}.get(btn, 1)
-
-
-@app.callback(
-    Output('order-feedback', 'children'),
-    [Input('buy-btn', 'n_clicks'), Input('sell-btn', 'n_clicks')],
-    [State('symbol-input', 'value'), State('qty-custom', 'value')]
-)
-def place_order(buy_clicks, sell_clicks, symbol, quantity):
-    ctx = dash.callback_context
-    if not ctx.triggered: return ''
-    btn = ctx.triggered[0]['prop_id'].split('.')[0]
-    if btn == 'buy-btn' and buy_clicks > 0:    action, color = 'BUY',  '#26a69a'
-    elif btn == 'sell-btn' and sell_clicks > 0: action, color = 'SELL', '#ef5350'
-    else: return ''
-    if not ib.is_connected():
-        return html.Div('❌ Not connected!', style={'color': '#ef5350', 'fontWeight': 'bold'})
-    result = ib.place_market_order(symbol, action, quantity)
-    if result['success']:
-        return html.Div(f'✅ {action} {quantity} {symbol} @ Market',
-                        style={'color': color, 'fontWeight': 'bold'})
-    return html.Div(f'❌ {result["error"]}',
-                    style={'color': '#ef5350', 'fontWeight': 'bold'})
-
-
-@app.callback(
-    Output('positions-table', 'children'),
-    Input('positions-update-interval', 'n_intervals')
-)
-def update_positions_table(n):
-    if not ib.is_connected():
-        return html.Div('Not connected', style={'color': '#888'})
-    positions = ib.get_positions()
-    if not positions:
-        return html.Div('No open positions', style={'color': '#888'})
-    rows = []
-    for pos in positions:
-        pnl_c = '#26a69a' if pos['unrealized_pnl'] >= 0 else '#ef5350'
-        rows.append(html.Tr([
-            html.Td(pos['symbol'], style={'fontWeight': 'bold'}),
-            html.Td('LONG' if pos['position'] > 0 else 'SHORT', style={'color': '#00d4ff'}),
-            html.Td(abs(pos['position'])),
-            html.Td(f"${pos['avg_cost']:.2f}"),
-            html.Td(f"${pos['market_value']:.2f}"),
-            html.Td(f"${pos['unrealized_pnl']:.2f} ({pos['unrealized_pnl_pct']:.2f}%)",
-                    style={'color': pnl_c, 'fontWeight': 'bold'})
-        ]))
-    return html.Table([
-        html.Thead(html.Tr([html.Th('Symbol'), html.Th('Side'), html.Th('Qty'),
-                            html.Th('Avg Cost'), html.Th('Market Value'), html.Th('P&L')])),
-        html.Tbody(rows)
-    ], style={'width': '100%', 'borderCollapse': 'collapse'})
-
-
-@app.callback(
-    Output('orders-table', 'children'),
-    Input('positions-update-interval', 'n_intervals')
-)
-def update_orders_table(n):
-    if not ib.is_connected():
-        return html.Div('Not connected', style={'color': '#888'})
-    orders = ib.get_recent_orders(limit=10)
-    if not orders:
-        return html.Div('No recent orders', style={'color': '#888'})
-    icons  = {'Filled': '✅', 'Submitted': '⏳',
-               'Cancelled': '❌', 'PendingSubmit': '🕒'}
-    colors = {'Filled': '#26a69a', 'Submitted': '#ffa726',
-               'Cancelled': '#ef5350', 'PendingSubmit': '#42a5f5'}
-    rows = []
-    for o in orders:
-        rows.append(html.Tr([
-            html.Td(o['time']),
-            html.Td(f"{o['action']} {o['quantity']} {o['symbol']}"),
-            html.Td(f"@ {o['price']}"),
-            html.Td(f"{icons.get(o['status'],'?')} {o['status']}",
-                    style={'color': colors.get(o['status'], '#888'), 'fontWeight': 'bold'})
-        ]))
-    return html.Table([
-        html.Thead(html.Tr([html.Th('Time'), html.Th('Order'),
-                            html.Th('Price'), html.Th('Status')])),
-        html.Tbody(rows)
-    ], style={'width': '100%', 'borderCollapse': 'collapse'})
+    return {'qty-1':1,'qty-5':5,'qty-10':10,'qty-25':25,'qty-100':100}.get(btn,1)
 
 
 # ========== HTML TEMPLATE ==========
@@ -1081,9 +1412,9 @@ app.index_string = '''
                 color: #42a5f5 !important; box-shadow: 0 0 6px #42a5f533;
             }
             table { border-collapse: collapse; width: 100%; }
-            th, td { padding: 12px; text-align: left; border-bottom: 1px solid #3d3d4a; }
-            th { background: #3d3d4a; font-weight: bold; color: #00d4ff; }
-            tr:hover { background: #3d3d4a; }
+            th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #3d3d4a; }
+            th { background: #3d3d4a; font-weight: bold; color: #00d4ff; font-size: 12px; }
+            tr:hover { background: #3d3d4a33; }
         </style>
     </head>
     <body>
@@ -1101,7 +1432,7 @@ app.index_string = '''
 # ========== RUN ==========
 
 if __name__ == '__main__':
-    print("🚀 Starting IB Trading Platform v2.8.0...")
+    print("🚀 Starting IB Trading Platform v2.9.0...")
     print(f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
     if ib.connect():
         print("✅ Connected to IB Gateway!")
