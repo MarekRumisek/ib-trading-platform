@@ -1,6 +1,6 @@
 """IB API Connector using ib_async
 
-Version: 2.9.0 - Incremental Parquet Cache & Deep Load
+Version: 2.9.1 - PendingSubmit fix + positions refresh
 
 HIERARCHIE FALLBACKU:
   1. STREAMING   reqMktData(snapshot=False)  -> okamzity update
@@ -10,6 +10,10 @@ HIERARCHIE FALLBACKU:
 Error 10089 -> okamzity skok na hist_poll.
 Error 162   -> bylo zpusobeno useRTH=False + 300S (prilis kratka doba).
                Fixnuto: mdt=4 pred hist dotazem, useRTH=True, duration 3600S.
+
+v2.9.1 zmeny:
+  - place_order: PendingSubmit je platny stav -> success=True
+  - get_positions: po kazdem volani vynuti refresh positions cache
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder
@@ -166,7 +170,6 @@ class _TickSubscriber:
         def on_ib_error(reqId, errorCode, errorString, contract):
             msg = f"[{errorCode}] reqId={reqId}: {errorString}"
             self._last_errors = (self._last_errors + [msg])[-20:]
-            # Ignoruj bezne info zpravy (2104, 2106, 2158)
             if errorCode not in (2104, 2106, 2107, 2108, 2158, 2119):
                 print(f"[TICK-SUB] IB_ERR [{errorCode}] reqId={reqId}: {errorString}")
         ib.errorEvent += on_ib_error
@@ -187,7 +190,6 @@ class _TickSubscriber:
             self._next_hist_poll  = 0
 
             while ib.isConnected():
-                # Nove subscriptions
                 with self._lock:
                     new_syms = list(self._pending - set(contracts_local.keys()))
                     self._pending.clear()
@@ -224,7 +226,6 @@ class _TickSubscriber:
                 await asyncio.sleep(1.0)
                 self._iterations += 1
 
-                # --- Error 10089 -> okamzite hist_poll ---
                 if self._mode != 'hist_poll' and self._has_error(10089):
                     print("[TICK-SUB] Error 10089 -> HIST_POLL rezim")
                     for t in list(tickers_local.values()):
@@ -233,9 +234,8 @@ class _TickSubscriber:
                     tickers_local.clear()
                     self._mode           = 'hist_poll'
                     self._mdt            = 99
-                    self._next_hist_poll = self._iterations  # okamzita prvni poll
+                    self._next_hist_poll = self._iterations
 
-                # --- Streaming: fallback poll ---
                 elif self._mode == 'streaming':
                     for sym, t in list(tickers_local.items()):
                         if self._latest.get(sym, {}).get('price', 0) <= 0:
@@ -243,7 +243,6 @@ class _TickSubscriber:
                             if p > 0:
                                 self._latest[sym] = self._make_latest(t, p)
 
-                    # Auto-fallback po 15s bez dat (jiny duvod)
                     if self._iterations == 15 and contracts_local:
                         no_data = all(
                             self._latest.get(s, {}).get('price', 0) <= 0
@@ -258,7 +257,6 @@ class _TickSubscriber:
                             self._mode = 'snapshot'
                             self._mdt  = 40
 
-                # --- Snapshot rezim ---
                 elif self._mode == 'snapshot' and self._iterations % 15 == 0:
                     for sym, contract in list(contracts_local.items()):
                         try:
@@ -278,13 +276,8 @@ class _TickSubscriber:
                         self._mdt            = 99
                         self._next_hist_poll = self._iterations
 
-                # --- HIST_POLL rezim ---
                 elif self._mode == 'hist_poll' and self._iterations >= self._next_hist_poll:
-                    # Dalsi poll za 30s
                     self._next_hist_poll = self._iterations + 30
-
-                    # FIX: pred hist dotazem pouzij mdt=4 (frozen/delayed)
-                    # mdt=3 (streaming) na teto connecti zpusoboval error 162
                     ib.reqMarketDataType(4)
 
                     for sym, contract in list(contracts_local.items()):
@@ -292,10 +285,10 @@ class _TickSubscriber:
                             bars = await ib.reqHistoricalDataAsync(
                                 contract,
                                 endDateTime='',
-                                durationStr='3600 S',     # 1 hodina dat - zarucene nejaky bar
+                                durationStr='3600 S',
                                 barSizeSetting='1 min',
                                 whatToShow='TRADES',
-                                useRTH=True,              # FIX: True = jen regularni hodiny
+                                useRTH=True,
                                 formatDate=1
                             )
                             if bars:
@@ -354,7 +347,7 @@ class _HistWorker:
         print(f"[HIST] Worker thread spusten (clientId={client_id})")
 
         self._deep_load_status = {}
-        
+
     def get_deep_load_status(self):
         return self._deep_load_status.copy()
 
@@ -362,7 +355,6 @@ class _HistWorker:
         key = f"{symbol}_{timeframe}"
         if self._deep_load_status.get(key, {}).get('status') == 'running':
             return False
-            
         self._deep_load_status[key] = {'progress': '0%', 'status': 'running', 'msg': 'Inicializace...'}
         self._queue.put(('deep_load', symbol, timeframe, key, None, None))
         return True
@@ -382,7 +374,6 @@ class _HistWorker:
         while True:
             item = self._queue.get()
             if item is None: break
-            
             cmd = item[0]
             if cmd == 'fetch':
                 _, symbol, duration, bar_size, result, done = item
@@ -402,56 +393,54 @@ class _HistWorker:
 
     def _run_deep_load(self, symbol, timeframe, key):
         CHUNKS = {
-            '1 min': {'duration': '5 D', 'steps': 6},
+            '1 min':  {'duration': '5 D',  'steps': 6},
             '5 mins': {'duration': '10 D', 'steps': 6},
-            '15 mins': {'duration': '1 M', 'steps': 6},
-            '30 mins': {'duration': '2 M', 'steps': 6},
-            '1 hour': {'duration': '3 M', 'steps': 4},
-            '1 day': {'duration': '5 Y', 'steps': 1}
+            '15 mins':{'duration': '1 M',  'steps': 6},
+            '30 mins':{'duration': '2 M',  'steps': 6},
+            '1 hour': {'duration': '3 M',  'steps': 4},
+            '1 day':  {'duration': '5 Y',  'steps': 1}
         }
-        
-        cfg = CHUNKS.get(timeframe, {'duration': '10 D', 'steps': 3})
+        cfg          = CHUNKS.get(timeframe, {'duration': '10 D', 'steps': 3})
         duration_str = cfg['duration']
-        steps = cfg['steps']
-        
+        steps        = cfg['steps']
         ib = IB()
         try:
-            ib.connect(self._host, self._port, clientId=self._client_id+10, timeout=10)
+            ib.connect(self._host, self._port, clientId=self._client_id + 10, timeout=10)
             ib.reqMarketDataType(4)
             contract = Stock(symbol, 'SMART', 'USD')
             ib.qualifyContracts(contract)
-            
             end_date = ''
-            
             for i in range(steps):
-                self._deep_load_status[key] = {'progress': f"{int(i/steps*100)}%", 'status': 'running', 'msg': f'Krok {i+1}/{steps}'}
+                self._deep_load_status[key] = {
+                    'progress': f"{int(i/steps*100)}%",
+                    'status': 'running',
+                    'msg': f'Krok {i+1}/{steps}'
+                }
                 print(f"[DEEP LOAD] {symbol} {timeframe} - Krok {i+1}/{steps}")
-                
                 bars = ib.reqHistoricalData(
                     contract, endDateTime=end_date, durationStr=duration_str,
                     barSizeSetting=timeframe, whatToShow='TRADES',
                     useRTH=True, formatDate=1, timeout=30
                 )
-                
                 if not bars:
                     print(f"[DEEP LOAD] Zadne dalsi data z IB pro {symbol}.")
                     break
-                    
-                result = [{'time': _bar_date_to_unix(b.date), 'open': b.open, 'high': b.high, 'low': b.low, 'close': b.close, 'volume': b.volume} for b in bars]
+                result = [{
+                    'time':   _bar_date_to_unix(b.date),
+                    'open':   b.open, 'high': b.high,
+                    'low':    b.low,  'close': b.close,
+                    'volume': b.volume
+                } for b in bars]
                 data_store.append_bars(symbol, timeframe, result)
-                
                 first_bar_time = bars[0].date
                 if hasattr(first_bar_time, 'timestamp'):
                     end_date = first_bar_time - timedelta(seconds=1)
                 else:
                     break
-                    
                 if i < steps - 1:
                     time.sleep(2.0)
-            
             self._deep_load_status[key] = {'progress': '100%', 'status': 'done', 'msg': 'Dokonceno'}
             print(f"[DEEP LOAD] {symbol} {timeframe} Dokoncen uspesne.")
-            
         finally:
             try: ib.disconnect()
             except: pass
@@ -495,6 +484,17 @@ def _bar_date_to_unix(bar_date):
 # ================================================================
 # IBConnector
 # ================================================================
+
+# Stavy orderu IB ktere znamenaji uspesne odeslani
+_ORDER_SUCCESS_STATUSES = frozenset({
+    'Submitted', 'Filled', 'PreSubmitted', 'PendingSubmit'
+})
+# Stavy ktere ukonci cekani v place_order loop
+_ORDER_TERMINAL_STATUSES = frozenset({
+    'Submitted', 'Filled', 'PreSubmitted', 'PendingSubmit',
+    'Cancelled', 'Inactive', 'ApiCancelled'
+})
+
 
 class IBConnector:
     def __init__(self):
@@ -563,30 +563,27 @@ class IBConnector:
         return self._tick_sub.get_price(sym)
 
     def get_historical_data(self, symbol, duration='1 D', bar_size='5 mins'):
-        """Incremental Parquet Fetch: vraci z disku/pameti. Pokud jsou data stara, dotahne jen chybejici kousek."""
         if not self.is_connected(): return []
         sym = symbol.upper()
         self._tick_sub.subscribe(sym)
 
         status = data_store.get_cache_status(sym, bar_size)
-        
+
         if status['cached'] and status['is_fresh']:
             print(f"[CACHE] HIT: {sym} | {bar_size} | {status['total_bars']} bars | FRESH")
             return data_store.get_bars(sym, bar_size)
-            
+
         fetch_duration = duration
         if status['cached'] and status['age_seconds'] < 86400 * 7:
-            missing_sec = status['age_seconds']
+            missing_sec    = status['age_seconds']
             fetch_duration = f"{int(missing_sec + 3600)} S"
             print(f"[CACHE] INCR: {sym} | {bar_size} | {status['total_bars']} bars existuji | Dotahuji chybejicich {fetch_duration}")
         else:
             print(f"[CACHE] MISS/STALE: {sym} | {bar_size} | Stahuji celou defaultni delku: {duration}")
 
         new_bars = self._hist_worker.fetch(sym, fetch_duration, bar_size)
-        
         if new_bars:
             data_store.append_bars(sym, bar_size, new_bars)
-            
         return data_store.get_bars(sym, bar_size)
 
     def get_deep_load_status(self, symbol, timeframe):
@@ -613,34 +610,75 @@ class IBConnector:
 
     def place_order(self, symbol, action, quantity, order_type='MARKET',
                     limit_price=None, timeout=None):
+        """
+        Odesle order do IB a ceka na potvrzeni.
+
+        Stavy IB orderu:
+          PendingSubmit  -> TWS prijal order, posilaji na exchange
+          PreSubmitted   -> ceka na potvrzeni odeslani
+          Submitted      -> exchange potvrdila prijeti
+          Filled         -> zaplneno
+
+        FIX v2.9.1: PendingSubmit je platny stav = order byl uspesne oddan do IB.
+        Paper ucet casto zustava v PendingSubmit nez prejde do Submitted/Filled.
+        """
         if not self.is_connected():
             return {'success': False, 'error': 'Not connected to IB'}
-        if timeout is None: timeout = config.ORDER_TIMEOUT
+        if timeout is None:
+            timeout = config.ORDER_TIMEOUT
         try:
             contract = Stock(symbol, 'SMART', 'USD')
             order    = (LimitOrder(action, quantity, limit_price)
                         if order_type == 'LIMIT' else MarketOrder(action, quantity))
-            order.transmit = order.outsideRth = True
+            order.transmit     = True
+            order.outsideRth   = True
             trade = self.ib.placeOrder(contract, order)
-            start = time.time(); last_status = None
+
+            start       = time.time()
+            last_status = None
             while time.time() - start < timeout:
                 self.ib.sleep(1)
                 cs = trade.orderStatus.status
                 if cs != last_status:
-                    print(f"  -> {cs}"); last_status = cs
-                if cs in ('Submitted', 'Filled', 'PreSubmitted',
-                          'Cancelled', 'Inactive', 'ApiCancelled'):
+                    print(f"  [ORDER] {symbol} {action} {quantity} -> {cs}")
+                    last_status = cs
+                # Ukonci loop jakmile jsme v terminalni stavu
+                if cs in _ORDER_TERMINAL_STATUSES:
                     break
+
             fs  = trade.orderStatus.status
             oid = trade.order.orderId if trade.order else None
-            if fs in ('Submitted', 'Filled', 'PreSubmitted'):
-                return {'success': True, 'order_id': oid, 'status': fs,
-                        'filled': trade.orderStatus.filled,
-                        'remaining': trade.orderStatus.remaining, 'error': None}
-            msgs = [f"Error {e.errorCode}: {e.message}"
-                    for e in (trade.log or []) if e.errorCode and e.errorCode < 2000]
-            return {'success': False, 'order_id': oid, 'status': fs,
-                    'error': f"Order failed: {fs}" + ("\n" + "\n".join(msgs) if msgs else '')}
+
+            print(f"  [ORDER] Final status: {fs} | orderId={oid}")
+
+            if fs in _ORDER_SUCCESS_STATUSES:
+                # Pro PendingSubmit/PreSubmitted fill_price zatim nezname -
+                # pouzijeme avgFillPrice pokud je k dispozici, jinak 0
+                fill_price = trade.orderStatus.avgFillPrice or 0.0
+                return {
+                    'success':   True,
+                    'order_id':  oid,
+                    'status':    fs,
+                    'filled':    trade.orderStatus.filled,
+                    'remaining': trade.orderStatus.remaining,
+                    'fill_price': fill_price,
+                    'error':     None
+                }
+
+            # Skutecna chyba (Cancelled, Inactive, ...)
+            msgs = [
+                f"Error {e.errorCode}: {e.message}"
+                for e in (trade.log or [])
+                if e.errorCode and e.errorCode < 2000
+            ]
+            return {
+                'success':  False,
+                'order_id': oid,
+                'status':   fs,
+                'error':    f"Order failed: {fs}" + (
+                    "\n" + "\n".join(msgs) if msgs else ''
+                )
+            }
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
@@ -648,10 +686,20 @@ class IBConnector:
         return self.place_order(symbol, action, quantity, 'MARKET')
 
     def get_positions(self):
+        """
+        Vraci aktualni pozice z IB.
+        FIX v2.9.1: vynucuje refresh positions cache pred ctenim.
+        """
         if not self.is_connected(): return []
         try:
+            # Vynuti refresh — zajisti ze po novem plneni vidime aktualni stav
+            self.ib.reqPositions()
+            self.ib.sleep(0.3)
+
             result = []
             for pos in self.ib.positions():
+                if pos.position == 0:
+                    continue
                 cp   = self._tick_sub.get_price(pos.contract.symbol) or pos.avgCost
                 mv   = pos.position * cp
                 cb   = pos.position * pos.avgCost
