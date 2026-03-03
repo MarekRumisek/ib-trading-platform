@@ -5,6 +5,7 @@ from flask import jsonify
 from ib_connector import IBConnector
 import config
 from modules.data_store import data_store
+from modules.indicators import SMA, EMA, RSI, MACD
 import time
 
 app = dash.Dash(
@@ -160,6 +161,46 @@ def api_cb_status():
     return jsonify(_cb_status)
 
 
+# ----------------------------------------------------------------
+# INDICATORS ENDPOINT
+# GET /api/indicators/<SYMBOL>/<TF>?active=sma,ema,rsi,macd
+#     &sma_p=20 &ema_p=20 &rsi_p=14
+# Vraci JSON s vypocitanymi hodnotami indikatorů z Parquet cache.
+# ----------------------------------------------------------------
+@server.route('/api/indicators/<symbol>/<tf>')
+def api_indicators(symbol, tf):
+    from flask import request as freq
+    sym       = symbol.upper()
+    timeframe = tf.replace('_', ' ')
+    active    = [x.strip() for x in freq.args.get('active', 'ema,rsi').split(',') if x.strip()]
+
+    bars = data_store.get_bars(sym, timeframe)
+    if not bars:
+        return jsonify({'ok': False, 'error': 'no_data', 'bars': 0,
+                        'symbol': sym, 'tf': timeframe})
+
+    result = {'ok': True, 'symbol': sym, 'tf': timeframe, 'bars': len(bars)}
+    try:
+        if 'sma' in active:
+            p = int(freq.args.get('sma_p', 20))
+            result['sma']  = SMA(period=p).calculate(bars)
+            result['sma_period'] = p
+        if 'ema' in active:
+            p = int(freq.args.get('ema_p', 20))
+            result['ema']  = EMA(period=p).calculate(bars)
+            result['ema_period'] = p
+        if 'rsi' in active:
+            p = int(freq.args.get('rsi_p', 14))
+            result['rsi']  = RSI(period=p).calculate(bars)
+            result['rsi_period'] = p
+        if 'macd' in active:
+            result['macd'] = MACD().calculate(bars)
+    except Exception as e:
+        result['warning'] = str(e)
+
+    return jsonify(result)
+
+
 # ================================================================
 
 app_state = {'current_symbol': 'AAPL', 'current_timeframe': '5 mins'}
@@ -168,7 +209,7 @@ app_state = {'current_symbol': 'AAPL', 'current_timeframe': '5 mins'}
 
 app.layout = html.Div([
     html.Div([
-        html.H1("🚀 IB Trading Platform v2.7",
+        html.H1("🚀 IB Trading Platform v2.8",
                 style={'display': 'inline-block', 'margin': 0, 'color': '#00d4ff'}),
         html.Div(id='connection-status',
                  style={'display': 'inline-block', 'float': 'right', 'fontSize': 18})
@@ -240,6 +281,29 @@ app.layout = html.Div([
             ], style={'display': 'inline-block', 'float': 'right'})
         ], style={'marginBottom': '10px', 'overflow': 'hidden'}),
 
+        # ----------------------------------------------------------
+        # INDICATOR TOGGLE PANEL
+        # ----------------------------------------------------------
+        html.Div([
+            html.Span('📊 Indikátory:',
+                      style={'fontWeight': 'bold', 'marginRight': '12px',
+                             'fontSize': '13px', 'color': '#aaa',
+                             'verticalAlign': 'middle'}),
+            html.Button('SMA 20',  id='ind-sma-btn',  n_clicks=0, className='ind-btn',
+                        title='Simple Moving Average (20)'),
+            html.Button('EMA 20',  id='ind-ema-btn',  n_clicks=1, className='ind-btn ind-active',
+                        title='Exponential Moving Average (20)'),
+            html.Button('RSI 14',  id='ind-rsi-btn',  n_clicks=1, className='ind-btn ind-active',
+                        title='Relative Strength Index (14)'),
+            html.Button('MACD',    id='ind-macd-btn', n_clicks=0, className='ind-btn',
+                        title='MACD 12/26/9'),
+            html.Span(id='indicators-status', children='',
+                      style={'marginLeft': '15px', 'fontSize': '12px',
+                             'color': '#888', 'fontStyle': 'italic'}),
+        ], style={'marginBottom': '10px', 'paddingTop': '10px',
+                  'borderTop': '1px solid #3d3d4a'}),
+        # ----------------------------------------------------------
+
         html.Div(id='lwc-container',
                  style={'width': '100%', 'height': '500px', 'position': 'relative',
                         'background': '#1e1e2e'}),
@@ -258,6 +322,10 @@ app.layout = html.Div([
         dcc.Store(id='active-tf-store', data='tf-5m'),
         dcc.Store(id='tick-enabled-store', data=False),
         dcc.Store(id='deep-load-finished-trigger', data=False),
+        # Indicator stores
+        dcc.Store(id='indicator-settings-store',
+                  data={'sma': False, 'ema': True, 'rsi': True, 'macd': False}),
+        dcc.Store(id='indicators-data-store'),
 
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
@@ -369,7 +437,7 @@ app.layout = html.Div([
                    'border': '1px solid #333', 'borderRadius': '5px',
                    'padding': '10px', 'resize': 'vertical'}
         ),
-        html.Div('[INIT] [BTN] [CB] [TF] [TICK] [API] [DATA] [ERR] | v2.6',
+        html.Div('[INIT] [BTN] [CB] [TF] [TICK] [API] [DATA] [IND] [ERR] | v2.8',
                  style={'marginTop': '8px', 'fontSize': '12px', 'color': '#888'})
     ], style={'padding': '20px', 'background': '#1a1a2e',
               'borderRadius': '8px', 'marginBottom': '20px',
@@ -432,29 +500,26 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger, s
         ctx = dash.callback_context
         btn = (ctx.triggered[0]['prop_id'].split('.')[0]
                if ctx.triggered else 'load-chart-btn')
-        
+
         tf_map = {'tf-1m': '1 min', 'tf-5m': '5 mins',
                   'tf-15m': '15 mins', 'tf-30m': '30 mins',
                   'tf-1h': '1 hour', 'tf-1d': '1 day'}
         if btn in tf_map:
             app_state['current_timeframe'] = tf_map[btn]
-            
-        symbol = (symbol or 'AAPL').upper()
+
+        symbol   = (symbol or 'AAPL').upper()
         app_state['current_symbol'] = symbol
         tf       = app_state['current_timeframe']
-        
-        # When triggered by deep-load-finished, just load whatever is in the cache/parquet
-        # DURATION_MAP is mostly for initial API call if cache miss
         duration = DURATION_MAP.get(tf, '1 D')
-        
+
         _cb_status = {'step': 'started', 'symbol': symbol, 'tf': tf,
                       'bars': None, 'error': None,
                       'ts': datetime.now().strftime('%H:%M:%S')}
         print(f"[CB] START: {symbol} | {tf} | duration={duration} | Trigger={btn}")
         _cb_status['step'] = 'requesting_IB'
-        
+
         bars = ib.get_historical_data(symbol, duration, tf)
-        
+
         _cb_status['step'] = 'IB_returned'
         _cb_status['bars'] = len(bars)
         print(f"[CB] IB/Cache returned {len(bars)} bars")
@@ -493,7 +558,7 @@ def start_deep_load(n, symbol):
         ib.start_deep_load(symbol.upper(), tf)
     return dash.no_update
 
-# Misto vraceni jen statusu, vratime i signal, jestli jsme zrovna dokoncili stahovani
+
 @app.callback(
     [Output('cache-status-indicator', 'children'),
      Output('deep-load-finished-trigger', 'data')],
@@ -504,41 +569,45 @@ def start_deep_load(n, symbol):
 def update_cache_status(n, symbol, last_dl_state):
     if not symbol: return "Vyberte symbol", dash.no_update
     sym = symbol.upper()
-    tf = app_state.get('current_timeframe', '5 mins')
-    
-    dl_status = ib.get_deep_load_status(sym, tf)
+    tf  = app_state.get('current_timeframe', '5 mins')
+
+    dl_status        = ib.get_deep_load_status(sym, tf)
     current_dl_state = dl_status.get('status')
-    
-    # Detekce zmeny stavu z "running" na "done" -> odpali refresh grafu
+
     trigger_refresh = dash.no_update
     if current_dl_state == 'done':
-        # Uchovavame si custom string abysme poznali zmenu (treba pres timestamp)
         new_dl_trigger = f"{sym}_{tf}_done_{time.time()}"
-        # Trigger jen kdyz se to poprve dokonci a nebylo to "done" uz v minulem tiku
         if not str(last_dl_state).startswith(f"{sym}_{tf}_done"):
             trigger_refresh = new_dl_trigger
-            last_dl_state = new_dl_trigger
+            last_dl_state   = new_dl_trigger
     elif current_dl_state == 'running':
         last_dl_state = "running"
-        
+
     if current_dl_state == 'running':
-        return html.Span(f"⏳ Stahuji historii: {dl_status.get('progress', '0%')} ({dl_status.get('msg', '')})", style={'color': '#ff9800'}), trigger_refresh
-    
+        return html.Span(
+            f"⏳ Stahuji historii: {dl_status.get('progress', '0%')} ({dl_status.get('msg', '')})",
+            style={'color': '#ff9800'}
+        ), trigger_refresh
+
     status = data_store.get_cache_status(sym, tf)
     if not status['cached']:
         return html.Span("Cache: Prázdná", style={'color': '#888', 'background': '#333'}), trigger_refresh
-        
+
     bars_str = f"{status['total_bars']:,}".replace(',', ' ')
     age = status['age_seconds']
-    if age < 60: age_str = f"{int(age)}s"
+    if age < 60:     age_str = f"{int(age)}s"
     elif age < 3600: age_str = f"{int(age//60)}m"
-    elif age < 86400: age_str = f"{int(age//3600)}h"
-    else: age_str = f"{int(age//86400)}d"
+    elif age < 86400:age_str = f"{int(age//3600)}h"
+    else:            age_str = f"{int(age//86400)}d"
 
     if status['is_fresh']:
-        return html.Span(f"💾 Parquet: {bars_str} barů | Aktuální", style={'color': '#4caf50', 'background': '#1b5e20'}), trigger_refresh
-    else:
-        return html.Span(f"💾 Parquet: {bars_str} barů | {age_str} staré", style={'color': '#ffeb3b', 'background': '#e65100'}), trigger_refresh
+        return html.Span(f"💾 Parquet: {bars_str} barů | Aktuální",
+                         style={'color': '#4caf50', 'background': '#1b5e20'}), trigger_refresh
+    return html.Span(f"💾 Parquet: {bars_str} barů | {age_str} staré",
+                     style={'color': '#ffeb3b', 'background': '#e65100'}), trigger_refresh
+
+
+# ========== CLIENTSIDE CALLBACKS ==========
 
 app.clientside_callback(
     """function(n){if(n>0&&window.lwcDebug)window.lwcDebug('BTN','Load Chart n='+n+' - cekam na Python/IB...');return n;}""",
@@ -564,6 +633,106 @@ app.clientside_callback(
      Output('tick-toggle-btn', 'className')],
     Input('tick-toggle-btn', 'n_clicks'),
     State('tick-enabled-store', 'data')
+)
+
+# ----------------------------------------------------------
+# INDICATOR TOGGLE: aktualizuje settings store + CSS třídy
+# ----------------------------------------------------------
+app.clientside_callback(
+    """
+    function(nSma, nEma, nRsi, nMacd, settings) {
+        var ctx = window.dash_clientside.callback_context;
+        if (!ctx || !ctx.triggered || ctx.triggered.length === 0)
+            return [settings,
+                    settings.sma  ? 'ind-btn ind-active' : 'ind-btn',
+                    settings.ema  ? 'ind-btn ind-active' : 'ind-btn',
+                    settings.rsi  ? 'ind-btn ind-active' : 'ind-btn',
+                    settings.macd ? 'ind-btn ind-active' : 'ind-btn'];
+
+        var tid = ctx.triggered_id || ctx.triggered[0].prop_id.split('.')[0];
+        var s = Object.assign({}, settings);
+        if (tid === 'ind-sma-btn')  s.sma  = !s.sma;
+        if (tid === 'ind-ema-btn')  s.ema  = !s.ema;
+        if (tid === 'ind-rsi-btn')  s.rsi  = !s.rsi;
+        if (tid === 'ind-macd-btn') s.macd = !s.macd;
+
+        if (window.lwcDebug) {
+            var on = Object.keys(s).filter(function(k){return s[k];});
+            window.lwcDebug('IND', 'Toggle -> ' + (on.length ? on.join(',') : 'zadny'));
+        }
+        return [s,
+                s.sma  ? 'ind-btn ind-active' : 'ind-btn',
+                s.ema  ? 'ind-btn ind-active' : 'ind-btn',
+                s.rsi  ? 'ind-btn ind-active' : 'ind-btn',
+                s.macd ? 'ind-btn ind-active' : 'ind-btn'];
+    }
+    """,
+    [Output('indicator-settings-store', 'data'),
+     Output('ind-sma-btn',  'className'),
+     Output('ind-ema-btn',  'className'),
+     Output('ind-rsi-btn',  'className'),
+     Output('ind-macd-btn', 'className')],
+    [Input('ind-sma-btn',  'n_clicks'),
+     Input('ind-ema-btn',  'n_clicks'),
+     Input('ind-rsi-btn',  'n_clicks'),
+     Input('ind-macd-btn', 'n_clicks')],
+    State('indicator-settings-store', 'data')
+)
+
+# ----------------------------------------------------------
+# FETCH INDICATORS: spusti se kdyz se zmeni data grafu NEBO settings
+# Vola /api/indicators a predava data do lwcManager.setIndicators()
+# ----------------------------------------------------------
+app.clientside_callback(
+    """
+    function(chartData, settings) {
+        var d = window.lwcDebug || function() {};
+
+        if (!chartData || !chartData.bars || chartData.bars.length === 0)
+            return window.dash_clientside.no_update;
+
+        var sym    = chartData.symbol;
+        var tf     = chartData.timeframe.replace(/ /g, '_');
+        var active = [];
+        if (settings.sma)  active.push('sma');
+        if (settings.ema)  active.push('ema');
+        if (settings.rsi)  active.push('rsi');
+        if (settings.macd) active.push('macd');
+
+        // Zrus indikatory kdyz jsou vsechny vypnute
+        if (active.length === 0) {
+            d('IND', 'Vsechny indikatory vypnuty');
+            if (window.lwcManager && window.lwcManager.setIndicators)
+                window.lwcManager.setIndicators({ok: true, sma: null, ema: null,
+                                                  rsi: null, macd: null});
+            return null;
+        }
+
+        var url = '/api/indicators/' + sym + '/' + tf + '?active=' + active.join(',');
+        d('IND', 'Fetching: ' + url);
+
+        fetch(url)
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (!data.ok) {
+                    d('ERR', 'IND FAIL: ' + (data.error || 'unknown'));
+                    return;
+                }
+                d('IND', 'OK: ' + active.join(',') + ' | parquet bars=' + data.bars);
+                if (window.lwcManager && window.lwcManager.setIndicators) {
+                    window.lwcManager.setIndicators(data);
+                } else {
+                    d('ERR', 'lwcManager.setIndicators() neexistuje - nutno pridat do assets JS');
+                }
+            })
+            .catch(function(e) { d('ERR', 'IND fetch error: ' + e); });
+
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('indicators-data-store', 'data'),
+    [Input('chart-data-store',        'data'),
+     Input('indicator-settings-store','data')]
 )
 
 # Tick Diag
@@ -594,7 +763,6 @@ app.clientside_callback(
                     d('API', 'RAW: last=' + rf.last + '  close=' + rf.close
                         + '  bid=' + rf.bid + '  ask=' + rf.ask);
                 }
-                // IB ERRORY - nejdulezitejsi!
                 if (j.ib_errors && j.ib_errors.length > 0) {
                     d('ERR', '=== IB ERRORY (' + j.ib_errors.length + ') ===');
                     j.ib_errors.forEach(function(e) { d('ERR', 'IB: ' + e); });
@@ -648,14 +816,10 @@ app.clientside_callback(
         var ctx = window.dash_clientside.callback_context;
         if (!ctx || !ctx.triggered || ctx.triggered.length === 0) return '';
         var tid = ctx.triggered_id || ctx.triggered[0].prop_id.split('.')[0];
-        
-        if (tid === 'deep-load-finished-trigger') {
-            return '✅ Data z cache načtena';
-        }
-        
+        if (tid === 'deep-load-finished-trigger') return '✅ Data z cache načtena';
         var labels = {'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m',
                       'tf-30m':'30m','tf-1h':'1h','tf-1d':'1D','load-chart-btn':'Load'};
-        return '⏳ Načítám ' + (labels[tid]||tid) + '…';
+        return '⏳ Načítám ' + (labels[tid]||tid) + '\u2026';
     }
     """,
     Output('chart-loading-indicator', 'children'),
@@ -799,7 +963,7 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity):
     ctx = dash.callback_context
     if not ctx.triggered: return ''
     btn = ctx.triggered[0]['prop_id'].split('.')[0]
-    if btn == 'buy-btn' and buy_clicks > 0:   action, color = 'BUY',  '#26a69a'
+    if btn == 'buy-btn' and buy_clicks > 0:    action, color = 'BUY',  '#26a69a'
     elif btn == 'sell-btn' and sell_clicks > 0: action, color = 'SELL', '#ef5350'
     else: return ''
     if not ib.is_connected():
@@ -904,6 +1068,18 @@ app.index_string = '''
             .tick-on  { background: #1b5e20; border-color: #26a69a; color: #26a69a;
                         box-shadow: 0 0 8px #26a69a44; }
             .tick-on:hover { background: #2e7d32; }
+            .ind-btn {
+                padding: 6px 14px; margin: 0 4px;
+                background: #2d2d3a; border: 2px solid #555;
+                border-radius: 5px; color: #888;
+                cursor: pointer; font-size: 12px; font-weight: bold;
+                transition: all 0.15s;
+            }
+            .ind-btn:hover { border-color: #aaa; color: #ccc; background: #3a3a4a; }
+            .ind-active {
+                background: #1a3a5c !important; border-color: #42a5f5 !important;
+                color: #42a5f5 !important; box-shadow: 0 0 6px #42a5f533;
+            }
             table { border-collapse: collapse; width: 100%; }
             th, td { padding: 12px; text-align: left; border-bottom: 1px solid #3d3d4a; }
             th { background: #3d3d4a; font-weight: bold; color: #00d4ff; }
@@ -925,11 +1101,11 @@ app.index_string = '''
 # ========== RUN ==========
 
 if __name__ == '__main__':
-    print("🚀 Starting IB Trading Platform v2.7.0...")
+    print("🚀 Starting IB Trading Platform v2.8.0...")
     print(f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
     if ib.connect():
         print("✅ Connected to IB Gateway!")
     else:
         print("❌ Failed to connect")
-    print("http://localhost:8050  |  Ctrl+C to stop\\n")
+    print("http://localhost:8050  |  Ctrl+C to stop\n")
     app.run_server(debug=True, use_reloader=False, host='0.0.0.0', port=8050)
