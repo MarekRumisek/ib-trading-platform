@@ -768,7 +768,7 @@ app.clientside_callback(
         var q    = qty || 1;
         var cur  = 0;
         if (priceTxt) {
-            var m = priceTxt.match(/\$([\d.]+)/);
+            var m = priceTxt.match(/\$[\d.]+/);
             if (m) cur = parseFloat(m[1]);
         }
 
@@ -944,7 +944,7 @@ def close_all_positions(n, refresh_counter):
     [Input('positions-update-interval', 'n_intervals'),
      Input('trade-refresh-store', 'data'),
      Input('refresh-positions-btn', 'n_clicks')],
-    prevent_initial_call=False
+    prevent_initial_call='initial_duplicate'
 )
 def update_positions_table(n, _refresh, _btn):
     if not ib.is_connected():
@@ -958,7 +958,6 @@ def update_positions_table(n, _refresh, _btn):
     sync_msgs   = []
     for sym, tt in list(open_trades.items()):
         if sym not in ib_symbols:
-            # Získej poslední cenu pro P&L
             ticker = ib.get_ticker(sym) or {}
             exit_p = ticker.get('price') or ticker.get('last') or tt.get('entry_price', 0)
             trade_tracker.close_trade(tt['id'], exit_p)
