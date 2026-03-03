@@ -389,7 +389,6 @@ app.layout = html.Div([
                   data={'sma': False, 'ema': True, 'rsi': True, 'macd': False}),
         dcc.Store(id='indicators-data-store'),
         dcc.Store(id='trade-refresh-store', data=0),
-        # NEW: trade debug log store — Python → JS debug panel
         dcc.Store(id='trade-debug-store', data=None),
 
     ], style={'padding': '20px', 'background': '#2d2d3a',
@@ -401,7 +400,6 @@ app.layout = html.Div([
     html.Div([
         html.H3('📥 Order Entry', style={'marginBottom': '15px'}),
 
-        # Řádek 1: Qty
         html.Div([
             html.Label('Množství:', style={'marginRight': '10px', 'fontWeight': 'bold',
                                            'fontSize': '13px', 'color': '#aaa'}),
@@ -417,7 +415,6 @@ app.layout = html.Div([
                              'background': '#1e1e2e', 'color': 'white'})
         ], style={'marginBottom': '14px'}),
 
-        # Řádek 2: Risk management (SL / TP)
         html.Div([
             html.Div([
                 html.Span('🛡️ Stop-Loss:',
@@ -463,14 +460,12 @@ app.layout = html.Div([
                   'background': '#1a1a2e', 'borderRadius': '8px',
                   'border': '1px solid #3d3d4a'}),
 
-        # Řádek 3: Preview
         html.Div(id='order-preview',
                  style={'marginBottom': '14px', 'padding': '8px 14px',
                         'background': '#0d1a2e', 'borderRadius': '6px',
                         'fontSize': '13px', 'color': '#90caf9',
                         'fontFamily': 'monospace', 'minHeight': '28px'}),
 
-        # Řádek 4: Tlačítka
         html.Div([
             html.Button('🟢 BUY MARKET', id='buy-btn', n_clicks=0,
                         style={'padding': '15px 40px',
@@ -496,7 +491,6 @@ app.layout = html.Div([
         html.Div([
             html.H3('📊 Open Positions',
                     style={'display': 'inline-block', 'marginBottom': '0', 'marginRight': '20px'}),
-            # NEW: ruční refresh tlačítko
             html.Button('🔄 Refresh', id='refresh-positions-btn', n_clicks=0,
                         style={'padding': '8px 14px', 'background': '#1565c0',
                                'border': 'none', 'borderRadius': '6px', 'color': 'white',
@@ -606,7 +600,6 @@ app.layout = html.Div([
 
     dcc.Interval(id='cache-update-interval',     interval=2000,  n_intervals=0),
     dcc.Interval(id='price-update-interval',     interval=10000, n_intervals=0),
-    # CHANGED: 30000 → 10000
     dcc.Interval(id='positions-update-interval', interval=10000, n_intervals=0),
     dcc.Interval(id='connection-check-interval', interval=10000, n_intervals=0),
     dcc.Interval(id='trades-refresh-interval',   interval=5000,  n_intervals=0),
@@ -883,7 +876,7 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity,
 
 
 # ------------------------------------------------------------------
-# CLOSE ALL POSITIONS — bez self-HTTP, přímé volání TradeTracker
+# CLOSE ALL POSITIONS
 # ------------------------------------------------------------------
 @app.callback(
     [Output('close-all-feedback', 'children'),
@@ -915,7 +908,6 @@ def close_all_positions(n, refresh_counter):
         else:
             errors.append(pos['symbol'])
 
-    # Zavři v TradeTracker přímo (bez HTTP self-call)
     exit_prices = {}
     for pos in positions:
         sym    = pos['symbol']
@@ -936,7 +928,7 @@ def close_all_positions(n, refresh_counter):
 
 
 # ------------------------------------------------------------------
-# OPEN POSITIONS TABLE + orphan sync
+# OPEN POSITIONS TABLE + orphan sync s GRACE PERIOD
 # ------------------------------------------------------------------
 @app.callback(
     [Output('positions-table', 'children'),
@@ -953,21 +945,62 @@ def update_positions_table(n, _refresh, _btn):
     positions   = ib.get_positions() or []
     open_trades = {t['symbol']: t for t in trade_tracker.get_open_trades()}
 
-    # --- ORPHAN SYNC: TradeTracker má "open", ale IB pozici nezná ---
-    ib_symbols  = {p['symbol'] for p in positions}
-    sync_msgs   = []
+    # ----------------------------------------------------------------
+    # ORPHAN SYNC – grace period: čekáme ORPHAN_GRACE sekund po open
+    # než prohlásíme trade za orphan (IB fill může trvat chvíli)
+    # ----------------------------------------------------------------
+    ORPHAN_GRACE = 30          # sekund
+    now          = int(time.time())
+    ib_symbols   = {p['symbol'] for p in positions}
+    sync_msgs    = []
+    debug_lines  = []
+
+    # Vždy loguj stav do konzole
+    ib_pos_str = str([(p['symbol'], p['position']) for p in positions])
+    tt_str     = str([(s, f"age={(now - t.get('entry_time', now))}s",
+                       f"SL={t.get('sl')} TP={t.get('tp')}")
+                      for s, t in open_trades.items()])
+    print(f"[SYNC] n={n} | IB={ib_pos_str} | TT={tt_str}")
+
+    # Do debug panelu pošli stav jen pokud jsou otevřené trady nebo IB pozice
+    if open_trades or positions:
+        debug_lines.append(f'[SYNC] ── tick n={n} ──────────────')
+        debug_lines.append(f'[SYNC] IB pozice : {ib_pos_str}')
+        debug_lines.append(f'[SYNC] TT open   : {tt_str}')
+
     for sym, tt in list(open_trades.items()):
+        age = now - tt.get('entry_time', now)
         if sym not in ib_symbols:
-            ticker = ib.get_ticker(sym) or {}
-            exit_p = ticker.get('price') or ticker.get('last') or tt.get('entry_price', 0)
-            trade_tracker.close_trade(tt['id'], exit_p)
-            del open_trades[sym]
-            sync_msgs.append(f'[SYNC] Orphan {sym} auto-closed @ ${exit_p:.2f} (IB pos=0)')
-            print(f"[SYNC] Orphan trade {sym} closed in TradeTracker")
+            if age < ORPHAN_GRACE:
+                # Stále v grace window – čekáme na IB fill
+                msg = (f'[SYNC] ⏳ {sym} GRACE {age}s/{ORPHAN_GRACE}s'
+                       f' | entry={tt.get("entry_price")} SL={tt.get("sl")} TP={tt.get("tp")}'
+                       f' → čekám na IB fill')
+                print(msg)
+                debug_lines.append(msg)
+            else:
+                # Grace uplynula, opravdu orphan
+                ticker = ib.get_ticker(sym) or {}
+                exit_p = ticker.get('price') or ticker.get('last') or tt.get('entry_price', 0)
+                trade_tracker.close_trade(tt['id'], exit_p)
+                del open_trades[sym]
+                msg = (f'[SYNC] ⚠️ Orphan {sym} auto-closed @ ${exit_p:.2f}'
+                       f' | age={age}s > grace={ORPHAN_GRACE}s | IB pos=0')
+                sync_msgs.append(msg)
+                debug_lines.append(msg)
+                print(f"[SYNC] Orphan trade {sym} closed in TradeTracker (age={age}s)")
+        else:
+            # Trade je v IB i v trackeru – OK
+            ib_pos = next((p['position'] for p in positions if p['symbol'] == sym), '?')
+            msg = (f'[SYNC] ✅ {sym} OK'
+                   f' | age={age}s | IB pos={ib_pos}'
+                   f' | SL={tt.get("sl")} TP={tt.get("tp")}')
+            print(msg)
+            debug_lines.append(msg)
 
     dbg = dash.no_update
-    if sync_msgs:
-        dbg = {'msg': '\n'.join(sync_msgs), 'ts': time.time(), 'multi': True}
+    if debug_lines:
+        dbg = {'msg': '\n'.join(debug_lines), 'ts': time.time(), 'multi': True}
 
     if not positions:
         return html.Div('Žádné otevřené pozice', style={'color': '#888'}), dbg
@@ -1159,7 +1192,6 @@ app.clientside_callback(
         var a = document.getElementById('debug-log-area');
         if (!a) return window.dash_clientside.no_update;
         var ts = new Date().toTimeString().slice(0, 8);
-        // Podpora multi-line zprav (orphan sync)
         var lines = tradeLog.msg.split('\\n');
         lines.forEach(function(line) {
             if (line) a.value += '[' + ts + '] ' + line + '\\n';
