@@ -1,6 +1,6 @@
 """IB API Connector using ib_async
 
-Version: 2.9.3 - IB event pump thread
+Version: 2.9.4 - vlastni IB instance pro position polling
 
 HIERARCHIE FALLBACKU:
   1. STREAMING   reqMktData(snapshot=False)  -> okamzity update
@@ -8,21 +8,17 @@ HIERARCHIE FALLBACKU:
   3. HIST_POLL   reqHistoricalDataAsync()    -> kazdych 30s, mdt=4, useRTH=True
 
 Error 10089 -> okamzity skok na hist_poll.
-Error 162   -> bylo zpusobeno useRTH=False + 300S (prilis kratka doba).
-               Fixnuto: mdt=4 pred hist dotazem, useRTH=True, duration 3600S.
 
-v2.9.1 zmeny:
-  - place_order: PendingSubmit je platny stav -> success=True
-v2.9.2 zmeny:
-  - get_positions: odstranen reqPositions()+sleep() - NEIN thread-safe v Flask threadech
-    ib.positions() vraci IB-managed cache, ktera se automaticky aktualizuje pri fillovani
-  - _positions_cache: background thread pravidelne refreshuje pozice pres IB event loop
-v2.9.3 zmeny:
-  - OPRAVA: po place_order se nikdo nepumpoval IB event loop -> fill events cekaly ve fronte
-    -> positionEvent se nikdy nespustil -> _positions_cache zastarala
-  - Pridano: _ib_sleep_lock (threading.Lock) - jen jeden thread naraz smi volat ib.sleep()
-  - Pridano: _positions_bg_loop - background thread, pumpuje loop + refreshuje pozice kazdych 3s
-  - Uprava:  place_order pouziva _ib_sleep_safe() misto ib.sleep()
+CHANGELOG:
+v2.9.1  place_order: PendingSubmit je platny stav -> success=True
+v2.9.2  get_positions: cache aktualizovana pres positionEvent
+v2.9.3  pridano: _ib_sleep_lock + _positions_bg_loop
+        BUG: bg thread volal self.ib.sleep() -> pouzil jiny asyncio loop
+             -> IB events se vubec nezpracovaly -> cache vzdy prazdna
+v2.9.4  OPRAVA: _positions_bg_loop ma vlastni IB() instanci (clientId+3)
+        -> thread vlastni svoji IB instanci -> ib_poll.sleep() funguje spravne
+        -> reqPositions() + sleep(1) kazdych 3s = vzdy aktualni data
+        -> odstranen _ib_sleep_lock a _ib_sleep_safe() (uz nepotrebne)
 """
 
 from ib_async import IB, Stock, MarketOrder, LimitOrder
@@ -63,8 +59,6 @@ class _TickSubscriber:
         self._thread.start()
         print(f"[TICK-SUB] Worker spusten (clientId={client_id})")
 
-    # --- verejne API ---
-
     def get_price(self, symbol: str) -> float:
         return float(self._latest.get(symbol.upper(), {}).get('price', 0.0))
 
@@ -81,14 +75,12 @@ class _TickSubscriber:
             return {'error': 'not_subscribed',
                     'subscribed': list(self._tickers.keys()),
                     'pending':    list(self._pending)}
-
         def safe(v):
             try:
                 if v is None: return None
                 if isinstance(v, float) and v != v: return 'NaN'
                 return v
             except Exception: return str(v)
-
         fields = {
             'last':     safe(ticker.last),
             'lastSize': safe(ticker.lastSize),
@@ -175,45 +167,37 @@ class _TickSubscriber:
 
     async def _connect_and_stream(self):
         ib = IB()
-
         def on_ib_error(reqId, errorCode, errorString, contract):
             msg = f"[{errorCode}] reqId={reqId}: {errorString}"
             self._last_errors = (self._last_errors + [msg])[-20:]
             if errorCode not in (2104, 2106, 2107, 2108, 2158, 2119):
                 print(f"[TICK-SUB] IB_ERR [{errorCode}] reqId={reqId}: {errorString}")
         ib.errorEvent += on_ib_error
-
         try:
             print(f"[TICK-SUB] connectAsync clientId={self._client_id}...")
             await ib.connectAsync(self._host, self._port, clientId=self._client_id)
             print(f"[TICK-SUB] Pripojeno! clientId={self._client_id}")
-
             ib.reqMarketDataType(3)
             self._mdt       = 3
             self._connected = True
             self._mode      = 'streaming'
-
             contracts_local: dict = {}
             tickers_local: dict   = {}
             self._tickers         = tickers_local
             self._next_hist_poll  = 0
-
             while ib.isConnected():
                 with self._lock:
                     new_syms = list(self._pending - set(contracts_local.keys()))
                     self._pending.clear()
-
                 for sym in new_syms:
                     try:
                         contract = Stock(sym, 'SMART', 'USD')
                         await ib.qualifyContractsAsync(contract)
                         contracts_local[sym] = contract
                         print(f"[TICK-SUB] Contract OK: {sym} conId={contract.conId}")
-
                         if self._mode == 'streaming':
                             ticker = ib.reqMktData(contract, '', False, False)
                             tickers_local[sym] = ticker
-
                             def make_handler(s):
                                 def on_ticker(t):
                                     p = self._extract_price(t)
@@ -222,19 +206,15 @@ class _TickSubscriber:
                                 return on_ticker
                             ticker.updateEvent += make_handler(sym)
                             print(f"[TICK-SUB] STREAM {sym}")
-
                         elif self._mode == 'hist_poll':
                             self._next_hist_poll = self._iterations
                             print(f"[TICK-SUB] HIST_POLL {sym} (zadna mkt sub potreba)")
-
                     except Exception as e:
                         print(f"[TICK-SUB] Subscribe error {sym}: {e}")
                         with self._lock:
                             self._pending.add(sym)
-
                 await asyncio.sleep(1.0)
                 self._iterations += 1
-
                 if self._mode != 'hist_poll' and self._has_error(10089):
                     print("[TICK-SUB] Error 10089 -> HIST_POLL rezim")
                     for t in list(tickers_local.values()):
@@ -244,14 +224,12 @@ class _TickSubscriber:
                     self._mode           = 'hist_poll'
                     self._mdt            = 99
                     self._next_hist_poll = self._iterations
-
                 elif self._mode == 'streaming':
                     for sym, t in list(tickers_local.items()):
                         if self._latest.get(sym, {}).get('price', 0) <= 0:
                             p = self._extract_price(t)
                             if p > 0:
                                 self._latest[sym] = self._make_latest(t, p)
-
                     if self._iterations == 15 and contracts_local:
                         no_data = all(
                             self._latest.get(s, {}).get('price', 0) <= 0
@@ -265,7 +243,6 @@ class _TickSubscriber:
                             tickers_local.clear()
                             self._mode = 'snapshot'
                             self._mdt  = 40
-
                 elif self._mode == 'snapshot' and self._iterations % 15 == 0:
                     for sym, contract in list(contracts_local.items()):
                         try:
@@ -278,56 +255,40 @@ class _TickSubscriber:
                                     print(f"[TICK-SUB] SNAP {sym}: p={p}")
                         except Exception as e:
                             print(f"[TICK-SUB] Snapshot err {sym}: {e}")
-
                     if self._has_error(10089):
                         print("[TICK-SUB] Snapshot 10089 -> HIST_POLL")
                         self._mode           = 'hist_poll'
                         self._mdt            = 99
                         self._next_hist_poll = self._iterations
-
                 elif self._mode == 'hist_poll' and self._iterations >= self._next_hist_poll:
                     self._next_hist_poll = self._iterations + 30
                     ib.reqMarketDataType(4)
-
                     for sym, contract in list(contracts_local.items()):
                         try:
                             bars = await ib.reqHistoricalDataAsync(
-                                contract,
-                                endDateTime='',
-                                durationStr='3600 S',
-                                barSizeSetting='1 min',
-                                whatToShow='TRADES',
-                                useRTH=True,
-                                formatDate=1
+                                contract, endDateTime='',
+                                durationStr='3600 S', barSizeSetting='1 min',
+                                whatToShow='TRADES', useRTH=True, formatDate=1
                             )
                             if bars:
                                 price = float(bars[-1].close)
                                 bar_t = bars[-1].date
                                 self._latest[sym] = {
-                                    'price':  price,
-                                    'last':   price,
+                                    'price':  price, 'last': price,
                                     'close':  float(bars[-2].close) if len(bars) > 1 else price,
-                                    'bid':    0.0,
-                                    'ask':    0.0,
+                                    'bid':    0.0, 'ask': 0.0,
                                     'volume': int(bars[-1].volume) if bars[-1].volume else 0,
-                                    'mdt':    99,
-                                    'mode':   'hist_poll',
+                                    'mdt': 99, 'mode': 'hist_poll',
                                     'bar_time': str(bar_t),
-                                    'iterations': self._iterations,
-                                    'ts': time.time()
+                                    'iterations': self._iterations, 'ts': time.time()
                                 }
-                                print(
-                                    f"[TICK-SUB] HIST_POLL {sym}: "
-                                    f"close={price:.2f}  bar={bar_t}  "
-                                    f"({len(bars)} bars)"
-                                )
+                                print(f"[TICK-SUB] HIST_POLL {sym}: close={price:.2f}  bar={bar_t}  ({len(bars)} bars)")
                             else:
                                 print(f"[TICK-SUB] HIST_POLL {sym}: stale prazdne, retry za 5s")
                                 self._next_hist_poll = self._iterations + 5
                         except Exception as e:
                             print(f"[TICK-SUB] HIST_POLL err {sym}: {e}")
                             self._next_hist_poll = self._iterations + 5
-
         finally:
             self._connected = False
             self._tickers   = {}
@@ -354,7 +315,6 @@ class _HistWorker:
         )
         self._thread.start()
         print(f"[HIST] Worker thread spusten (clientId={client_id})")
-
         self._deep_load_status = {}
 
     def get_deep_load_status(self):
@@ -457,8 +417,7 @@ class _HistWorker:
     def _fetch_fresh(self, symbol, duration, bar_size):
         ib = IB()
         try:
-            ib.connect(self._host, self._port,
-                       clientId=self._client_id, timeout=10)
+            ib.connect(self._host, self._port, clientId=self._client_id, timeout=10)
             ib.reqMarketDataType(4)
             contract = Stock(symbol, 'SMART', 'USD')
             ib.qualifyContracts(contract)
@@ -494,11 +453,9 @@ def _bar_date_to_unix(bar_date):
 # IBConnector
 # ================================================================
 
-# Stavy orderu IB ktere znamenaji uspesne odeslani
 _ORDER_SUCCESS_STATUSES = frozenset({
     'Submitted', 'Filled', 'PreSubmitted', 'PendingSubmit'
 })
-# Stavy ktere ukonci cekani v place_order loop
 _ORDER_TERMINAL_STATUSES = frozenset({
     'Submitted', 'Filled', 'PreSubmitted', 'PendingSubmit',
     'Cancelled', 'Inactive', 'ApiCancelled'
@@ -515,12 +472,9 @@ class IBConnector:
         self.executions = []
 
         # Thread-safe positions cache
+        # Aktualizovana _positions_bg_loop (vlastni IB instance, clientId+3)
         self._positions_cache: list = []
         self._positions_lock        = threading.Lock()
-
-        # Lock pro ib.sleep() — jen jeden thread naraz smi pumpovat IB event loop
-        # (ib_async sync wrapper: ib.sleep() spousti asyncio event loop; vice vlaken = crash)
-        self._ib_sleep_lock = threading.Lock()
 
         self._hist_worker = _HistWorker(
             host=config.IB_HOST, port=config.IB_PORT,
@@ -532,46 +486,82 @@ class IBConnector:
         )
 
     # ------------------------------------------------------------------
-    # IB event pump — klicova oprava v2.9.3
+    # Background position polling — KLIC v2.9.4
     # ------------------------------------------------------------------
-
-    def _ib_sleep_safe(self, secs: float):
-        """
-        Thread-safe obal pro ib.sleep().
-        ib_async synchronni wrapper pouziva asyncio event loop;
-        pokud ho vola vice vlaken najednou, dochazi ke kolizim.
-        Lock zajisti ze v jednom okamziku pumpe loop vzdy jen jeden thread.
-        """
-        with self._ib_sleep_lock:
-            try:
-                self.ib.sleep(secs)
-            except Exception as e:
-                print(f"[IB-PUMP] sleep error: {e}")
 
     def _positions_bg_loop(self):
         """
-        Background thread (spusti se po connect).
+        Background thread s VLASTNI IB() instanci (clientId+3).
 
-        Proc existuje:
-          ib_async v sync rezimu zpracovava IB zpravy (fills, position updates)
-          POUZE kdyz nekdo vola ib.sleep(). Po navratu place_order() (na stav
-          PendingSubmit) uz nikdo sleep() nevola -> fill event zustane ve fronte
-          -> positionEvent nikdy nezabehne -> _positions_cache zastarala.
+        Proc separatni instance?
+          ib_async pouziva asyncio event loop. Kazde volani ib.sleep() musi
+          beznout v threadu ktery loop vlastni (= thread kde bylo volano
+          ib.connect()). Pokud bg thread pouziva self.ib.sleep(), spousti
+          JINY loop -> IB zpravy se nezpracuji -> positions zustavaji prazdne.
 
-          Tento thread pumpe loop kazdych 3s -> fill se zpracuje do 3s od arrivalu.
+          Reseni: bg thread ma svoji IB instanci kterou sam pripoji.
+          ib_poll.sleep() pak korektne pumpuje JEJI loop -> reqPositions()
+          vraci spravna data.
         """
-        print("[POS-BG] Event pump + position refresh started (interval=3s)")
+        poll_cid = config.IB_CLIENT_ID + 3
+        print(f"[POS-BG] Position poll thread started (clientId={poll_cid}, interval=3s)")
+        ib_poll = IB()
+
         while True:
             time.sleep(3)
-            if not (self.connected and self.ib.isConnected()):
+
+            if not self.connected:
+                if ib_poll.isConnected():
+                    try: ib_poll.disconnect()
+                    except Exception: pass
                 continue
+
             try:
-                # Pumpni IB event loop -> zpracuji se pending fill/position zpravy
-                self._ib_sleep_safe(0.3)
-                # Precteme aktualní pozice z IB modelu (uz updatovaneho event loopem)
-                self._refresh_positions_cache()
+                # Pripoj poll instanci kdyz je odpojena
+                if not ib_poll.isConnected():
+                    print(f"[POS-BG] Connecting poll IB (clientId={poll_cid})...")
+                    ib_poll.connect(
+                        config.IB_HOST, config.IB_PORT,
+                        clientId=poll_cid, timeout=5
+                    )
+                    print(f"[POS-BG] Poll IB connected")
+
+                # Pozadej aktualni pozice + pumpni JEJI event loop pro odpoved
+                ib_poll.reqPositions()   # posli zadost na IB server
+                ib_poll.sleep(1.0)       # zpracuj odpoved (OK: tento thread vlastni ib_poll)
+
+                raw    = ib_poll.positions()
+                result = []
+                for pos in raw:
+                    if pos.position == 0:
+                        continue
+                    sym  = pos.contract.symbol
+                    cp   = self._tick_sub.get_price(sym) or pos.avgCost
+                    mv   = pos.position * cp
+                    cb   = pos.position * pos.avgCost
+                    upnl = mv - cb
+                    result.append({
+                        'symbol':             sym,
+                        'position':           pos.position,
+                        'avg_cost':           pos.avgCost,
+                        'market_price':       cp,
+                        'market_value':       mv,
+                        'unrealized_pnl':     upnl,
+                        'unrealized_pnl_pct': (upnl / abs(cb) * 100) if cb else 0
+                    })
+
+                prev_syms = {p['symbol'] for p in self._positions_cache}
+                new_syms  = {p['symbol'] for p in result}
+                with self._positions_lock:
+                    self._positions_cache = result
+
+                if prev_syms != new_syms:
+                    print(f"[POS-BG] \U0001f4ca Cache ZMENENA: {prev_syms} -> {new_syms} | {len(result)} pozic")
+
             except Exception as e:
                 print(f"[POS-BG] Error: {e}")
+                try: ib_poll.disconnect()
+                except Exception: pass
 
     # ------------------------------------------------------------------
     # Connect / disconnect
@@ -593,14 +583,10 @@ class IBConnector:
             self.account_id = accounts[0] if accounts else None
             self.ib.reqMarketDataType(4)
 
-            # Registruj event handlery
-            self.ib.positionEvent    += self._on_position_event
-            self.ib.orderStatusEvent += self._on_order_status_event
+            # Nacti existujici pozice hned po spojeni (sync, OK: jsme v main threadu)
+            self._refresh_positions_from_main()
 
-            # Nacti existujici pozice po spojeni
-            self._refresh_positions_cache()
-
-            # Spust background event pump
+            # Spust background poll thread (vlastni IB instance)
             threading.Thread(
                 target=self._positions_bg_loop,
                 daemon=True,
@@ -618,9 +604,14 @@ class IBConnector:
             self.connected = False
             return False
 
-    def _refresh_positions_cache(self):
-        """Cte aktualní pozice z IB interniho modelu a ulozi do cache."""
+    def _refresh_positions_from_main(self):
+        """
+        Sync refresh z main threadu (pri connect).
+        Muze pouzivat self.ib.sleep() protoze main thread vlastni self.ib.
+        """
         try:
+            self.ib.reqPositions()
+            self.ib.sleep(1.0)
             raw    = self.ib.positions()
             result = []
             for pos in raw:
@@ -640,32 +631,11 @@ class IBConnector:
                     'unrealized_pnl':     upnl,
                     'unrealized_pnl_pct': (upnl / abs(cb) * 100) if cb else 0
                 })
-            prev_syms = {p['symbol'] for p in self._positions_cache}
-            new_syms  = {p['symbol'] for p in result}
             with self._positions_lock:
                 self._positions_cache = result
-            # Log jen pri zmene (aby nezahlcoval konzoli)
-            if prev_syms != new_syms:
-                print(f"[POS] Cache ZMENENA: {prev_syms} -> {new_syms} | {len(result)} pozic")
+            print(f"[POS] Initial load: {len(result)} pozic | {[p['symbol'] for p in result]}")
         except Exception as e:
-            print(f"\u26a0\ufe0f _refresh_positions_cache: {e}")
-
-    def _on_position_event(self, account, contract, position, avgCost):
-        """Callback z IB event loop — aktualizuje cache po kazde zmene pozice."""
-        print(f"[POS] positionEvent: {contract.symbol} pos={position} avgCost={avgCost}")
-        self._refresh_positions_cache()
-
-    def _on_order_status_event(self, trade):
-        """Loguje zmeny stavu orderu — uzitecne pro debug."""
-        s = trade.orderStatus
-        print(
-            f"[ORDER-EVENT] {trade.contract.symbol} {trade.order.action}"
-            f" | status={s.status} filled={s.filled} remaining={s.remaining}"
-            f" avgFill={s.avgFillPrice}"
-        )
-        # Po fillu okamzite refresh pozic (doplnkove k positionEvent)
-        if s.status == 'Filled':
-            self._refresh_positions_cache()
+            print(f"\u26a0\ufe0f _refresh_positions_from_main: {e}")
 
     def disconnect(self):
         if self.connected:
@@ -701,13 +671,10 @@ class IBConnector:
         if not self.is_connected(): return []
         sym = symbol.upper()
         self._tick_sub.subscribe(sym)
-
         status = data_store.get_cache_status(sym, bar_size)
-
         if status['cached'] and status['is_fresh']:
             print(f"[CACHE] HIT: {sym} | {bar_size} | {status['total_bars']} bars | FRESH")
             return data_store.get_bars(sym, bar_size)
-
         fetch_duration = duration
         if status['cached'] and status['age_seconds'] < 86400 * 7:
             missing_sec    = status['age_seconds']
@@ -715,7 +682,6 @@ class IBConnector:
             print(f"[CACHE] INCR: {sym} | {bar_size} | {status['total_bars']} bars existuji | Dotahuji chybejicich {fetch_duration}")
         else:
             print(f"[CACHE] MISS/STALE: {sym} | {bar_size} | Stahuji celou defaultni delku: {duration}")
-
         new_bars = self._hist_worker.fetch(sym, fetch_duration, bar_size)
         if new_bars:
             data_store.append_bars(sym, bar_size, new_bars)
@@ -754,8 +720,9 @@ class IBConnector:
     def place_order(self, symbol, action, quantity, order_type='MARKET',
                     limit_price=None, timeout=None):
         """
-        Odesle order do IB a ceka na potvrzeni.
-        Pouziva _ib_sleep_safe() — thread-safe ib.sleep() s lockem.
+        Odesle order. self.ib.sleep() je OK protoze place_order() bezi
+        v main/Flask threadu ktery vlastni self.ib.
+        (bg thread pouziva ib_poll -> zadny konflikt)
         """
         if not self.is_connected():
             return {'success': False, 'error': 'Not connected to IB'}
@@ -765,14 +732,14 @@ class IBConnector:
             contract = Stock(symbol, 'SMART', 'USD')
             order    = (LimitOrder(action, quantity, limit_price)
                         if order_type == 'LIMIT' else MarketOrder(action, quantity))
-            order.transmit     = True
-            order.outsideRth   = True
+            order.transmit   = True
+            order.outsideRth = True
             trade = self.ib.placeOrder(contract, order)
 
             start       = time.time()
             last_status = None
             while time.time() - start < timeout:
-                self._ib_sleep_safe(1)   # thread-safe — jeden thread naraz
+                self.ib.sleep(1)
                 cs = trade.orderStatus.status
                 if cs != last_status:
                     print(f"  [ORDER] {symbol} {action} {quantity} -> {cs}")
@@ -821,11 +788,9 @@ class IBConnector:
 
     def get_positions(self):
         """
-        Thread-safe cteni pozic z cache.
-        Cache je aktualizovana:
-          - _on_position_event  (IB callback po fill/zmene)
-          - _on_order_status_event (pri Filled)
-          - _positions_bg_loop  (background pump kazdych 3s)
+        Thread-safe cteni z cache.
+        Cache je aktualizovana _positions_bg_loop kazdych ~4s
+        (3s sleep + 1s ib_poll.sleep pro zpracovani IB odpovedi).
         """
         with self._positions_lock:
             return list(self._positions_cache)
