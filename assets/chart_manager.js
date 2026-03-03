@@ -1,14 +1,18 @@
 /**
- * IB Trading Platform - Lightweight Charts Manager v2.1.1
+ * IB Trading Platform - Lightweight Charts Manager v2.2.0
  * =========================================================
- * v2.1.1:
- *   - pollTick: plny debug log (cena, zmena, H/L, raw response)
- *   - Zustava: tick defaultne OFF, H/L tracking, setTickEnabled()
+ * v2.2.0:
+ *   - setIndicators(data): prijima JSON z /api/indicators
+ *   - SMA + EMA: LineSeries overlay na hlavnim grafu
+ *   - RSI: samostatny sub-panel (dynamicky div pod grafem)
+ *   - MACD: samostatny sub-panel (histogram + MACD + Signal)
+ *   - clearSubCharts(): cisty cleanup vsech sub-panelu
+ *   - Sync timeScale mezi hlavnim grafem a sub-charty
  */
 (function () {
     'use strict';
 
-    var VERSION         = 'v2.1.1';
+    var VERSION         = 'v2.2.0';
     var TICK_POLL_MS    = 5000;
     var CHART_BG        = '#1e1e2e';
     var GRID_COLOR      = '#3d3d4a';
@@ -16,6 +20,8 @@
     var UP_COLOR        = '#26a69a';
     var DOWN_COLOR      = '#ef5350';
     var CHART_HEIGHT    = 500;
+    var RSI_HEIGHT      = 160;
+    var MACD_HEIGHT     = 160;
 
     var chart           = null;
     var candleSeries    = null;
@@ -29,8 +35,10 @@
     var lastBarLow      = null;
     var lastBarClose    = null;
     var indicatorSeries = {};
+    var subCharts       = {};     // { rsi: LWC instance, macd: LWC instance }
     var container       = null;
     var initAttempts    = 0;
+    var syncingRange    = false;  // zabrani rekurzi pri sync time scale
 
     // =================================================================
     // Debug logger
@@ -78,7 +86,7 @@
             return;
         }
 
-        writeDebug('INIT', 'Vytvarim graf ' + w + 'x' + CHART_HEIGHT + 'px');
+        writeDebug('INIT', 'Vytvarim graf ' + w + 'x' + CHART_HEIGHT + 'px ' + VERSION);
         showPlaceholder('Inicializuji graf...');
         try {
             container.innerHTML = '';
@@ -98,14 +106,21 @@
                 color: '#667eea', priceFormat: { type: 'volume' },
                 priceScaleId: 'volume', scaleMargins: { top: 0.85, bottom: 0 }
             });
-            window.addEventListener('resize', function () {
-                if (chart && container) chart.resize(container.offsetWidth, CHART_HEIGHT);
-            });
-            writeDebug('INIT', 'Graf HOTOV. Klikni Load Chart (IB data) nebo Test Chart (fake).');
+            window.addEventListener('resize', onResize);
+            writeDebug('INIT', 'Graf HOTOV ' + VERSION + '. Klikni Load Chart.');
         } catch (e) {
             writeDebug('ERR', 'createChart selhal: ' + e.message);
             showPlaceholder('CHYBA: ' + e.message);
         }
+    }
+
+    function onResize() {
+        if (chart && container) chart.resize(container.offsetWidth, CHART_HEIGHT);
+        Object.keys(subCharts).forEach(function(k) {
+            var sc = subCharts[k];
+            var el = document.getElementById('lwc-' + k + '-container');
+            if (sc && el) sc.resize(el.offsetWidth, k === 'rsi' ? RSI_HEIGHT : MACD_HEIGHT);
+        });
     }
 
     // =================================================================
@@ -133,10 +148,8 @@
         bars.sort(function (a, b) { return a.time - b.time; });
 
         var b0 = bars[0];
-        writeDebug('DATA', 'Prvni bar: time=' + b0.time + ' (' + typeof b0.time + ')' +
-            ' open=' + b0.open + ' high=' + b0.high + ' low=' + b0.low + ' close=' + b0.close);
-        writeDebug('DATA', 'Posledni: time=' + bars[bars.length-1].time +
-            ' close=' + bars[bars.length-1].close);
+        writeDebug('DATA', 'Prvni bar: time=' + b0.time + ' open=' + b0.open +
+            ' close=' + b0.close + ' | Posledni: close=' + bars[bars.length-1].close);
 
         if (typeof b0.time !== 'number') {
             writeDebug('ERR', 'PROBLEM: time je ' + typeof b0.time + ' misto number!');
@@ -168,7 +181,6 @@
                 startTickPolling(symbol);
             } else {
                 if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
-                writeDebug('TICK', 'Tick je OFF - k zapnuti pouzij tlacitko TICK');
             }
         } catch (e) {
             writeDebug('ERR', 'setData selhal: ' + e.message);
@@ -195,68 +207,40 @@
     }
 
     // =================================================================
-    // 4. Tick polling - aktualizace posledni svicky
+    // 4. Tick polling
     // =================================================================
     function startTickPolling(symbol) {
         if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
         if (!tickEnabled) { return; }
-        writeDebug('TICK', 'Polling pro ' + symbol + ' kazdych ' + TICK_POLL_MS + 'ms (15min delay na demo!)');
+        writeDebug('TICK', 'Polling pro ' + symbol + ' kazdych ' + TICK_POLL_MS + 'ms');
         tickTimer = setInterval(function () { pollTick(symbol); }, TICK_POLL_MS);
     }
 
     function pollTick(symbol) {
         if (!tickEnabled || !symbol || !candleSeries || lastBarTime === null) { return; }
-
         fetch('/api/tick/' + encodeURIComponent(symbol))
             .then(function (r) { return r.json(); })
             .then(function (data) {
-                // === PLNY DEBUG LOG ===
-                var rawInfo = 'raw: ' + JSON.stringify(data);
-
-                if (!data || data.price === undefined) {
-                    writeDebug('TICK', '\u26a0 Zadna odpoved z /api/tick/' + symbol + ' | ' + rawInfo);
-                    return;
-                }
-
+                if (!data || data.price === undefined) return;
                 var price = parseFloat(data.price);
-
-                if (price <= 0) {
-                    writeDebug('TICK', '\u23f3 Cekam na stream... price=' + price + ' | ' + rawInfo);
-                    return;
-                }
-
+                if (price <= 0) return;
                 var prevClose = lastBarClose || price;
                 var changed   = Math.abs(price - prevClose) > 0.001;
-
-                // Aktualizuj running H/L
                 lastBarHigh  = Math.max(lastBarHigh, price);
                 lastBarLow   = Math.min(lastBarLow, price);
                 lastBarClose = price;
-
-                // Debug log
                 writeDebug('TICK',
                     symbol + ' \u2192 ' + price.toFixed(2)
-                    + (changed
-                        ? ' \u2bc8 ZMENA z ' + prevClose.toFixed(2)
-                          + ' (\u0394' + (price - prevClose > 0 ? '+' : '')
-                          + (price - prevClose).toFixed(2) + ')'
-                        : ' \u2014 stejne')
-                    + ' | H=' + lastBarHigh.toFixed(2)
-                    + ' L=' + lastBarLow.toFixed(2)
-                );
-
-                // Aktualizuj svicku
+                    + (changed ? ' \u2bc8 ZMENA z ' + prevClose.toFixed(2)
+                        + ' (\u0394' + (price - prevClose > 0 ? '+' : '')
+                        + (price - prevClose).toFixed(2) + ')' : ' \u2014 stejne')
+                    + ' | H=' + lastBarHigh.toFixed(2) + ' L=' + lastBarLow.toFixed(2));
                 candleSeries.update({
-                    time:  lastBarTime,
-                    open:  lastBarOpen,
-                    high:  lastBarHigh,
-                    low:   lastBarLow,
-                    close: lastBarClose
+                    time: lastBarTime, open: lastBarOpen,
+                    high: lastBarHigh, low: lastBarLow, close: lastBarClose
                 });
             })
-            .catch(function (e) {
-                writeDebug('TICK', 'FETCH ERROR: ' + e);
-            });
+            .catch(function (e) { writeDebug('TICK', 'FETCH ERROR: ' + e); });
     }
 
     // =================================================================
@@ -265,45 +249,311 @@
     function setTickEnabled(enabled) {
         tickEnabled = !!enabled;
         if (tickEnabled) {
-            if (currentSymbol) {
-                startTickPolling(currentSymbol);
-            } else {
-                writeDebug('TICK', 'Tick ON - nejdrive nacti graf');
-            }
+            if (currentSymbol) startTickPolling(currentSymbol);
+            else writeDebug('TICK', 'Tick ON - nejdrive nacti graf');
         } else {
             if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
         }
     }
 
     // =================================================================
-    // 6. Indicator API
+    // 6. Sub-chart helpers
+    // =================================================================
+
+    /**
+     * Vytvori nebo vrati existujici div pro sub-chart.
+     * Vlozi ho IHNED za #lwc-container nebo za posledni sub-chart.
+     */
+    function getOrCreateSubContainer(id, height, label) {
+        var existing = document.getElementById(id);
+        if (existing) return existing;
+
+        // Najdi posledni existujici sub-container nebo hlavni container
+        var anchor = document.getElementById('lwc-macd-container') ||
+                     document.getElementById('lwc-rsi-container')  ||
+                     document.getElementById('lwc-container');
+        if (!anchor) { writeDebug('ERR', 'Nelze najit anchor pro ' + id); return null; }
+
+        var wrapper = document.createElement('div');
+        wrapper.style.cssText = 'position:relative;';
+
+        var titleBar = document.createElement('div');
+        titleBar.style.cssText =
+            'background:#1a1a2e;color:#888;font-size:11px;padding:2px 8px;' +
+            'border-top:1px solid #3d3d4a;font-family:monospace;';
+        titleBar.textContent = label || id;
+
+        var div = document.createElement('div');
+        div.id             = id;
+        div.style.cssText  = 'width:100%;height:' + height + 'px;background:' + CHART_BG + ';';
+
+        wrapper.appendChild(titleBar);
+        wrapper.appendChild(div);
+        anchor.parentNode.insertBefore(wrapper, anchor.nextSibling);
+        return div;
+    }
+
+    function removeSubContainer(id) {
+        var el = document.getElementById(id);
+        if (el && el.parentNode) {
+            var wrapper = el.parentNode;
+            // Wrapper je div bez id, odstranime cely wrapper
+            if (wrapper && wrapper.parentNode && !wrapper.id) {
+                wrapper.parentNode.removeChild(wrapper);
+            } else if (el.parentNode) {
+                el.parentNode.removeChild(el);
+            }
+        }
+    }
+
+    function clearSubCharts() {
+        if (subCharts.rsi)  { subCharts.rsi.remove();  delete subCharts.rsi;  }
+        if (subCharts.macd) { subCharts.macd.remove(); delete subCharts.macd; }
+        removeSubContainer('lwc-rsi-container');
+        removeSubContainer('lwc-macd-container');
+    }
+
+    function syncTimeScales(sourceChart, targetCharts) {
+        sourceChart.timeScale().subscribeVisibleTimeRangeChange(function(range) {
+            if (syncingRange || !range) return;
+            syncingRange = true;
+            targetCharts.forEach(function(tc) {
+                try { tc.timeScale().setVisibleRange(range); } catch(e) {}
+            });
+            syncingRange = false;
+        });
+    }
+
+    // =================================================================
+    // 7. RSI sub-chart
+    // =================================================================
+    function createRsiChart(rsiData, period) {
+        var el = getOrCreateSubContainer('lwc-rsi-container', RSI_HEIGHT,
+            '\u2219 RSI (' + period + ')');
+        if (!el) return;
+
+        var w = el.offsetWidth || (container ? container.offsetWidth : 800);
+        var rsiChart = LightweightCharts.createChart(el, {
+            width:  w, height: RSI_HEIGHT,
+            layout: { background: { color: CHART_BG }, textColor: TEXT_COLOR },
+            grid:   { vertLines: { color: GRID_COLOR + '44' }, horzLines: { color: GRID_COLOR + '44' } },
+            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+            rightPriceScale: { borderColor: GRID_COLOR, scaleMargins: { top: 0.05, bottom: 0.05 } },
+            timeScale: { borderColor: GRID_COLOR, timeVisible: true, secondsVisible: false }
+        });
+
+        // Overbought / Oversold reference lines (70 / 30)
+        var ob70 = rsiChart.addLineSeries({
+            color: '#ef535044', lineWidth: 1, lineStyle: 2,  // dashed
+            priceScaleId: 'right', lastValueVisible: false, priceLineVisible: false
+        });
+        var os30 = rsiChart.addLineSeries({
+            color: '#26a69a44', lineWidth: 1, lineStyle: 2,
+            priceScaleId: 'right', lastValueVisible: false, priceLineVisible: false
+        });
+
+        // RSI line
+        var rsiLine = rsiChart.addLineSeries({
+            color: '#ce93d8', lineWidth: 2,
+            priceScaleId: 'right',
+            title: 'RSI' + period,
+            lastValueVisible: true, priceLineVisible: false
+        });
+
+        var validData = rsiData.filter(function(d) { return d.value !== null && d.value !== undefined; });
+        if (validData.length === 0) {
+            writeDebug('IND', 'RSI: zadna platna data');
+            return;
+        }
+
+        // Reference linky pres cely casovy rozsah
+        var times = validData.map(function(d) { return d.time; });
+        var tMin  = times[0], tMax = times[times.length - 1];
+        ob70.setData([{ time: tMin, value: 70 }, { time: tMax, value: 70 }]);
+        os30.setData([{ time: tMin, value: 30 }, { time: tMax, value: 30 }]);
+
+        rsiLine.setData(validData.map(function(d) { return { time: d.time, value: d.value }; }));
+        rsiChart.timeScale().fitContent();
+
+        subCharts.rsi = rsiChart;
+
+        // Sync s hlavnim grafem
+        if (chart) syncTimeScales(chart, [rsiChart]);
+        syncTimeScales(rsiChart, chart ? [chart] : []);
+
+        writeDebug('IND', 'RSI sub-chart OK: ' + validData.length + ' bodu');
+    }
+
+    // =================================================================
+    // 8. MACD sub-chart
+    // =================================================================
+    function createMacdChart(macdData) {
+        var el = getOrCreateSubContainer('lwc-macd-container', MACD_HEIGHT,
+            '\u2219 MACD (12 / 26 / 9)');
+        if (!el) return;
+
+        var w = el.offsetWidth || (container ? container.offsetWidth : 800);
+        var macdChart = LightweightCharts.createChart(el, {
+            width:  w, height: MACD_HEIGHT,
+            layout: { background: { color: CHART_BG }, textColor: TEXT_COLOR },
+            grid:   { vertLines: { color: GRID_COLOR + '44' }, horzLines: { color: GRID_COLOR + '44' } },
+            crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+            rightPriceScale: { borderColor: GRID_COLOR, scaleMargins: { top: 0.1, bottom: 0.1 } },
+            timeScale: { borderColor: GRID_COLOR, timeVisible: true, secondsVisible: false }
+        });
+
+        // Histogram
+        var histSeries = macdChart.addHistogramSeries({
+            priceScaleId: 'right', priceLineVisible: false,
+            lastValueVisible: false
+        });
+        // MACD line
+        var macdLine = macdChart.addLineSeries({
+            color: '#42a5f5', lineWidth: 2,
+            priceScaleId: 'right', title: 'MACD',
+            lastValueVisible: true, priceLineVisible: false
+        });
+        // Signal line
+        var signalLine = macdChart.addLineSeries({
+            color: '#ff9800', lineWidth: 1,
+            priceScaleId: 'right', title: 'Signal',
+            lastValueVisible: true, priceLineVisible: false
+        });
+
+        var validMacd   = macdData.filter(function(d) { return d.macd   !== null && d.macd   !== undefined; });
+        var validSignal = macdData.filter(function(d) { return d.signal !== null && d.signal !== undefined; });
+        var validHist   = macdData.filter(function(d) { return d.histogram !== null && d.histogram !== undefined; });
+
+        if (validMacd.length === 0) {
+            writeDebug('IND', 'MACD: zadna platna data');
+            return;
+        }
+
+        histSeries.setData(validHist.map(function(d) {
+            return {
+                time:  d.time,
+                value: d.histogram,
+                color: d.histogram >= 0 ? UP_COLOR + 'aa' : DOWN_COLOR + 'aa'
+            };
+        }));
+        macdLine.setData(validMacd.map(function(d) {
+            return { time: d.time, value: d.macd };
+        }));
+        signalLine.setData(validSignal.map(function(d) {
+            return { time: d.time, value: d.signal };
+        }));
+        macdChart.timeScale().fitContent();
+
+        subCharts.macd = macdChart;
+
+        // Sync s hlavnim grafem a RSI
+        var toSync = [macdChart];
+        if (subCharts.rsi) toSync.push(subCharts.rsi);
+        if (chart) syncTimeScales(chart, toSync);
+        syncTimeScales(macdChart, chart ? [chart] : []);
+
+        writeDebug('IND', 'MACD sub-chart OK: ' + validMacd.length + ' bodu');
+    }
+
+    // =================================================================
+    // 9. Existing indicator overlay (SMA / EMA na hlavni chart)
     // =================================================================
     function addIndicator(name, type, data, options) {
         if (!chart) { writeDebug('WARN', 'Graf neni ready: ' + name); return; }
         if (indicatorSeries[name]) { chart.removeSeries(indicatorSeries[name]); }
         var series;
-        if (type === 'histogram')  { series = chart.addHistogramSeries(options || {}); }
-        else if (type === 'area')  { series = chart.addAreaSeries(options || {}); }
-        else                       { series = chart.addLineSeries(options || {}); }
+        if (type === 'histogram') series = chart.addHistogramSeries(options || {});
+        else if (type === 'area') series = chart.addAreaSeries(options || {});
+        else                      series = chart.addLineSeries(options || {});
         series.setData(data);
         indicatorSeries[name] = series;
-        writeDebug('IND', 'Pridano: ' + name + ' (' + type + ')');
+        writeDebug('IND', 'Overlay: ' + name + ' (' + type + ') | ' + data.length + ' bodu');
     }
 
     function removeIndicator(name) {
         if (indicatorSeries[name] && chart) {
-            chart.removeSeries(indicatorSeries[name]);
+            try { chart.removeSeries(indicatorSeries[name]); } catch(e) {}
             delete indicatorSeries[name];
-            writeDebug('IND', 'Odebrano: ' + name);
+            writeDebug('IND', 'Odebrano overlay: ' + name);
         }
     }
 
+    // =================================================================
+    // 10. setIndicators  <-- HLAVNI VSTUPNI BOD
+    //     Vola se z Dash clientside callbacku s daty z /api/indicators
+    // =================================================================
+    function setIndicators(data) {
+        if (!chart || !candleSeries) {
+            writeDebug('IND', 'setIndicators: chart neni ready, zkousim za 500ms');
+            setTimeout(function() { setIndicators(data); }, 500);
+            return;
+        }
+
+        writeDebug('IND', '=== setIndicators() | ok=' + data.ok +
+            ' | baru=' + (data.bars || 0) +
+            ' | sma=' + !!data.sma + ' ema=' + !!data.ema +
+            ' rsi=' + !!data.rsi + ' macd=' + !!data.macd + ' ===');
+
+        // -- SMA overlay --
+        if (data.sma) {
+            var smaData = data.sma
+                .filter(function(d) { return d.value !== null && d.value !== undefined; })
+                .map(function(d) { return { time: d.time, value: d.value }; });
+            if (smaData.length > 0) {
+                addIndicator('sma', 'line', smaData, {
+                    color: '#ff9800', lineWidth: 1,
+                    priceScaleId: 'right',
+                    title: 'SMA' + (data.sma_period || 20),
+                    lastValueVisible: true, priceLineVisible: false
+                });
+            }
+        } else {
+            removeIndicator('sma');
+        }
+
+        // -- EMA overlay --
+        if (data.ema) {
+            var emaData = data.ema
+                .filter(function(d) { return d.value !== null && d.value !== undefined; })
+                .map(function(d) { return { time: d.time, value: d.value }; });
+            if (emaData.length > 0) {
+                addIndicator('ema', 'line', emaData, {
+                    color: '#42a5f5', lineWidth: 1,
+                    priceScaleId: 'right',
+                    title: 'EMA' + (data.ema_period || 20),
+                    lastValueVisible: true, priceLineVisible: false
+                });
+            }
+        } else {
+            removeIndicator('ema');
+        }
+
+        // -- RSI sub-chart --
+        if (subCharts.rsi)  { subCharts.rsi.remove();  delete subCharts.rsi;  }
+        removeSubContainer('lwc-rsi-container');
+        if (data.rsi) {
+            createRsiChart(data.rsi, data.rsi_period || 14);
+        }
+
+        // -- MACD sub-chart --
+        if (subCharts.macd) { subCharts.macd.remove(); delete subCharts.macd; }
+        removeSubContainer('lwc-macd-container');
+        if (data.macd) {
+            createMacdChart(data.macd);
+        }
+    }
+
+    // =================================================================
+    // Public API
+    // =================================================================
     window.lwcManager = {
         loadData:        loadData,
         testChart:       testChart,
         setTickEnabled:  setTickEnabled,
         addIndicator:    addIndicator,
-        removeIndicator: removeIndicator
+        removeIndicator: removeIndicator,
+        setIndicators:   setIndicators,  // NEW v2.2.0
+        clearSubCharts:  clearSubCharts
     };
 
     writeDebug('INIT', '=== LWC Manager ' + VERSION + ' nacteny ===');
