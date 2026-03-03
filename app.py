@@ -226,7 +226,6 @@ def api_trade_close(trade_id):
     body       = freq.get_json(silent=True) or {}
     exit_price = body.get('exit_price')
 
-    # Pokud cena nebyla poskytnuta, zkus získat z IB
     if not exit_price:
         trade = trade_tracker.get_trade(trade_id)
         if trade:
@@ -248,7 +247,6 @@ def api_trade_close(trade_id):
 
 @server.route('/api/trades/close_all', methods=['POST'])
 def api_trades_close_all():
-    # Sesbírej aktuální ceny z IB pro všechny open pozice
     open_trades  = trade_tracker.get_open_trades()
     symbols      = list({t['symbol'] for t in open_trades})
     exit_prices  = {}
@@ -258,7 +256,6 @@ def api_trades_close_all():
             p = ticker.get('price') or ticker.get('last')
             if p:
                 exit_prices[sym] = p
-
     closed = trade_tracker.close_all_open(exit_prices)
     return jsonify({'ok': True, 'closed': len(closed), 'trades': closed})
 
@@ -270,7 +267,7 @@ app_state = {'current_symbol': 'AAPL', 'current_timeframe': '5 mins'}
 
 app.layout = html.Div([
     html.Div([
-        html.H1("🚀 IB Trading Platform v2.9",
+        html.H1("🚀 IB Trading Platform v3.0",
                 style={'display': 'inline-block', 'margin': 0, 'color': '#00d4ff'}),
         html.Div(id='connection-status',
                  style={'display': 'inline-block', 'float': 'right', 'fontSize': 18})
@@ -392,12 +389,14 @@ app.layout = html.Div([
                   data={'sma': False, 'ema': True, 'rsi': True, 'macd': False}),
         dcc.Store(id='indicators-data-store'),
         dcc.Store(id='trade-refresh-store', data=0),
+        # NEW: trade debug log store — Python → JS debug panel
+        dcc.Store(id='trade-debug-store', data=None),
 
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
     # ================================================================
-    # ORDER ENTRY – v2.9
+    # ORDER ENTRY – v3.0
     # ================================================================
     html.Div([
         html.H3('📥 Order Entry', style={'marginBottom': '15px'}),
@@ -452,7 +451,6 @@ app.layout = html.Div([
                                  'background': '#1e1e2e', 'color': 'white', 'fontSize': '13px'}),
             ], style={'display': 'inline-block', 'marginRight': '20px'}),
 
-            # Poznámka
             html.Div([
                 html.Span('📝', style={'marginRight': '6px', 'fontSize': '13px'}),
                 dcc.Input(id='order-note-input', type='text', placeholder='Poznámka (volitelné)',
@@ -498,6 +496,12 @@ app.layout = html.Div([
         html.Div([
             html.H3('📊 Open Positions',
                     style={'display': 'inline-block', 'marginBottom': '0', 'marginRight': '20px'}),
+            # NEW: ruční refresh tlačítko
+            html.Button('🔄 Refresh', id='refresh-positions-btn', n_clicks=0,
+                        style={'padding': '8px 14px', 'background': '#1565c0',
+                               'border': 'none', 'borderRadius': '6px', 'color': 'white',
+                               'fontWeight': 'bold', 'cursor': 'pointer', 'fontSize': '13px',
+                               'marginRight': '10px'}),
             html.Button('❌ Close All Positions', id='close-all-btn', n_clicks=0,
                         style={'padding': '8px 18px', 'background': '#b71c1c',
                                'border': 'none', 'borderRadius': '6px', 'color': 'white',
@@ -528,7 +532,9 @@ app.layout = html.Div([
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
+    # ================================================================
     # DEBUG PANEL
+    # ================================================================
     html.Div([
         html.H3('🔧 Debug Panel',
                 style={'marginBottom': '10px', 'color': '#ff9800'}),
@@ -592,7 +598,7 @@ app.layout = html.Div([
                    'border': '1px solid #333', 'borderRadius': '5px',
                    'padding': '10px', 'resize': 'vertical'}
         ),
-        html.Div('[INIT] [BTN] [CB] [TF] [TICK] [API] [DATA] [IND] [TRADE] [ERR] | v2.9',
+        html.Div('[INIT] [BTN] [CB] [TF] [TICK] [API] [DATA] [IND] [TRADE] [SYNC] [ERR] | v3.0',
                  style={'marginTop': '8px', 'fontSize': '12px', 'color': '#888'})
     ], style={'padding': '20px', 'background': '#1a1a2e',
               'borderRadius': '8px', 'marginBottom': '20px',
@@ -600,7 +606,8 @@ app.layout = html.Div([
 
     dcc.Interval(id='cache-update-interval',     interval=2000,  n_intervals=0),
     dcc.Interval(id='price-update-interval',     interval=10000, n_intervals=0),
-    dcc.Interval(id='positions-update-interval', interval=30000, n_intervals=0),
+    # CHANGED: 30000 → 10000
+    dcc.Interval(id='positions-update-interval', interval=10000, n_intervals=0),
     dcc.Interval(id='connection-check-interval', interval=10000, n_intervals=0),
     dcc.Interval(id='trades-refresh-interval',   interval=5000,  n_intervals=0),
     html.Div(id='hidden-state', style={'display': 'none'}),
@@ -759,7 +766,6 @@ app.clientside_callback(
     function(qty, slPrice, slPct, tpPrice, tpPct, symbol, priceTxt) {
         var sym  = (symbol || 'AAPL').toUpperCase();
         var q    = qty || 1;
-        // Pokus o parsování aktuální ceny z price-display ("Last: $185.30")
         var cur  = 0;
         if (priceTxt) {
             var m = priceTxt.match(/\$([\d.]+)/);
@@ -769,7 +775,6 @@ app.clientside_callback(
         var sl = slPrice ? parseFloat(slPrice) : null;
         var tp = tpPrice ? parseFloat(tpPrice) : null;
 
-        // Přepočet % → $
         if (!sl && slPct && cur > 0)
             sl = Math.round(cur * (1 - slPct / 100) * 100) / 100;
         if (!tp && tpPct && cur > 0)
@@ -797,18 +802,19 @@ app.clientside_callback(
 
 
 # ------------------------------------------------------------------
-# PLACE ORDER – BUY / SELL + záznam do TradeTracker
+# PLACE ORDER – BUY / SELL + TradeTracker + [TRADE] debug log
 # ------------------------------------------------------------------
 @app.callback(
     [Output('order-feedback', 'children'),
-     Output('trade-refresh-store', 'data')],
+     Output('trade-refresh-store', 'data'),
+     Output('trade-debug-store', 'data')],
     [Input('buy-btn', 'n_clicks'), Input('sell-btn', 'n_clicks')],
-    [State('symbol-input',   'value'),
-     State('qty-custom',     'value'),
-     State('sl-price-input', 'value'),
-     State('sl-pct-input',   'value'),
-     State('tp-price-input', 'value'),
-     State('tp-pct-input',   'value'),
+    [State('symbol-input',    'value'),
+     State('qty-custom',      'value'),
+     State('sl-price-input',  'value'),
+     State('sl-pct-input',    'value'),
+     State('tp-price-input',  'value'),
+     State('tp-pct-input',    'value'),
      State('order-note-input','value'),
      State('trade-refresh-store', 'data')]
 )
@@ -816,24 +822,23 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity,
                 sl_price, sl_pct, tp_price, tp_pct, note, refresh_counter):
     ctx = dash.callback_context
     if not ctx.triggered:
-        return '', dash.no_update
+        return '', dash.no_update, dash.no_update
     btn = ctx.triggered[0]['prop_id'].split('.')[0]
     if btn == 'buy-btn' and buy_clicks > 0:
         action, color = 'BUY', '#26a69a'
     elif btn == 'sell-btn' and sell_clicks > 0:
         action, color = 'SELL', '#ef5350'
     else:
-        return '', dash.no_update
+        return '', dash.no_update, dash.no_update
 
     if not ib.is_connected():
+        dbg = {'msg': f'[TRADE][ERR] {action} {symbol} — NOT CONNECTED', 'ts': time.time()}
         return html.Div('❌ Not connected!',
-                        style={'color': '#ef5350', 'fontWeight': 'bold'}), dash.no_update
+                        style={'color': '#ef5350', 'fontWeight': 'bold'}), dash.no_update, dbg
 
-    # Aktuální cena pro výpočet SL/TP z %
     ticker    = ib.get_ticker(symbol) or {}
     cur_price = ticker.get('price') or ticker.get('last') or 0
 
-    # Vyřeš SL
     sl = None
     if sl_price:
         sl = float(sl_price)
@@ -841,7 +846,6 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity,
         mult = (1 - float(sl_pct) / 100) if action == 'BUY' else (1 + float(sl_pct) / 100)
         sl   = round(cur_price * mult, 2)
 
-    # Vyřeš TP
     tp = None
     if tp_price:
         tp = float(tp_price)
@@ -851,10 +855,10 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity,
 
     result = ib.place_market_order(symbol, action, quantity)
     if not result['success']:
+        dbg = {'msg': f'[TRADE][ERR] {action} {quantity} {symbol} — {result["error"]}', 'ts': time.time()}
         return html.Div(f'❌ {result["error"]}',
-                        style={'color': '#ef5350', 'fontWeight': 'bold'}), dash.no_update
+                        style={'color': '#ef5350', 'fontWeight': 'bold'}), dash.no_update, dbg
 
-    # Zaznamenat do TradeTracker
     fill_price = result.get('fill_price') or cur_price
     trade_tracker.open_trade(
         symbol=symbol, side=action, qty=quantity,
@@ -863,82 +867,120 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity,
         note=note or ''
     )
 
-    sl_txt = f' | SL ${sl:.2f}' if sl else ''
-    tp_txt = f' | TP ${tp:.2f}' if tp else ''
+    sl_txt  = f' | SL ${sl:.2f}' if sl else ''
+    tp_txt  = f' | TP ${tp:.2f}' if tp else ''
+    dbg_msg = (f'[TRADE] {action} {quantity}x {symbol} @ Market'
+               f' | fill=${fill_price:.2f}{sl_txt}{tp_txt}'
+               f'{" | note: " + note if note else ""}')
+    dbg = {'msg': dbg_msg, 'ts': time.time()}
+
     return (
         html.Div(f'✅ {action} {quantity} {symbol} @ Market{sl_txt}{tp_txt}',
                  style={'color': color, 'fontWeight': 'bold'}),
-        (refresh_counter or 0) + 1
+        (refresh_counter or 0) + 1,
+        dbg
     )
 
 
 # ------------------------------------------------------------------
-# CLOSE ALL POSITIONS
+# CLOSE ALL POSITIONS — bez self-HTTP, přímé volání TradeTracker
 # ------------------------------------------------------------------
 @app.callback(
     [Output('close-all-feedback', 'children'),
-     Output('trade-refresh-store', 'data', allow_duplicate=True)],
+     Output('trade-refresh-store', 'data', allow_duplicate=True),
+     Output('trade-debug-store', 'data', allow_duplicate=True)],
     Input('close-all-btn', 'n_clicks'),
     State('trade-refresh-store', 'data'),
     prevent_initial_call=True
 )
 def close_all_positions(n, refresh_counter):
     if not n:
-        return '', dash.no_update
+        return '', dash.no_update, dash.no_update
     if not ib.is_connected():
-        return '❌ Not connected', dash.no_update
+        dbg = {'msg': '[TRADE][ERR] CLOSE ALL — NOT CONNECTED', 'ts': time.time()}
+        return '❌ Not connected', dash.no_update, dbg
 
-    # Zavři přes IB
-    positions = ib.get_positions()
-    errors = []
-    for pos in (positions or []):
+    positions = ib.get_positions() or []
+    errors    = []
+    closed    = 0
+
+    for pos in positions:
         qty = abs(pos['position'])
         if qty <= 0:
             continue
         action = 'SELL' if pos['position'] > 0 else 'BUY'
         res = ib.place_market_order(pos['symbol'], action, qty)
-        if not res['success']:
+        if res['success']:
+            closed += 1
+        else:
             errors.append(pos['symbol'])
 
-    # Zavři v TradeTracker
-    import requests as _req  # interní call na vlastní API
-    try:
-        _req.post('http://localhost:8050/api/trades/close_all', timeout=3)
-    except Exception:
-        pass
+    # Zavři v TradeTracker přímo (bez HTTP self-call)
+    exit_prices = {}
+    for pos in positions:
+        sym    = pos['symbol']
+        ticker = ib.get_ticker(sym) or {}
+        p      = ticker.get('price') or ticker.get('last')
+        if p:
+            exit_prices[sym] = p
+    trade_tracker.close_all_open(exit_prices)
+
+    err_txt = f' | chyba u: {", ".join(errors)}' if errors else ''
+    dbg_msg = (f'[TRADE] CLOSE ALL → {closed}/{len(positions)} pozic zavřeno'
+               f'{" | ERR: " + ", ".join(errors) if errors else " | OK"}')
+    dbg = {'msg': dbg_msg, 'ts': time.time()}
 
     if errors:
-        return f'⚠️ Chyba u: {", ".join(errors)}', (refresh_counter or 0) + 1
-    cnt = len(positions) if positions else 0
-    return f'✅ Zavřeno {cnt} pozic', (refresh_counter or 0) + 1
+        return f'⚠️ Zavřeno {closed}, chyba: {", ".join(errors)}', (refresh_counter or 0) + 1, dbg
+    return f'✅ Zavřeno {closed} pozic', (refresh_counter or 0) + 1, dbg
 
 
 # ------------------------------------------------------------------
-# OPEN POSITIONS TABLE
+# OPEN POSITIONS TABLE + orphan sync
 # ------------------------------------------------------------------
 @app.callback(
-    Output('positions-table', 'children'),
+    [Output('positions-table', 'children'),
+     Output('trade-debug-store', 'data', allow_duplicate=True)],
     [Input('positions-update-interval', 'n_intervals'),
-     Input('trade-refresh-store', 'data')]
+     Input('trade-refresh-store', 'data'),
+     Input('refresh-positions-btn', 'n_clicks')],
+    prevent_initial_call=False
 )
-def update_positions_table(n, _refresh):
+def update_positions_table(n, _refresh, _btn):
     if not ib.is_connected():
-        return html.Div('Not connected', style={'color': '#888'})
-    positions = ib.get_positions()
-    if not positions:
-        return html.Div('Žádné otevřené pozice', style={'color': '#888'})
+        return html.Div('Not connected', style={'color': '#888'}), dash.no_update
 
-    # Obohacení o entry_time z TradeTracker
+    positions   = ib.get_positions() or []
     open_trades = {t['symbol']: t for t in trade_tracker.get_open_trades()}
+
+    # --- ORPHAN SYNC: TradeTracker má "open", ale IB pozici nezná ---
+    ib_symbols  = {p['symbol'] for p in positions}
+    sync_msgs   = []
+    for sym, tt in list(open_trades.items()):
+        if sym not in ib_symbols:
+            # Získej poslední cenu pro P&L
+            ticker = ib.get_ticker(sym) or {}
+            exit_p = ticker.get('price') or ticker.get('last') or tt.get('entry_price', 0)
+            trade_tracker.close_trade(tt['id'], exit_p)
+            del open_trades[sym]
+            sync_msgs.append(f'[SYNC] Orphan {sym} auto-closed @ ${exit_p:.2f} (IB pos=0)')
+            print(f"[SYNC] Orphan trade {sym} closed in TradeTracker")
+
+    dbg = dash.no_update
+    if sync_msgs:
+        dbg = {'msg': '\n'.join(sync_msgs), 'ts': time.time(), 'multi': True}
+
+    if not positions:
+        return html.Div('Žádné otevřené pozice', style={'color': '#888'}), dbg
 
     rows = []
     for pos in positions:
         pnl_c = '#26a69a' if pos['unrealized_pnl'] >= 0 else '#ef5350'
         sym   = pos['symbol']
         tt    = open_trades.get(sym, {})
-        entry_t = trade_tracker.fmt_time(tt.get('entry_time')) if tt else '–'
-        sl_txt  = f"${tt['sl']:.2f}"  if tt.get('sl')  else '–'
-        tp_txt  = f"${tt['tp']:.2f}"  if tt.get('tp')  else '–'
+        entry_t  = trade_tracker.fmt_time(tt.get('entry_time')) if tt else '–'
+        sl_txt   = f"${tt['sl']:.2f}"  if tt.get('sl')  else '–'
+        tp_txt   = f"${tt['tp']:.2f}"  if tt.get('tp')  else '–'
         trade_id = tt.get('id', '')
         rows.append(html.Tr([
             html.Td(sym, style={'fontWeight': 'bold'}),
@@ -970,57 +1012,62 @@ def update_positions_table(n, _refresh):
             html.Th('Vstup'), html.Th('SL'), html.Th('TP'), html.Th('')
         ])),
         html.Tbody(rows)
-    ], style={'width': '100%', 'borderCollapse': 'collapse'})
+    ], style={'width': '100%', 'borderCollapse': 'collapse'}), dbg
 
 
 # ------------------------------------------------------------------
-# CLOSE SINGLE POSITION (pattern-matching callback)
+# CLOSE SINGLE POSITION
 # ------------------------------------------------------------------
 @app.callback(
-    Output('order-feedback', 'children', allow_duplicate=True),
+    [Output('order-feedback', 'children', allow_duplicate=True),
+     Output('trade-debug-store', 'data', allow_duplicate=True)],
     Input({'type': 'close-pos-btn', 'trade_id': dash.ALL}, 'n_clicks'),
     prevent_initial_call=True
 )
 def close_single_position(n_clicks_list):
     ctx = dash.callback_context
     if not ctx.triggered:
-        return dash.no_update
+        return dash.no_update, dash.no_update
     triggered = ctx.triggered[0]
     if not triggered['value']:
-        return dash.no_update
+        return dash.no_update, dash.no_update
 
     import json as _json
-    prop_id   = triggered['prop_id']
-    id_part   = prop_id.split('.')[0]
-    trade_id  = _json.loads(id_part).get('trade_id', '')
+    prop_id  = triggered['prop_id']
+    id_part  = prop_id.split('.')[0]
+    trade_id = _json.loads(id_part).get('trade_id', '')
     if not trade_id:
-        return dash.no_update
+        return dash.no_update, dash.no_update
 
     trade = trade_tracker.get_trade(trade_id)
     if not trade:
-        return html.Div('❌ Trade nenalezen', style={'color': '#ef5350'})
+        dbg = {'msg': f'[TRADE][ERR] Close single — trade {trade_id} nenalezen', 'ts': time.time()}
+        return html.Div('❌ Trade nenalezen', style={'color': '#ef5350'}), dbg
 
     sym = trade['symbol']
     qty = trade['qty']
     act = 'SELL' if trade['side'] == 'BUY' else 'BUY'
 
     if not ib.is_connected():
-        return html.Div('❌ Not connected', style={'color': '#ef5350'})
+        dbg = {'msg': f'[TRADE][ERR] Close {sym} — NOT CONNECTED', 'ts': time.time()}
+        return html.Div('❌ Not connected', style={'color': '#ef5350'}), dbg
 
-    res = ib.place_market_order(sym, act, qty)
+    res        = ib.place_market_order(sym, act, qty)
     ticker     = ib.get_ticker(sym) or {}
     exit_price = ticker.get('price') or ticker.get('last') or trade.get('entry_price', 0)
     trade_tracker.close_trade(trade_id, exit_price)
 
-    pnl_txt = ''
     updated = trade_tracker.get_trade(trade_id)
-    if updated and updated.get('pnl') is not None:
-        pnl = updated['pnl']
-        pnl_txt = f" | P&L: {'+'if pnl>=0 else ''}${pnl:.2f}"
+    pnl     = updated.get('pnl') if updated else None
+    pnl_txt = f" | P&L: {'+'if (pnl or 0)>=0 else ''}${pnl:.2f}" if pnl is not None else ''
 
-    color = '#26a69a' if res['success'] else '#ef5350'
-    msg   = f"✅ Closed {sym} {qty}x{pnl_txt}" if res['success'] else f"❌ {res['error']}"
-    return html.Div(msg, style={'color': color, 'fontWeight': 'bold'})
+    color   = '#26a69a' if res['success'] else '#ef5350'
+    msg_ui  = f"✅ Closed {sym} {qty}x{pnl_txt}" if res['success'] else f"❌ {res['error']}"
+    dbg_msg = (f'[TRADE] CLOSE {sym} {qty}x @ ${exit_price:.2f}{pnl_txt}'
+               f' | IB: {"OK" if res["success"] else "ERR " + str(res.get("error",""))}')
+    dbg = {'msg': dbg_msg, 'ts': time.time()}
+
+    return html.Div(msg_ui, style={'color': color, 'fontWeight': 'bold'}), dbg
 
 
 # ------------------------------------------------------------------
@@ -1103,7 +1150,31 @@ def update_orders_table(n):
     ], style={'width': '100%', 'borderCollapse': 'collapse'})
 
 
-# ========== CLIENTSIDE CALLBACKS (beze změn) ==========
+# ------------------------------------------------------------------
+# TRADE DEBUG STORE → debug-log-area (clientside)
+# ------------------------------------------------------------------
+app.clientside_callback(
+    """
+    function(tradeLog) {
+        if (!tradeLog || !tradeLog.msg) return window.dash_clientside.no_update;
+        var a = document.getElementById('debug-log-area');
+        if (!a) return window.dash_clientside.no_update;
+        var ts = new Date().toTimeString().slice(0, 8);
+        // Podpora multi-line zprav (orphan sync)
+        var lines = tradeLog.msg.split('\\n');
+        lines.forEach(function(line) {
+            if (line) a.value += '[' + ts + '] ' + line + '\\n';
+        });
+        a.scrollTop = a.scrollHeight;
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('hidden-state', 'children'),
+    Input('trade-debug-store', 'data')
+)
+
+
+# ========== CLIENTSIDE CALLBACKS ==========
 
 app.clientside_callback(
     """function(n){if(n>0&&window.lwcDebug)window.lwcDebug('BTN','Load Chart n='+n+' - cekam na Python/IB...');return n;}""",
@@ -1265,7 +1336,7 @@ app.clientside_callback(
         var ctx=window.dash_clientside.callback_context;
         if(!ctx||!ctx.triggered||ctx.triggered.length===0)return window.dash_clientside.no_update;
         var tid=ctx.triggered_id||ctx.triggered[0].prop_id.split('.')[0];
-        if(window.lwcDebug){var lbl={'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m','tf-30m':'30m','tf-1h':'1h','tf-1d':'1D'};window.lwcDebug('TF','Zmen -> '+(lbl[tid]||tid)+' (cekam na IB...)');}
+        if(window.lwcDebug){var lbl={'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m','tf-30m':'30m','tf-1h':'1h','tf-1d':'1D'};window.lwcDebug('TF','Zmen -> '+(lbl[tid]||tid)+' (cekam na IB...)'); }
         return tid;
     }
     """,
@@ -1321,7 +1392,7 @@ app.clientside_callback(
     Output('test-chart-trigger','data'), Input('test-chart-btn','n_clicks')
 )
 app.clientside_callback(
-    """function(n){if(n>0){var a=document.getElementById('debug-log-area');if(a){a.select();try{document.execCommand('copy');}catch(e){}a.setSelectionRange(0,0);navigator.clipboard&&navigator.clipboard.writeText(a.value);}}return n>0?'Zkopírováno ✓':'';}""" ,
+    """function(n){if(n>0){var a=document.getElementById('debug-log-area');if(a){a.select();try{document.execCommand('copy');}catch(e){}a.setSelectionRange(0,0);navigator.clipboard&&navigator.clipboard.writeText(a.value);}}return n>0?'Zkopírováno ✓':'';}""",
     Output('copy-status','children'), Input('copy-log-btn','n_clicks')
 )
 app.clientside_callback(
@@ -1432,7 +1503,7 @@ app.index_string = '''
 # ========== RUN ==========
 
 if __name__ == '__main__':
-    print("🚀 Starting IB Trading Platform v2.9.0...")
+    print("🚀 Starting IB Trading Platform v3.0.0...")
     print(f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
     if ib.connect():
         print("✅ Connected to IB Gateway!")
