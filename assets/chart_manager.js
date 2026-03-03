@@ -1,16 +1,15 @@
 /**
- * IB Trading Platform - Lightweight Charts Manager v2.3.0
+ * IB Trading Platform - Lightweight Charts Manager v2.3.1
  * =========================================================
- * v2.3.0:
- *   - Volume presunut do samostatneho sub-panelu (lwc-volume-container)
- *   - Odstraneny vsechny vertikalni a horizontalni mrizky na vsech chartech
- *   - Volume sub-chart synchronizovan s hlavnim grafem (scroll/zoom)
- *   - getOrCreateSubContainer: anchor chain zahrnuje volume container
+ * v2.3.1:
+ *   - FIX: syncTimeScales pouziva subscribeVisibleLogicalRangeChange
+ *          + setVisibleLogicalRange misto time range -> pixel-perfect sync
+ *   - FIX: volumeChart.fitContent() odstranen z loadData (sync resi hlavni chart)
  */
 (function () {
     'use strict';
 
-    var VERSION         = 'v2.3.0';
+    var VERSION         = 'v2.3.1';
     var TICK_POLL_MS    = 5000;
     var CHART_BG        = '#1e1e2e';
     var GRID_COLOR      = '#3d3d4a';
@@ -24,8 +23,8 @@
 
     var chart           = null;
     var candleSeries    = null;
-    var volumeChart     = null;   // separatni LWC instance pro volume
-    var volumeSeries    = null;   // histogram na volumeChart
+    var volumeChart     = null;
+    var volumeSeries    = null;
     var tickTimer       = null;
     var tickEnabled     = false;
     var currentSymbol   = null;
@@ -90,7 +89,7 @@
             chart = LightweightCharts.createChart(container, {
                 width:  w, height: CHART_HEIGHT,
                 layout: { background: { color: CHART_BG }, textColor: TEXT_COLOR },
-                grid: { vertLines: { visible: false }, horzLines: { visible: false } },
+                grid:   { vertLines: { visible: false }, horzLines: { visible: false } },
                 crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
                 rightPriceScale: { borderColor: GRID_COLOR },
                 timeScale: { borderColor: GRID_COLOR, timeVisible: true, secondsVisible: false }
@@ -99,7 +98,6 @@
                 upColor: UP_COLOR, downColor: DOWN_COLOR, borderVisible: false,
                 wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR
             });
-
             window.addEventListener('resize', onResize);
             writeDebug('INIT', 'Hlavni graf OK. Vytvarim volume sub-panel...');
             initVolumeChart();
@@ -114,10 +112,9 @@
         if (!container) return;
         var w = container.offsetWidth;
 
-        // Vytvor wrapper div
         var wrapper = document.createElement('div');
-        wrapper.id             = 'lwc-volume-wrapper';
-        wrapper.style.cssText  = 'position:relative;';
+        wrapper.id            = 'lwc-volume-wrapper';
+        wrapper.style.cssText = 'position:relative;';
 
         var titleBar = document.createElement('div');
         titleBar.style.cssText =
@@ -145,8 +142,8 @@
             },
             timeScale: {
                 borderColor: GRID_COLOR,
-                timeVisible: true, secondsVisible: false,
-                visible: false   // cas uz je videt na hlavnim grafu
+                timeVisible: false, secondsVisible: false,
+                visible: false
             },
             handleScroll: false,
             handleScale:  false
@@ -159,9 +156,8 @@
             lastValueVisible: false
         });
 
-        // Sync scroll/zoom s hlavnim grafem
+        // Sync logical range: hlavni chart -> volume (jednostranny, volume nema scroll)
         syncTimeScales(chart, [volumeChart]);
-
         writeDebug('INIT', 'Volume sub-panel OK (' + VOLUME_HEIGHT + 'px)');
     }
 
@@ -205,12 +201,10 @@
             ' | Posledni: c=' + bars[bars.length-1].close);
 
         try {
-            // Svicky
             candleSeries.setData(bars.map(function (b) {
                 return { time: b.time, open: b.open, high: b.high, low: b.low, close: b.close };
             }));
 
-            // Volume v separatnim sub-chartu
             if (volumeSeries) {
                 volumeSeries.setData(bars.map(function (b) {
                     return {
@@ -219,10 +213,11 @@
                         color: b.close >= b.open ? UP_COLOR + '77' : DOWN_COLOR + '77'
                     };
                 }));
-                volumeChart.timeScale().fitContent();
+                // POZOR: fitContent() na volumeChart NEVOLAME
+                // Sync logical range ze hlavniho chartu to zaridi automaticky
             }
 
-            var last    = bars[bars.length - 1];
+            var last     = bars[bars.length - 1];
             lastBarTime  = last.time;
             lastBarOpen  = last.open;
             lastBarHigh  = last.high;
@@ -230,6 +225,7 @@
             lastBarClose = last.close;
             currentSymbol = symbol;
 
+            // fitContent na hlavnim chartu spusti logicalRangeChange -> sync vsechno
             chart.timeScale().fitContent();
             writeDebug('DATA', 'USPECH: ' + bars.length + ' svicek | ' + symbol);
 
@@ -311,19 +307,34 @@
     }
 
     // =================================================================
-    // 6. Sub-chart helpers
+    // 6. syncTimeScales  *** KLIC FIX: logical range misto time range ***
+    //
+    //  subscribeVisibleLogicalRangeChange + setVisibleLogicalRange
+    //  zarucuje pixel-perfect sync bez posunu pri zoumu/scrollu
+    // =================================================================
+    function syncTimeScales(sourceChart, targetCharts) {
+        sourceChart.timeScale().subscribeVisibleLogicalRangeChange(function(range) {
+            if (syncingRange || !range) return;
+            syncingRange = true;
+            targetCharts.forEach(function(tc) {
+                try { tc.timeScale().setVisibleLogicalRange(range); } catch(e) {}
+            });
+            syncingRange = false;
+        });
+    }
+
+    // =================================================================
+    // 7. Sub-chart helpers
     // =================================================================
     function getOrCreateSubContainer(id, height, label) {
         var existing = document.getElementById(id);
         if (existing) return existing;
 
-        // Anchor chain: macd -> rsi -> volume -> main
-        var anchor = document.getElementById('lwc-macd-container')  ||
-                     document.getElementById('lwc-rsi-container')   ||
-                     document.getElementById('lwc-volume-container') ||
+        var anchor = document.getElementById('lwc-macd-container')   ||
+                     document.getElementById('lwc-rsi-container')    ||
+                     document.getElementById('lwc-volume-container')  ||
                      document.getElementById('lwc-container');
 
-        // Pro volume a rsi/macd hledame wrapper (parentNode) jako skutecny anchor
         var anchorWrapper = (anchor && anchor.parentNode && !anchor.parentNode.id)
             ? anchor.parentNode : anchor;
         if (!anchorWrapper) { writeDebug('ERR', 'Nelze najit anchor pro ' + id); return null; }
@@ -365,19 +376,8 @@
         removeSubContainer('lwc-macd-container');
     }
 
-    function syncTimeScales(sourceChart, targetCharts) {
-        sourceChart.timeScale().subscribeVisibleTimeRangeChange(function(range) {
-            if (syncingRange || !range) return;
-            syncingRange = true;
-            targetCharts.forEach(function(tc) {
-                try { tc.timeScale().setVisibleRange(range); } catch(e) {}
-            });
-            syncingRange = false;
-        });
-    }
-
     // =================================================================
-    // 7. RSI sub-chart
+    // 8. RSI sub-chart
     // =================================================================
     function createRsiChart(rsiData, period) {
         var el = getOrCreateSubContainer('lwc-rsi-container', RSI_HEIGHT,
@@ -391,7 +391,8 @@
             grid:   { vertLines: { visible: false }, horzLines: { visible: false } },
             crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
             rightPriceScale: { borderColor: GRID_COLOR, scaleMargins: { top: 0.05, bottom: 0.05 } },
-            timeScale: { borderColor: GRID_COLOR, timeVisible: true, secondsVisible: false, visible: false }
+            timeScale: { borderColor: GRID_COLOR, timeVisible: false, secondsVisible: false, visible: false },
+            handleScroll: false, handleScale: false
         });
 
         var ob70 = rsiChart.addLineSeries({
@@ -416,19 +417,26 @@
         ob70.setData([{ time: tMin, value: 70 }, { time: tMax, value: 70 }]);
         os30.setData([{ time: tMin, value: 30 }, { time: tMax, value: 30 }]);
         rsiLine.setData(validData.map(function(d) { return { time: d.time, value: d.value }; }));
-        rsiChart.timeScale().fitContent();
 
         subCharts.rsi = rsiChart;
-        var allSubs = [rsiChart];
-        if (volumeChart) allSubs.push(volumeChart);
-        if (subCharts.macd) allSubs.push(subCharts.macd);
-        if (chart) syncTimeScales(chart, allSubs);
-        syncTimeScales(rsiChart, chart ? [chart] : []);
+
+        // Sync z hlavniho chartu (jednosmerny - RSI nema scroll)
+        var allPassive = [rsiChart];
+        if (volumeChart)    allPassive.push(volumeChart);
+        if (subCharts.macd) allPassive.push(subCharts.macd);
+        syncTimeScales(chart, allPassive);
+
+        // Aplikuj aktualni logical range hned po nacteni
+        try {
+            var curRange = chart.timeScale().getVisibleLogicalRange();
+            if (curRange) rsiChart.timeScale().setVisibleLogicalRange(curRange);
+        } catch(e) {}
+
         writeDebug('IND', 'RSI sub-chart OK: ' + validData.length + ' bodu');
     }
 
     // =================================================================
-    // 8. MACD sub-chart
+    // 9. MACD sub-chart
     // =================================================================
     function createMacdChart(macdData) {
         var el = getOrCreateSubContainer('lwc-macd-container', MACD_HEIGHT,
@@ -442,7 +450,8 @@
             grid:   { vertLines: { visible: false }, horzLines: { visible: false } },
             crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
             rightPriceScale: { borderColor: GRID_COLOR, scaleMargins: { top: 0.1, bottom: 0.1 } },
-            timeScale: { borderColor: GRID_COLOR, timeVisible: true, secondsVisible: false }
+            timeScale: { borderColor: GRID_COLOR, timeVisible: true, secondsVisible: false },
+            handleScroll: false, handleScale: false
         });
 
         var histSeries = macdChart.addHistogramSeries({
@@ -471,19 +480,25 @@
         }));
         macdLine.setData(validMacd.map(function(d)   { return { time: d.time, value: d.macd };   }));
         signalLine.setData(validSignal.map(function(d){ return { time: d.time, value: d.signal }; }));
-        macdChart.timeScale().fitContent();
 
         subCharts.macd = macdChart;
-        var allSubs = [macdChart];
-        if (volumeChart) allSubs.push(volumeChart);
-        if (subCharts.rsi) allSubs.push(subCharts.rsi);
-        if (chart) syncTimeScales(chart, allSubs);
-        syncTimeScales(macdChart, chart ? [chart] : []);
+
+        var allPassive = [macdChart];
+        if (volumeChart)   allPassive.push(volumeChart);
+        if (subCharts.rsi) allPassive.push(subCharts.rsi);
+        syncTimeScales(chart, allPassive);
+
+        // Aplikuj aktualni logical range hned
+        try {
+            var curRange = chart.timeScale().getVisibleLogicalRange();
+            if (curRange) macdChart.timeScale().setVisibleLogicalRange(curRange);
+        } catch(e) {}
+
         writeDebug('IND', 'MACD sub-chart OK: ' + validMacd.length + ' bodu');
     }
 
     // =================================================================
-    // 9. Indicator overlays (SMA / EMA na hlavni chart)
+    // 10. Indicator overlays (SMA / EMA)
     // =================================================================
     function addIndicator(name, type, data, options) {
         if (!chart) { writeDebug('WARN', 'Graf neni ready: ' + name); return; }
@@ -506,7 +521,7 @@
     }
 
     // =================================================================
-    // 10. setIndicators
+    // 11. setIndicators
     // =================================================================
     function setIndicators(data) {
         if (!chart || !candleSeries) {
@@ -519,7 +534,6 @@
             ' sma=' + !!data.sma + ' ema=' + !!data.ema +
             ' rsi=' + !!data.rsi + ' macd=' + !!data.macd + ' ===');
 
-        // SMA overlay
         if (data.sma) {
             var smaData = data.sma
                 .filter(function(d) { return d.value !== null && d.value !== undefined; })
@@ -533,7 +547,6 @@
             }
         } else { removeIndicator('sma'); }
 
-        // EMA overlay
         if (data.ema) {
             var emaData = data.ema
                 .filter(function(d) { return d.value !== null && d.value !== undefined; })
@@ -547,12 +560,10 @@
             }
         } else { removeIndicator('ema'); }
 
-        // RSI sub-chart
-        if (subCharts.rsi) { subCharts.rsi.remove(); delete subCharts.rsi; }
+        if (subCharts.rsi)  { subCharts.rsi.remove();  delete subCharts.rsi;  }
         removeSubContainer('lwc-rsi-container');
         if (data.rsi) createRsiChart(data.rsi, data.rsi_period || 14);
 
-        // MACD sub-chart
         if (subCharts.macd) { subCharts.macd.remove(); delete subCharts.macd; }
         removeSubContainer('lwc-macd-container');
         if (data.macd) createMacdChart(data.macd);
