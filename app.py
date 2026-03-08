@@ -12,6 +12,18 @@ from modules.data_store import data_store
 from modules.indicators import SMA, EMA, RSI, MACD
 from modules.trade_tracker import trade_tracker
 import time
+import atexit
+import signal
+
+def graceful_shutdown():
+    print("[SHUTDOWN] Disconnecting from IB...")
+    try:
+        ib.disconnect()
+    except:
+        pass
+    print("[SHUTDOWN] Done.")
+
+atexit.register(graceful_shutdown)
 
 app = dash.Dash(
     __name__,
