@@ -1,3 +1,7 @@
+import sys
+import io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 import dash
 from dash import dcc, html, Input, Output, State
 from datetime import datetime, timedelta
@@ -1538,7 +1542,8 @@ if __name__ == '__main__':
     print(f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
     if ib.connect():
         print("✅ Connected to IB Gateway!")
+        time.sleep(2)  # ← PŘIDEJ TADY — dá TWS čas uvolnit session
     else:
         print("❌ Failed to connect")
-    print("http://localhost:8050  |  Ctrl+C to stop\n")
+    print("http://localhost:8050  |  Ctrl+C to stop")
     app.run_server(debug=True, use_reloader=False, host='0.0.0.0', port=8050)
