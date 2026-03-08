@@ -142,5 +142,21 @@
     "exit_time": 1772727008,
     "pnl": 0.07,
     "status": "closed"
+  },
+  {
+    "id": "AAPL_1772727817549",
+    "symbol": "AAPL",
+    "side": "BUY",
+    "qty": 1.0,
+    "order_type": "MARKET",
+    "entry_price": 260.61,
+    "entry_time": 1772727817,
+    "sl": 258.0,
+    "tp": 263.22,
+    "note": "Test 3",
+    "exit_price": 260.33,
+    "exit_time": 1772727857,
+    "pnl": -0.28,
+    "status": "closed"
   }
 ]
