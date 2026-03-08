@@ -4,7 +4,7 @@
 
 taskkill /F /IM python.exe
 App disconnects cleanly via atexit handler.
-Wait 5 seconds, then restart safely.
+Do NOT restart unless explicitly asked
 
 ## Starting the Application
 
@@ -18,6 +18,13 @@ python app.py
 - Previous python processes must be stopped cleanly via Ctrl+C
 - Wait for "✅ Connected to IB Gateway!" in terminal output
 - App runs on http://localhost:8050
+
+## Restarting the Application
+
+Stop first, wait 5 seconds, then start:
+taskkill /F /IM python.exe
+Start-Sleep -Seconds 5
+python app.py
 
 ## Saving Changes to GitHub
 
