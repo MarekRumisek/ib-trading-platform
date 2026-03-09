@@ -34,3 +34,24 @@ git commit -m "popis změny"
 git push origin feature/trade-management-collab-v3
 
 Always use branch `feature/trade-management-collab-v3`.
+
+# Development Guidelines
+
+## Terminal
+
+Always use PowerShell syntax for terminal commands.
+Use semicolons (;) to chain commands instead of &&.
+
+## Available MCP Tools
+
+- **Playwright MCP** — browser automation, DOM inspection, screenshots
+  - App runs at http://localhost:8050
+- **Fetch MCP** — load web pages, documentation, external APIs
+
+## Tool Usage Principles
+
+Prefer using available MCP tools over assumptions.
+Use Playwright to verify UI state when relevant to the task.
+Use fetch when you need external documentation or data.
+Choose the most appropriate debugging approach for each situation.
+Verify fixes before marking tasks as complete.
