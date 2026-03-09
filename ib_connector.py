@@ -1,6 +1,6 @@
 """IB API Connector using ib_async
 
-Version: 2.9.4 - vlastni IB instance pro position polling
+Version: 2.9.5 - ghost subscription cleanup + invalid contract guard
 
 HIERARCHIE FALLBACKU:
   1. STREAMING   reqMktData(snapshot=False)  -> okamzity update
@@ -16,9 +16,11 @@ v2.9.3  pridano: _ib_sleep_lock + _positions_bg_loop
         BUG: bg thread volal self.ib.sleep() -> pouzil jiny asyncio loop
              -> IB events se vubec nezpracovaly -> cache vzdy prazdna
 v2.9.4  OPRAVA: _positions_bg_loop ma vlastni IB() instanci (clientId+3)
-        -> thread vlastni svoji IB instanci -> ib_poll.sleep() funguje spravne
-        -> reqPositions() + sleep(1) kazdych 3s = vzdy aktualni data
-        -> odstranen _ib_sleep_lock a _ib_sleep_safe() (uz nepotrebne)
+         -> thread vlastni svoji IB instanci -> ib_poll.sleep() funguje spravne
+         -> reqPositions() + sleep(1) kazdych 3s = vzdy aktualni data
+         -> odstranen _ib_sleep_lock a _ib_sleep_safe() (uz nepotrebne)
+v2.9.5  OPRAVA: tick subscriber odmita kontrakty s conId=0,
+         nezkousi je donekonecna znovu a umi odhlasit puvodni symbol pri zmene
 """
 
 from ib_async import IB, MarketOrder, LimitOrder
@@ -55,6 +57,8 @@ class _TickSubscriber:
         self._latest: dict      = {}
         self._tickers: dict     = {}
         self._pending: set      = set()
+        self._unsubscribe_pending: set = set()
+        self._failed_keys: set  = set()
         self._last_errors: list = []
         self._lock             = threading.Lock()
         self._connected: bool  = False
@@ -62,6 +66,7 @@ class _TickSubscriber:
         self._mdt: int         = 0
         self._mode: str        = 'init'
         self._next_hist_poll: int = 0
+        self._primary_key: str | None = None
 
         self._thread = threading.Thread(
             target=self._run, daemon=True,
@@ -120,8 +125,35 @@ class _TickSubscriber:
         return list(self._last_errors)
 
     def subscribe(self, symbol: str, asset_type: str = 'STOCK'):
+        key = get_contract_key(symbol, asset_type)
         with self._lock:
-            self._pending.add(get_contract_key(symbol, asset_type))
+            if key in self._failed_keys:
+                return
+            self._unsubscribe_pending.discard(key)
+            self._pending.add(key)
+
+    def unsubscribe(self, symbol: str, asset_type: str = 'STOCK'):
+        key = get_contract_key(symbol, asset_type)
+        with self._lock:
+            self._pending.discard(key)
+            self._unsubscribe_pending.add(key)
+            self._latest.pop(key, None)
+            if self._primary_key == key:
+                self._primary_key = None
+
+    def set_primary_subscription(self, symbol: str, asset_type: str = 'STOCK'):
+        key = get_contract_key(symbol, asset_type)
+        with self._lock:
+            if key in self._failed_keys:
+                return
+            prev_key = self._primary_key
+            self._primary_key = key
+            self._unsubscribe_pending.discard(key)
+            self._pending.add(key)
+            if prev_key and prev_key != key:
+                self._pending.discard(prev_key)
+                self._unsubscribe_pending.add(prev_key)
+                self._latest.pop(prev_key, None)
 
     @property
     def is_connected(self) -> bool: return self._connected
@@ -131,6 +163,18 @@ class _TickSubscriber:
     def subscribed_symbols(self) -> list: return list(self._tickers.keys())
     @property
     def mode(self) -> str: return self._mode
+
+    def _mark_failed(self, key: str, reason: str):
+        with self._lock:
+            already_failed = key in self._failed_keys
+            self._failed_keys.add(key)
+            self._pending.discard(key)
+            self._unsubscribe_pending.discard(key)
+            self._latest.pop(key, None)
+            if self._primary_key == key:
+                self._primary_key = None
+        if not already_failed:
+            print(f"[TICK-SUB] INVALID {key}: {reason} -> subscription stopped")
 
     @staticmethod
     def _extract_price(t) -> float:
@@ -200,13 +244,32 @@ class _TickSubscriber:
             self._next_hist_poll  = 0
             while ib.isConnected():
                 with self._lock:
-                    new_syms = list(self._pending - set(contracts_local.keys()))
+                    removed_keys = list(self._unsubscribe_pending)
+                    self._unsubscribe_pending.clear()
+                    new_syms = list(
+                        self._pending
+                        - set(contracts_local.keys())
+                        - self._failed_keys
+                    )
                     self._pending.clear()
+                for key in removed_keys:
+                    ticker = tickers_local.pop(key, None)
+                    contracts_local.pop(key, None)
+                    self._latest.pop(key, None)
+                    if ticker is not None:
+                        try:
+                            ib.cancelMktData(ticker)
+                        except Exception:
+                            pass
+                    print(f"[TICK-SUB] UNSUB {key}")
                 for key in new_syms:
                     try:
                         asset_type, sym = key.split(':', 1)
                         contract = create_contract(sym, asset_type)
                         await ib.qualifyContractsAsync(contract)
+                        if int(getattr(contract, 'conId', 0) or 0) <= 0:
+                            self._mark_failed(key, 'qualified contract has conId=0')
+                            continue
                         contracts_local[key] = contract
                         print(f"[TICK-SUB] Contract OK: {sym} ({asset_type}) conId={contract.conId}")
                         if self._mode == 'streaming':
@@ -223,10 +286,13 @@ class _TickSubscriber:
                         elif self._mode == 'hist_poll':
                             self._next_hist_poll = self._iterations
                             print(f"[TICK-SUB] HIST_POLL {sym} ({asset_type}) (zadna mkt sub potreba)")
+                    except ValueError as e:
+                        self._mark_failed(key, str(e))
                     except Exception as e:
                         print(f"[TICK-SUB] Subscribe error {key}: {e}")
                         with self._lock:
-                            self._pending.add(key)
+                            if key not in self._failed_keys and key not in self._unsubscribe_pending:
+                                self._pending.add(key)
                 await asyncio.sleep(1.0)
                 self._iterations += 1
                 if self._mode != 'hist_poll' and self._has_error(10089):
@@ -686,7 +752,7 @@ class IBConnector:
         if not self.is_connected(): return 0.0
         asset_type = normalize_asset_type(asset_type)
         sym = sanitize_symbol(symbol, asset_type)
-        self._tick_sub.subscribe(sym, asset_type)
+        self._tick_sub.set_primary_subscription(sym, asset_type)
         return self._tick_sub.get_price(sym, asset_type)
 
     # ------------------------------------------------------------------
@@ -698,7 +764,7 @@ class IBConnector:
         asset_type = normalize_asset_type(asset_type)
         sym = sanitize_symbol(symbol, asset_type)
         cache_symbol = get_cache_symbol(sym, asset_type)
-        self._tick_sub.subscribe(sym, asset_type)
+        self._tick_sub.set_primary_subscription(sym, asset_type)
         status = data_store.get_cache_status(cache_symbol, bar_size)
         if status['cached'] and status['is_fresh']:
             print(f"[CACHE] HIT: {sym} ({asset_type}) | {bar_size} | {status['total_bars']} bars | FRESH")
@@ -840,10 +906,12 @@ class IBConnector:
             result = []
             for fill in self.executions[-limit:]:
                 ed = fill.execution
+                contract = fill.contract
                 result.append({
                     'time':     (ed.time.strftime('%H:%M')
                                  if hasattr(ed.time, 'strftime') else str(ed.time)[:5]),
-                    'symbol':   fill.contract.symbol,
+                    'symbol':   get_display_symbol_from_contract(contract),
+                    'asset_type': asset_type_from_contract(contract),
                     'action':   ed.side,
                     'quantity': ed.shares,
                     'price':    f"${ed.price:.2f}",
@@ -852,9 +920,11 @@ class IBConnector:
             for trade in self.ib.trades():
                 if trade.orderStatus.status == 'Filled': continue
                 o = trade.order; s = trade.orderStatus
+                contract = trade.contract
                 result.append({
                     'time':     datetime.now().strftime('%H:%M'),
-                    'symbol':   trade.contract.symbol,
+                    'symbol':   get_display_symbol_from_contract(contract),
+                    'asset_type': asset_type_from_contract(contract),
                     'action':   o.action,
                     'quantity': o.totalQuantity,
                     'price':    'Market' if o.orderType == 'MKT' else f"Limit ${o.lmtPrice:.2f}",
