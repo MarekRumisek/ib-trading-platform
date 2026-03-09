@@ -897,14 +897,46 @@ class IBConnector:
             return list(self._positions_cache)
 
     # ------------------------------------------------------------------
+    # Avg cost from executions (fill_price + commission/shares)
+    # ------------------------------------------------------------------
+
+    def get_fill_avg_cost(self, symbol: str, asset_type: str = 'STOCK'):
+        """Return (avg_cost, commission) for the most recent fill of symbol.
+
+        Uses fresh reqExecutions() so the result is always up-to-date.
+        avg_cost = fill.execution.price + commission / shares  (IB convention)
+        Returns (None, None) when no fill is found or connector is not connected.
+        """
+        if not self.is_connected():
+            return None, None
+        try:
+            fills = self.ib.reqExecutions()
+            asset_type = normalize_asset_type(asset_type)
+            # Walk in reverse so we get the *latest* fill first
+            for fill in reversed(fills):
+                sym = get_display_symbol_from_contract(fill.contract)
+                at  = asset_type_from_contract(fill.contract)
+                if sym == symbol and at == asset_type:
+                    ed         = fill.execution
+                    commission = getattr(fill.commissionReport, 'commission', 0.0) or 0.0
+                    shares     = ed.shares or 1
+                    avg_cost   = round(ed.price + commission / shares, 6)
+                    print(f'[FILL] avg_cost for {sym}: fill_price={ed.price}'
+                          f' commission={commission} shares={shares} avg_cost={avg_cost}')
+                    return avg_cost, commission
+        except Exception as e:
+            print(f'[FILL] get_fill_avg_cost error: {e}')
+        return None, None
+
+    # ------------------------------------------------------------------
     # Recent orders
     # ------------------------------------------------------------------
 
     def get_recent_orders(self, limit=10):
         if not self.is_connected(): return []
         try:
-            print('[ORDERS] get_recent_orders — calling reqOpenOrders to refresh live status')
-            self.ib.reqOpenOrders()
+            print('[ORDERS] get_recent_orders — calling reqExecutions to refresh fills')
+            self.executions = self.ib.reqExecutions()
             result = []
             for fill in self.executions[-limit:]:
                 ed = fill.execution

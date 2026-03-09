@@ -266,8 +266,9 @@ def api_trades_active_lines():
     asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
     trades = []
 
-    # Issue #4: look up IB positions to use avgCost as entry line price
-    ib_positions = ib.get_positions() or [] if ib.is_connected() else []
+    # Issue #4 + #3: use avgCost from IB positions (live) or from stored avg_cost in trade record.
+    # Priority: IB live avgCost > stored avg_cost from fills > fill_price (entry_price).
+    ib_positions = ib.get_positions() if ib.is_connected() else []
 
     for t in trade_tracker.get_open_trades():
         if t.get('symbol') != sym:
@@ -277,10 +278,15 @@ def api_trades_active_lines():
         ib_pos = next((p for p in ib_positions if p['symbol'] == sym and
                        normalize_asset_type(p.get('asset_type', 'STOCK')) == asset_type), None)
         avg_cost_used = False
-        entry_price = t.get('entry_price')
+        # Fallback chain: IB live avgCost → stored avg_cost from fills → fill_price
         if ib_pos and ib_pos.get('avgCost'):
             entry_price = float(ib_pos['avgCost'])
             avg_cost_used = True
+        elif t.get('avg_cost'):
+            entry_price = float(t['avg_cost'])
+            avg_cost_used = True
+        else:
+            entry_price = t.get('entry_price')
         trades.append({
             'symbol': t.get('symbol'),
             'asset_type': normalize_asset_type(t.get('asset_type', 'STOCK')),
@@ -1017,19 +1023,18 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
                 print(f"[TRADE][WARN] CLOSE | id={existing.get('id')} failed during opposing match")
 
     if remaining_qty > 0:
-        # Issue #3: pass avg_cost from IB position if available
-        ib_positions = ib.get_positions() or []
-        ib_pos_new = next((p for p in ib_positions if p['symbol'] == symbol and
-                           normalize_asset_type(p.get('asset_type', 'STOCK')) == asset_type), None)
-        open_avg_cost = float(ib_pos_new['avgCost']) if ib_pos_new and ib_pos_new.get('avgCost') else None
-        print(f'[TRADE] open_trade avg_cost from IB: {open_avg_cost}')
+        # Issue #3 + #2: use avg_cost from execution fills (fill_price + commission/shares)
+        # This is more reliable than the positions cache which may be stale right after fill.
+        open_avg_cost, open_commission = ib.get_fill_avg_cost(symbol, asset_type)
+        print(f'[TRADE] open_trade avg_cost from fills: {open_avg_cost} commission: {open_commission}')
         trade_tracker.open_trade(
             symbol=symbol, side=action, qty=remaining_qty,
             entry_price=fill_price,
             asset_type=asset_type,
             sl=sl, tp=tp,
             note=note or '',
-            avg_cost=open_avg_cost
+            avg_cost=open_avg_cost,
+            commission=open_commission
         )
         if tracker_status in ('closed', 'partially_closed'):
             tracker_status = 'flipped'
@@ -1319,8 +1324,10 @@ def update_trade_history(_n, _refresh):
         pnl_s  = f"{'+'if (pnl or 0)>=0 else ''}${pnl:.2f}" if pnl is not None else '–'
         sl_txt = f"${t['sl']:.2f}"  if t.get('sl')  else '–'
         tp_txt = f"${t['tp']:.2f}"  if t.get('tp')  else '–'
-        # Issue #3: commission = (avg_cost - entry_price) * qty
-        if t.get('avg_cost') and t.get('entry_price') and t.get('qty'):
+        # Commission: use stored value if available, fall back to (avg_cost - entry_price) * qty
+        if t.get('commission') is not None:
+            comm_s = f"-${abs(float(t['commission'])):.4f}"
+        elif t.get('avg_cost') and t.get('entry_price') and t.get('qty'):
             commission = round((float(t['avg_cost']) - float(t['entry_price'])) * float(t['qty']), 4)
             comm_s = f"-${abs(commission):.4f}"
         else:

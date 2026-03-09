@@ -83,7 +83,8 @@ class TradeTracker:
                    sl: float = None,
                    tp: float = None,
                    note: str = '',
-                   avg_cost: float = None) -> dict:
+                   avg_cost: float = None,
+                   commission: float = None) -> dict:
         """Zaznamenat nový otevřený obchod. Vrátí záznam."""
         trade = {
             'id':           self._make_id(symbol),
@@ -94,6 +95,7 @@ class TradeTracker:
             'asset_type':   normalize_asset_type(asset_type),
             'entry_price':  float(entry_price) if entry_price else None,
             'avg_cost':     float(avg_cost) if avg_cost else None,
+            'commission':   float(commission) if commission else None,
             'entry_time':   int(time.time()),
             'sl':           float(sl) if sl else None,
             'tp':           float(tp) if tp else None,
