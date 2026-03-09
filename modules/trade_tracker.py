@@ -23,6 +23,7 @@ import json
 import os
 import threading
 import time
+from contract_utils import normalize_asset_type
 from datetime import datetime
 
 _DEFAULT_PATH = os.path.join('data', 'trades.json')
@@ -78,6 +79,7 @@ class TradeTracker:
                    qty: float,
                    entry_price: float,
                    order_type: str = 'MARKET',
+                   asset_type: str = 'STOCK',
                    sl: float = None,
                    tp: float = None,
                    note: str = '') -> dict:
@@ -88,6 +90,7 @@ class TradeTracker:
             'side':         side.upper(),
             'qty':          float(qty),
             'order_type':   order_type.upper(),
+            'asset_type':   normalize_asset_type(asset_type),
             'entry_price':  float(entry_price) if entry_price else None,
             'entry_time':   int(time.time()),
             'sl':           float(sl) if sl else None,
@@ -103,6 +106,7 @@ class TradeTracker:
             f"{_D} OPEN  | id={trade['id']} "
             f"{side.upper()} {qty}x {symbol.upper()} "
             f"@ entry={entry_price} "
+            f"asset={normalize_asset_type(asset_type)} "
             f"SL={sl if sl else 'none'} "
             f"TP={tp if tp else 'none'} "
             f"type={order_type.upper()}"

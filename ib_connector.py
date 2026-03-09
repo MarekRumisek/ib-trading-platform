@@ -21,8 +21,19 @@ v2.9.4  OPRAVA: _positions_bg_loop ma vlastni IB() instanci (clientId+3)
         -> odstranen _ib_sleep_lock a _ib_sleep_safe() (uz nepotrebne)
 """
 
-from ib_async import IB, Stock, MarketOrder, LimitOrder
+from ib_async import IB, MarketOrder, LimitOrder
 from datetime import datetime, timedelta
+from contract_utils import (
+    asset_type_from_contract,
+    create_contract,
+    get_display_symbol_from_contract,
+    get_cache_symbol,
+    get_contract_key,
+    get_history_what_to_show,
+    normalize_asset_type,
+    sanitize_symbol,
+    use_regular_trading_hours,
+)
 from modules.data_store import data_store
 import config
 import time
@@ -59,18 +70,20 @@ class _TickSubscriber:
         self._thread.start()
         print(f"[TICK-SUB] Worker spusten (clientId={client_id})")
 
-    def get_price(self, symbol: str) -> float:
-        return float(self._latest.get(symbol.upper(), {}).get('price', 0.0))
+    def get_price(self, symbol: str, asset_type: str = 'STOCK') -> float:
+        key = get_contract_key(symbol, asset_type)
+        return float(self._latest.get(key, {}).get('price', 0.0))
 
-    def get_ticker_data(self, symbol: str):
-        info = self._latest.get(symbol.upper())
+    def get_ticker_data(self, symbol: str, asset_type: str = 'STOCK'):
+        key = get_contract_key(symbol, asset_type)
+        info = self._latest.get(key)
         if not info or info.get('price', 0) <= 0:
             return None
         return info.copy()
 
-    def get_raw_data(self, symbol: str) -> dict:
-        sym    = symbol.upper()
-        ticker = self._tickers.get(sym)
+    def get_raw_data(self, symbol: str, asset_type: str = 'STOCK') -> dict:
+        key    = get_contract_key(symbol, asset_type)
+        ticker = self._tickers.get(key)
         if not ticker:
             return {'error': 'not_subscribed',
                     'subscribed': list(self._tickers.keys()),
@@ -106,9 +119,9 @@ class _TickSubscriber:
     def get_last_errors(self) -> list:
         return list(self._last_errors)
 
-    def subscribe(self, symbol: str):
+    def subscribe(self, symbol: str, asset_type: str = 'STOCK'):
         with self._lock:
-            self._pending.add(symbol.upper())
+            self._pending.add(get_contract_key(symbol, asset_type))
 
     @property
     def is_connected(self) -> bool: return self._connected
@@ -189,30 +202,31 @@ class _TickSubscriber:
                 with self._lock:
                     new_syms = list(self._pending - set(contracts_local.keys()))
                     self._pending.clear()
-                for sym in new_syms:
+                for key in new_syms:
                     try:
-                        contract = Stock(sym, 'SMART', 'USD')
+                        asset_type, sym = key.split(':', 1)
+                        contract = create_contract(sym, asset_type)
                         await ib.qualifyContractsAsync(contract)
-                        contracts_local[sym] = contract
-                        print(f"[TICK-SUB] Contract OK: {sym} conId={contract.conId}")
+                        contracts_local[key] = contract
+                        print(f"[TICK-SUB] Contract OK: {sym} ({asset_type}) conId={contract.conId}")
                         if self._mode == 'streaming':
                             ticker = ib.reqMktData(contract, '', False, False)
-                            tickers_local[sym] = ticker
-                            def make_handler(s):
+                            tickers_local[key] = ticker
+                            def make_handler(contract_key):
                                 def on_ticker(t):
                                     p = self._extract_price(t)
                                     if p > 0:
-                                        self._latest[s] = self._make_latest(t, p)
+                                        self._latest[contract_key] = self._make_latest(t, p)
                                 return on_ticker
-                            ticker.updateEvent += make_handler(sym)
-                            print(f"[TICK-SUB] STREAM {sym}")
+                            ticker.updateEvent += make_handler(key)
+                            print(f"[TICK-SUB] STREAM {sym} ({asset_type})")
                         elif self._mode == 'hist_poll':
                             self._next_hist_poll = self._iterations
-                            print(f"[TICK-SUB] HIST_POLL {sym} (zadna mkt sub potreba)")
+                            print(f"[TICK-SUB] HIST_POLL {sym} ({asset_type}) (zadna mkt sub potreba)")
                     except Exception as e:
-                        print(f"[TICK-SUB] Subscribe error {sym}: {e}")
+                        print(f"[TICK-SUB] Subscribe error {key}: {e}")
                         with self._lock:
-                            self._pending.add(sym)
+                            self._pending.add(key)
                 await asyncio.sleep(1.0)
                 self._iterations += 1
                 if self._mode != 'hist_poll' and self._has_error(10089):
@@ -225,11 +239,11 @@ class _TickSubscriber:
                     self._mdt            = 99
                     self._next_hist_poll = self._iterations
                 elif self._mode == 'streaming':
-                    for sym, t in list(tickers_local.items()):
-                        if self._latest.get(sym, {}).get('price', 0) <= 0:
+                    for key, t in list(tickers_local.items()):
+                        if self._latest.get(key, {}).get('price', 0) <= 0:
                             p = self._extract_price(t)
                             if p > 0:
-                                self._latest[sym] = self._make_latest(t, p)
+                                self._latest[key] = self._make_latest(t, p)
                     if self._iterations == 15 and contracts_local:
                         no_data = all(
                             self._latest.get(s, {}).get('price', 0) <= 0
@@ -244,17 +258,17 @@ class _TickSubscriber:
                             self._mode = 'snapshot'
                             self._mdt  = 40
                 elif self._mode == 'snapshot' and self._iterations % 15 == 0:
-                    for sym, contract in list(contracts_local.items()):
+                    for key, contract in list(contracts_local.items()):
                         try:
                             snaps = await ib.reqTickersAsync(contract)
                             if snaps:
                                 t = snaps[0]
                                 p = self._extract_price(t)
                                 if p > 0:
-                                    self._latest[sym] = self._make_latest(t, p)
-                                    print(f"[TICK-SUB] SNAP {sym}: p={p}")
+                                    self._latest[key] = self._make_latest(t, p)
+                                    print(f"[TICK-SUB] SNAP {key}: p={p}")
                         except Exception as e:
-                            print(f"[TICK-SUB] Snapshot err {sym}: {e}")
+                            print(f"[TICK-SUB] Snapshot err {key}: {e}")
                     if self._has_error(10089):
                         print("[TICK-SUB] Snapshot 10089 -> HIST_POLL")
                         self._mode           = 'hist_poll'
@@ -263,31 +277,33 @@ class _TickSubscriber:
                 elif self._mode == 'hist_poll' and self._iterations >= self._next_hist_poll:
                     self._next_hist_poll = self._iterations + 30
                     ib.reqMarketDataType(4)
-                    for sym, contract in list(contracts_local.items()):
+                    for key, contract in list(contracts_local.items()):
                         try:
+                            asset_type, sym = key.split(':', 1)
                             bars = await ib.reqHistoricalDataAsync(
                                 contract, endDateTime='',
                                 durationStr='3600 S', barSizeSetting='1 min',
-                                whatToShow='TRADES', useRTH=True, formatDate=1
+                                whatToShow=get_history_what_to_show(asset_type),
+                                useRTH=use_regular_trading_hours(asset_type), formatDate=1
                             )
                             if bars:
                                 price = float(bars[-1].close)
                                 bar_t = bars[-1].date
-                                self._latest[sym] = {
+                                self._latest[key] = {
                                     'price':  price, 'last': price,
                                     'close':  float(bars[-2].close) if len(bars) > 1 else price,
                                     'bid':    0.0, 'ask': 0.0,
                                     'volume': int(bars[-1].volume) if bars[-1].volume else 0,
-                                    'mdt': 99, 'mode': 'hist_poll',
+                                    'mdt': 99, 'mode': 'hist_poll', 'asset_type': asset_type,
                                     'bar_time': str(bar_t),
                                     'iterations': self._iterations, 'ts': time.time()
                                 }
-                                print(f"[TICK-SUB] HIST_POLL {sym}: close={price:.2f}  bar={bar_t}  ({len(bars)} bars)")
+                                print(f"[TICK-SUB] HIST_POLL {sym} ({asset_type}): close={price:.2f}  bar={bar_t}  ({len(bars)} bars)")
                             else:
-                                print(f"[TICK-SUB] HIST_POLL {sym}: stale prazdne, retry za 5s")
+                                print(f"[TICK-SUB] HIST_POLL {sym} ({asset_type}): stale prazdne, retry za 5s")
                                 self._next_hist_poll = self._iterations + 5
                         except Exception as e:
-                            print(f"[TICK-SUB] HIST_POLL err {sym}: {e}")
+                            print(f"[TICK-SUB] HIST_POLL err {key}: {e}")
                             self._next_hist_poll = self._iterations + 5
         finally:
             self._connected = False
@@ -320,17 +336,19 @@ class _HistWorker:
     def get_deep_load_status(self):
         return self._deep_load_status.copy()
 
-    def start_deep_load(self, symbol, timeframe):
-        key = f"{symbol}_{timeframe}"
+    def start_deep_load(self, symbol, timeframe, asset_type='STOCK'):
+        asset_type = normalize_asset_type(asset_type)
+        symbol = sanitize_symbol(symbol, asset_type)
+        key = f"{asset_type}:{symbol}_{timeframe}"
         if self._deep_load_status.get(key, {}).get('status') == 'running':
             return False
         self._deep_load_status[key] = {'progress': '0%', 'status': 'running', 'msg': 'Inicializace...'}
-        self._queue.put(('deep_load', symbol, timeframe, key, None, None))
+        self._queue.put(('deep_load', symbol, timeframe, key, asset_type, None, None))
         return True
 
-    def fetch(self, symbol, duration='1 D', bar_size='5 mins', timeout=15):
+    def fetch(self, symbol, duration='1 D', bar_size='5 mins', asset_type='STOCK', timeout=15):
         result, done = [], threading.Event()
-        self._queue.put(('fetch', symbol, duration, bar_size, result, done))
+        self._queue.put(('fetch', symbol, duration, bar_size, asset_type, result, done))
         done.wait(timeout=timeout)
         return result
 
@@ -345,22 +363,22 @@ class _HistWorker:
             if item is None: break
             cmd = item[0]
             if cmd == 'fetch':
-                _, symbol, duration, bar_size, result, done = item
+                _, symbol, duration, bar_size, asset_type, result, done = item
                 try:
-                    bars = self._fetch_fresh(symbol, duration, bar_size)
+                    bars = self._fetch_fresh(symbol, duration, bar_size, asset_type)
                     result.extend(bars)
                 except Exception as e:
                     print(f"[HIST] Chyba pro {symbol}: {e}")
                 finally:
                     done.set()
             elif cmd == 'deep_load':
-                _, symbol, timeframe, key, _, _ = item
+                _, symbol, timeframe, key, asset_type, _, _ = item
                 try:
-                    self._run_deep_load(symbol, timeframe, key)
+                    self._run_deep_load(symbol, timeframe, key, asset_type)
                 except Exception as e:
                     self._deep_load_status[key] = {'progress': 'ERROR', 'status': 'error', 'msg': str(e)}
 
-    def _run_deep_load(self, symbol, timeframe, key):
+    def _run_deep_load(self, symbol, timeframe, key, asset_type='STOCK'):
         CHUNKS = {
             '1 min':  {'duration': '5 D',  'steps': 6},
             '5 mins': {'duration': '10 D', 'steps': 6},
@@ -376,7 +394,7 @@ class _HistWorker:
         try:
             ib.connect(self._host, self._port, clientId=self._client_id + 10, timeout=10)
             ib.reqMarketDataType(4)
-            contract = Stock(symbol, 'SMART', 'USD')
+            contract = create_contract(symbol, asset_type)
             ib.qualifyContracts(contract)
             end_date = ''
             for i in range(steps):
@@ -388,8 +406,9 @@ class _HistWorker:
                 print(f"[DEEP LOAD] {symbol} {timeframe} - Krok {i+1}/{steps}")
                 bars = ib.reqHistoricalData(
                     contract, endDateTime=end_date, durationStr=duration_str,
-                    barSizeSetting=timeframe, whatToShow='TRADES',
-                    useRTH=True, formatDate=1, timeout=30
+                    barSizeSetting=timeframe,
+                    whatToShow=get_history_what_to_show(asset_type),
+                    useRTH=use_regular_trading_hours(asset_type), formatDate=1, timeout=30
                 )
                 if not bars:
                     print(f"[DEEP LOAD] Zadne dalsi data z IB pro {symbol}.")
@@ -400,7 +419,7 @@ class _HistWorker:
                     'low':    b.low,  'close': b.close,
                     'volume': b.volume
                 } for b in bars]
-                data_store.append_bars(symbol, timeframe, result)
+                data_store.append_bars(get_cache_symbol(symbol, asset_type), timeframe, result)
                 first_bar_time = bars[0].date
                 if hasattr(first_bar_time, 'timestamp'):
                     end_date = first_bar_time - timedelta(seconds=1)
@@ -414,17 +433,18 @@ class _HistWorker:
             try: ib.disconnect()
             except: pass
 
-    def _fetch_fresh(self, symbol, duration, bar_size):
+    def _fetch_fresh(self, symbol, duration, bar_size, asset_type='STOCK'):
         ib = IB()
         try:
             ib.connect(self._host, self._port, clientId=self._client_id, timeout=10)
             ib.reqMarketDataType(4)
-            contract = Stock(symbol, 'SMART', 'USD')
+            contract = create_contract(symbol, asset_type)
             ib.qualifyContracts(contract)
             bars = ib.reqHistoricalData(
                 contract, endDateTime='', durationStr=duration,
-                barSizeSetting=bar_size, whatToShow='TRADES',
-                useRTH=True, formatDate=1, timeout=12
+                barSizeSetting=bar_size,
+                whatToShow=get_history_what_to_show(asset_type),
+                useRTH=use_regular_trading_hours(asset_type), formatDate=1, timeout=12
             )
             result = [{
                 'time':   _bar_date_to_unix(b.date),
@@ -432,7 +452,7 @@ class _HistWorker:
                 'low':    b.low,  'close': b.close,
                 'volume': b.volume
             } for b in bars]
-            print(f"[HIST] OK: {len(result)} baru pro {symbol}")
+            print(f"[HIST] OK: {len(result)} baru pro {symbol} ({normalize_asset_type(asset_type)})")
             return result
         finally:
             try: ib.disconnect()
@@ -535,13 +555,15 @@ class IBConnector:
                 for pos in raw:
                     if pos.position == 0:
                         continue
-                    sym  = pos.contract.symbol
-                    cp   = self._tick_sub.get_price(sym) or pos.avgCost
+                    sym        = get_display_symbol_from_contract(pos.contract)
+                    asset_type = asset_type_from_contract(pos.contract)
+                    cp         = self._tick_sub.get_price(sym, asset_type) or pos.avgCost
                     mv   = pos.position * cp
                     cb   = pos.position * pos.avgCost
                     upnl = mv - cb
                     result.append({
                         'symbol':             sym,
+                        'asset_type':         asset_type,
                         'position':           pos.position,
                         'avg_cost':           pos.avgCost,
                         'market_price':       cp,
@@ -617,13 +639,15 @@ class IBConnector:
             for pos in raw:
                 if pos.position == 0:
                     continue
-                sym  = pos.contract.symbol
-                cp   = self._tick_sub.get_price(sym) or pos.avgCost
+                sym        = get_display_symbol_from_contract(pos.contract)
+                asset_type = asset_type_from_contract(pos.contract)
+                cp         = self._tick_sub.get_price(sym, asset_type) or pos.avgCost
                 mv   = pos.position * cp
                 cb   = pos.position * pos.avgCost
                 upnl = mv - cb
                 result.append({
                     'symbol':             sym,
+                    'asset_type':         asset_type,
                     'position':           pos.position,
                     'avg_cost':           pos.avgCost,
                     'market_price':       cp,
@@ -649,49 +673,55 @@ class IBConnector:
     # Ticker / price
     # ------------------------------------------------------------------
 
-    def get_ticker(self, symbol):
+    def get_ticker(self, symbol, asset_type='STOCK'):
         if not self.is_connected(): return None
-        sym = symbol.upper()
-        self._tick_sub.subscribe(sym)
-        data = self._tick_sub.get_ticker_data(sym)
+        asset_type = normalize_asset_type(asset_type)
+        sym = sanitize_symbol(symbol, asset_type)
+        self._tick_sub.subscribe(sym, asset_type)
+        data = self._tick_sub.get_ticker_data(sym, asset_type)
         if data: return data
-        return {'price': 0, 'last': 0, 'bid': 0, 'ask': 0, 'close': 0, 'volume': 0}
+        return {'price': 0, 'last': 0, 'bid': 0, 'ask': 0, 'close': 0, 'volume': 0, 'asset_type': asset_type}
 
-    def get_latest_price(self, symbol):
+    def get_latest_price(self, symbol, asset_type='STOCK'):
         if not self.is_connected(): return 0.0
-        sym = symbol.upper()
-        self._tick_sub.subscribe(sym)
-        return self._tick_sub.get_price(sym)
+        asset_type = normalize_asset_type(asset_type)
+        sym = sanitize_symbol(symbol, asset_type)
+        self._tick_sub.subscribe(sym, asset_type)
+        return self._tick_sub.get_price(sym, asset_type)
 
     # ------------------------------------------------------------------
     # Historical data
     # ------------------------------------------------------------------
 
-    def get_historical_data(self, symbol, duration='1 D', bar_size='5 mins'):
+    def get_historical_data(self, symbol, duration='1 D', bar_size='5 mins', asset_type='STOCK'):
         if not self.is_connected(): return []
-        sym = symbol.upper()
-        self._tick_sub.subscribe(sym)
-        status = data_store.get_cache_status(sym, bar_size)
+        asset_type = normalize_asset_type(asset_type)
+        sym = sanitize_symbol(symbol, asset_type)
+        cache_symbol = get_cache_symbol(sym, asset_type)
+        self._tick_sub.subscribe(sym, asset_type)
+        status = data_store.get_cache_status(cache_symbol, bar_size)
         if status['cached'] and status['is_fresh']:
-            print(f"[CACHE] HIT: {sym} | {bar_size} | {status['total_bars']} bars | FRESH")
-            return data_store.get_bars(sym, bar_size)
+            print(f"[CACHE] HIT: {sym} ({asset_type}) | {bar_size} | {status['total_bars']} bars | FRESH")
+            return data_store.get_bars(cache_symbol, bar_size)
         fetch_duration = duration
         if status['cached'] and status['age_seconds'] < 86400 * 7:
             missing_sec    = status['age_seconds']
             fetch_duration = f"{int(missing_sec + 3600)} S"
-            print(f"[CACHE] INCR: {sym} | {bar_size} | {status['total_bars']} bars existuji | Dotahuji chybejicich {fetch_duration}")
+            print(f"[CACHE] INCR: {sym} ({asset_type}) | {bar_size} | {status['total_bars']} bars existuji | Dotahuji chybejicich {fetch_duration}")
         else:
-            print(f"[CACHE] MISS/STALE: {sym} | {bar_size} | Stahuji celou defaultni delku: {duration}")
-        new_bars = self._hist_worker.fetch(sym, fetch_duration, bar_size)
+            print(f"[CACHE] MISS/STALE: {sym} ({asset_type}) | {bar_size} | Stahuji celou defaultni delku: {duration}")
+        new_bars = self._hist_worker.fetch(sym, fetch_duration, bar_size, asset_type)
         if new_bars:
-            data_store.append_bars(sym, bar_size, new_bars)
-        return data_store.get_bars(sym, bar_size)
+            data_store.append_bars(cache_symbol, bar_size, new_bars)
+        return data_store.get_bars(cache_symbol, bar_size)
 
-    def get_deep_load_status(self, symbol, timeframe):
-        return self._hist_worker.get_deep_load_status().get(f"{symbol}_{timeframe}", {'status': 'idle'})
+    def get_deep_load_status(self, symbol, timeframe, asset_type='STOCK'):
+        asset_type = normalize_asset_type(asset_type)
+        sym = sanitize_symbol(symbol, asset_type)
+        return self._hist_worker.get_deep_load_status().get(f"{asset_type}:{sym}_{timeframe}", {'status': 'idle'})
 
-    def start_deep_load(self, symbol, timeframe):
-        return self._hist_worker.start_deep_load(symbol, timeframe)
+    def start_deep_load(self, symbol, timeframe, asset_type='STOCK'):
+        return self._hist_worker.start_deep_load(symbol, timeframe, asset_type)
 
     # ------------------------------------------------------------------
     # Account
@@ -718,7 +748,7 @@ class IBConnector:
     # ------------------------------------------------------------------
 
     def place_order(self, symbol, action, quantity, order_type='MARKET',
-                    limit_price=None, timeout=None):
+                    limit_price=None, timeout=None, asset_type='STOCK'):
         """
         Odesle order. self.ib.sleep() je OK protoze place_order() bezi
         v main/Flask threadu ktery vlastni self.ib.
@@ -729,7 +759,12 @@ class IBConnector:
         if timeout is None:
             timeout = config.ORDER_TIMEOUT
         try:
-            contract = Stock(symbol, 'SMART', 'USD')
+            asset_type = normalize_asset_type(asset_type)
+            contract = create_contract(symbol, asset_type)
+            qualified = self.ib.qualifyContracts(contract)
+            if qualified:
+                contract = qualified[0]
+            print(f"  [ORDER] Contract: {sanitize_symbol(symbol, asset_type)} ({asset_type})")
             order    = (LimitOrder(action, quantity, limit_price)
                         if order_type == 'LIMIT' else MarketOrder(action, quantity))
             order.transmit   = True

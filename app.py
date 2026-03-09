@@ -6,6 +6,7 @@ import dash
 from dash import dcc, html, Input, Output, State
 from datetime import datetime, timedelta
 from flask import jsonify, request as freq
+from contract_utils import create_contract, get_cache_symbol, normalize_asset_type
 from ib_connector import IBConnector
 from order_handler import OrderHandler
 import config
@@ -45,7 +46,7 @@ order_handler = None
 server = app.server
 
 
-def submit_market_order(symbol, action, quantity):
+def submit_market_order(symbol, action, quantity, asset_type='STOCK'):
     global order_handler
 
     if not order_handler or not order_handler.running:
@@ -53,6 +54,7 @@ def submit_market_order(symbol, action, quantity):
 
     return order_handler.place_order_async(
         symbol=(symbol or '').upper(),
+        asset_type=normalize_asset_type(asset_type),
         action=action,
         quantity=quantity,
         order_type='MARKET'
@@ -78,29 +80,33 @@ DURATION_MAP = {
 
 @server.route('/api/tick/<symbol>')
 def get_tick(symbol):
-    sym   = symbol.upper()
-    price = ib.get_latest_price(sym)
-    return jsonify({'time': int(datetime.now().timestamp()), 'price': price})
+    sym        = symbol.upper()
+    asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
+    price      = ib.get_latest_price(sym, asset_type)
+    return jsonify({'time': int(datetime.now().timestamp()), 'price': price, 'asset_type': asset_type})
 
 @server.route('/api/deep_load_status/<symbol>/<tf>')
 def deep_load_status(symbol, tf):
-    return jsonify(ib.get_deep_load_status(symbol.upper(), tf.replace('_', ' ')))
+    asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
+    return jsonify(ib.get_deep_load_status(symbol.upper(), tf.replace('_', ' '), asset_type))
 
 
 @server.route('/api/diag/tick/<symbol>')
 def api_diag_tick(symbol):
-    sym = symbol.upper()
-    ts  = ib._tick_sub
+    sym        = symbol.upper()
+    asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
+    ts         = ib._tick_sub
     return jsonify({
         'symbol':             sym,
+        'asset_type':         asset_type,
         'tick_sub_connected': ts.is_connected,
         'iterations':         ts.iterations,
         'mdt':                ts._mdt,
         'mode':               ts.mode,
         'subscribed_symbols': ts.subscribed_symbols,
         'pending':            list(ts._pending),
-        'latest':             ts._latest.get(sym, {}),
-        'raw_fields':         ts.get_raw_data(sym),
+        'latest':             ts.get_ticker_data(sym, asset_type) or {},
+        'raw_fields':         ts.get_raw_data(sym, asset_type),
         'ib_errors':          ts.get_last_errors(),
         'time':               datetime.now().strftime('%H:%M:%S')
     })
@@ -109,10 +115,11 @@ def api_diag_tick(symbol):
 @server.route('/api/test/snapshot/<symbol>')
 def api_test_snapshot(symbol):
     import asyncio
-    from ib_async import IB, Stock
+    from ib_async import IB
 
-    sym    = symbol.upper()
-    result = {}
+    sym        = symbol.upper()
+    asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
+    result     = {}
 
     async def _do_snapshot():
         ib_test = IB()
@@ -126,7 +133,7 @@ def api_test_snapshot(symbol):
                 clientId=config.IB_CLIENT_ID + 9
             )
             ib_test.reqMarketDataType(3)
-            contract = Stock(sym, 'SMART', 'USD')
+            contract = create_contract(sym, asset_type)
             await ib_test.qualifyContractsAsync(contract)
             snaps = await ib_test.reqTickersAsync(contract)
             if snaps:
@@ -138,6 +145,7 @@ def api_test_snapshot(symbol):
                 result.update({
                     'ok':     True,
                     'symbol': sym,
+                    'asset_type': asset_type,
                     'conId':  contract.conId,
                     'last':   s(t.last),
                     'close':  s(t.close),
@@ -182,12 +190,14 @@ def api_diag():
 def api_test_hist(symbol):
     t0 = time.time()
     try:
+        asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
         if not ib.is_connected():
             return jsonify({'ok': False, 'error': 'NOT CONNECTED', 'elapsed': 0})
-        bars    = ib.get_historical_data(symbol.upper(), '2 D', '5 mins')
+        bars    = ib.get_historical_data(symbol.upper(), '2 D', '5 mins', asset_type)
         elapsed = round(time.time() - t0, 2)
         if bars:
             return jsonify({'ok': True, 'bars': len(bars), 'elapsed': elapsed,
+                            'asset_type': asset_type,
                             'first': bars[0], 'last': bars[-1]})
         return jsonify({'ok': False, 'error': 'EMPTY', 'elapsed': elapsed})
     except Exception as e:
@@ -204,14 +214,15 @@ def api_cb_status():
 def api_indicators(symbol, tf):
     sym       = symbol.upper()
     timeframe = tf.replace('_', ' ')
+    asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
     active    = [x.strip() for x in freq.args.get('active', 'ema,rsi').split(',') if x.strip()]
 
-    bars = data_store.get_bars(sym, timeframe)
+    bars = data_store.get_bars(get_cache_symbol(sym, asset_type), timeframe)
     if not bars:
         return jsonify({'ok': False, 'error': 'no_data', 'bars': 0,
-                        'symbol': sym, 'tf': timeframe})
+                        'symbol': sym, 'asset_type': asset_type, 'tf': timeframe})
 
-    result = {'ok': True, 'symbol': sym, 'tf': timeframe, 'bars': len(bars)}
+    result = {'ok': True, 'symbol': sym, 'asset_type': asset_type, 'tf': timeframe, 'bars': len(bars)}
     try:
         if 'sma' in active:
             p = int(freq.args.get('sma_p', 20))
@@ -267,7 +278,7 @@ def api_trade_close(trade_id):
     if not exit_price:
         trade = trade_tracker.get_trade(trade_id)
         if trade:
-            ticker = ib.get_ticker(trade['symbol'])
+            ticker = ib.get_ticker(trade['symbol'], trade.get('asset_type', 'STOCK'))
             if ticker:
                 exit_price = ticker.get('price') or ticker.get('last') or trade.get('entry_price')
 
@@ -286,10 +297,10 @@ def api_trade_close(trade_id):
 @server.route('/api/trades/close_all', methods=['POST'])
 def api_trades_close_all():
     open_trades  = trade_tracker.get_open_trades()
-    symbols      = list({t['symbol'] for t in open_trades})
+    symbols      = list({(t['symbol'], t.get('asset_type', 'STOCK')) for t in open_trades})
     exit_prices  = {}
-    for sym in symbols:
-        ticker = ib.get_ticker(sym)
+    for sym, asset_type in symbols:
+        ticker = ib.get_ticker(sym, asset_type)
         if ticker:
             p = ticker.get('price') or ticker.get('last')
             if p:
@@ -299,7 +310,7 @@ def api_trades_close_all():
 
 
 # ================================================================
-app_state = {'current_symbol': 'AAPL', 'current_timeframe': '5 mins'}
+app_state = {'current_symbol': 'AAPL', 'current_timeframe': '5 mins', 'current_asset_type': 'STOCK'}
 
 # ========== LAYOUT ==========
 
@@ -335,6 +346,19 @@ app.layout = html.Div([
                 style={'width': '150px', 'padding': '8px', 'borderRadius': '5px',
                        'border': '2px solid #667eea', 'background': '#1e1e2e',
                        'color': 'white', 'fontSize': '16px'}
+            ),
+            dcc.Dropdown(
+                id='asset-type-select',
+                options=[
+                    {'label': 'Stock', 'value': 'STOCK'},
+                    {'label': 'Forex', 'value': 'FOREX'},
+                    {'label': 'Crypto', 'value': 'CRYPTO'},
+                ],
+                value='STOCK',
+                clearable=False,
+                searchable=False,
+                style={'width': '140px', 'display': 'inline-block', 'marginLeft': '10px',
+                       'verticalAlign': 'middle', 'color': '#111'}
             ),
             html.Button(
                 'Load Chart', id='load-chart-btn', n_clicks=0,
@@ -685,10 +709,11 @@ def update_account_info(n):
      Input('tf-15m', 'n_clicks'), Input('tf-30m', 'n_clicks'),
      Input('tf-1h',  'n_clicks'), Input('tf-1d',  'n_clicks'),
      Input('deep-load-finished-trigger', 'data')],
-    State('symbol-input', 'value'),
+    [State('symbol-input', 'value'),
+     State('asset-type-select', 'value')],
     prevent_initial_call=True
 )
-def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger, symbol):
+def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger, symbol, asset_type):
     global _cb_status
     try:
         ctx = dash.callback_context
@@ -699,21 +724,23 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger, s
                   'tf-1h': '1 hour', 'tf-1d': '1 day'}
         if btn in tf_map:
             app_state['current_timeframe'] = tf_map[btn]
-        symbol   = (symbol or 'AAPL').upper()
+        symbol     = (symbol or 'AAPL').upper()
+        asset_type = normalize_asset_type(asset_type)
         app_state['current_symbol'] = symbol
-        tf       = app_state['current_timeframe']
-        duration = DURATION_MAP.get(tf, '1 D')
-        _cb_status = {'step': 'started', 'symbol': symbol, 'tf': tf,
+        app_state['current_asset_type'] = asset_type
+        tf         = app_state['current_timeframe']
+        duration   = DURATION_MAP.get(tf, '1 D')
+        _cb_status = {'step': 'started', 'symbol': symbol, 'asset_type': asset_type, 'tf': tf,
                       'bars': None, 'error': None,
                       'ts': datetime.now().strftime('%H:%M:%S')}
-        print(f"[CB] START: {symbol} | {tf} | duration={duration} | Trigger={btn}")
+        print(f"[CB] START: {symbol} ({asset_type}) | {tf} | duration={duration} | Trigger={btn}")
         _cb_status['step'] = 'requesting_IB'
-        bars = ib.get_historical_data(symbol, duration, tf)
+        bars = ib.get_historical_data(symbol, duration, tf, asset_type)
         _cb_status['step'] = 'IB_returned'
         _cb_status['bars'] = len(bars)
         print(f"[CB] IB/Cache returned {len(bars)} bars")
         _cb_status['step'] = 'done'
-        return {'symbol': symbol, 'timeframe': tf, 'bars': bars}
+        return {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars}
     except Exception as e:
         _cb_status['step'] = 'ERROR'
         _cb_status['error'] = str(e)
@@ -738,12 +765,15 @@ def update_debug_python(data):
 @app.callback(
     Output('deep-load-trigger-dummy', 'children'),
     Input('deep-load-btn', 'n_clicks'),
-    State('symbol-input', 'value')
+    [State('symbol-input', 'value'),
+     State('asset-type-select', 'value')]
 )
-def start_deep_load(n, symbol):
+def start_deep_load(n, symbol, asset_type):
     if n > 0 and symbol:
         tf = app_state.get('current_timeframe', '5 mins')
-        ib.start_deep_load(symbol.upper(), tf)
+        asset_type = normalize_asset_type(asset_type)
+        app_state['current_asset_type'] = asset_type
+        ib.start_deep_load(symbol.upper(), tf, asset_type)
     return dash.no_update
 
 
@@ -752,28 +782,30 @@ def start_deep_load(n, symbol):
      Output('deep-load-finished-trigger', 'data')],
     Input('cache-update-interval', 'n_intervals'),
     [State('symbol-input', 'value'),
+     State('asset-type-select', 'value'),
      State('deep-load-finished-trigger', 'data')]
 )
-def update_cache_status(n, symbol, last_dl_state):
+def update_cache_status(n, symbol, asset_type, last_dl_state):
     if not symbol: return "Vyberte symbol", dash.no_update
-    sym = symbol.upper()
-    tf  = app_state.get('current_timeframe', '5 mins')
-    dl_status        = ib.get_deep_load_status(sym, tf)
+    sym        = symbol.upper()
+    asset_type = normalize_asset_type(asset_type)
+    tf         = app_state.get('current_timeframe', '5 mins')
+    dl_status        = ib.get_deep_load_status(sym, tf, asset_type)
     current_dl_state = dl_status.get('status')
     trigger_refresh  = dash.no_update
     if current_dl_state == 'done':
-        new_dl_trigger = f"{sym}_{tf}_done_{time.time()}"
-        if not str(last_dl_state).startswith(f"{sym}_{tf}_done"):
+        new_dl_trigger = f"{asset_type}_{sym}_{tf}_done_{time.time()}"
+        if not str(last_dl_state).startswith(f"{asset_type}_{sym}_{tf}_done"):
             trigger_refresh = new_dl_trigger
             last_dl_state   = new_dl_trigger
     elif current_dl_state == 'running':
         last_dl_state = 'running'
     if current_dl_state == 'running':
         return html.Span(
-            f"⏳ Stahuji historii: {dl_status.get('progress', '0%')} ({dl_status.get('msg', '')})",
+            f"⏳ Stahuji historii: {sym} ({asset_type}) {dl_status.get('progress', '0%')} ({dl_status.get('msg', '')})",
             style={'color': '#ff9800'}
         ), trigger_refresh
-    status = data_store.get_cache_status(sym, tf)
+    status = data_store.get_cache_status(get_cache_symbol(sym, asset_type), tf)
     if not status['cached']:
         return html.Span('Cache: Prázdná', style={'color': '#888', 'background': '#333'}), trigger_refresh
     bars_str = f"{status['total_bars']:,}".replace(',', ' ')
@@ -841,6 +873,7 @@ app.clientside_callback(
      Output('trade-debug-store', 'data')],
     [Input('buy-btn', 'n_clicks'), Input('sell-btn', 'n_clicks')],
     [State('symbol-input',    'value'),
+     State('asset-type-select','value'),
      State('qty-custom',      'value'),
      State('sl-price-input',  'value'),
      State('sl-pct-input',    'value'),
@@ -849,7 +882,7 @@ app.clientside_callback(
      State('order-note-input','value'),
      State('trade-refresh-store', 'data')]
 )
-def place_order(buy_clicks, sell_clicks, symbol, quantity,
+def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
                 sl_price, sl_pct, tp_price, tp_pct, note, refresh_counter):
     ctx = dash.callback_context
     if not ctx.triggered:
@@ -862,12 +895,15 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity,
     else:
         return '', dash.no_update, dash.no_update
 
+    asset_type = normalize_asset_type(asset_type)
+    app_state['current_asset_type'] = asset_type
+
     if not ib.is_connected():
-        dbg = {'msg': f'[TRADE][ERR] {action} {symbol} — NOT CONNECTED', 'ts': time.time()}
+        dbg = {'msg': f'[TRADE][ERR] {action} {symbol} ({asset_type}) — NOT CONNECTED', 'ts': time.time()}
         return html.Div('❌ Not connected!',
                         style={'color': '#ef5350', 'fontWeight': 'bold'}), dash.no_update, dbg
 
-    ticker    = ib.get_ticker(symbol) or {}
+    ticker    = ib.get_ticker(symbol, asset_type) or {}
     cur_price = ticker.get('price') or ticker.get('last') or 0
 
     sl = None
@@ -884,9 +920,9 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity,
         mult = (1 + float(tp_pct) / 100) if action == 'BUY' else (1 - float(tp_pct) / 100)
         tp   = round(cur_price * mult, 2)
 
-    result = submit_market_order(symbol, action, quantity)
+    result = submit_market_order(symbol, action, quantity, asset_type)
     if not result['success']:
-        dbg = {'msg': f'[TRADE][ERR] {action} {quantity} {symbol} — {result["error"]}', 'ts': time.time()}
+        dbg = {'msg': f'[TRADE][ERR] {action} {quantity} {symbol} ({asset_type}) — {result["error"]}', 'ts': time.time()}
         return html.Div(f'❌ {result["error"]}',
                         style={'color': '#ef5350', 'fontWeight': 'bold'}), dash.no_update, dbg
 
@@ -894,19 +930,20 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity,
     trade_tracker.open_trade(
         symbol=symbol, side=action, qty=quantity,
         entry_price=fill_price,
+        asset_type=asset_type,
         sl=sl, tp=tp,
         note=note or ''
     )
 
     sl_txt  = f' | SL ${sl:.2f}' if sl else ''
     tp_txt  = f' | TP ${tp:.2f}' if tp else ''
-    dbg_msg = (f'[TRADE] {action} {quantity}x {symbol} @ Market'
+    dbg_msg = (f'[TRADE] {action} {quantity}x {symbol} ({asset_type}) @ Market'
                f' | fill=${fill_price:.2f}{sl_txt}{tp_txt}'
                f'{" | note: " + note if note else ""}')
     dbg = {'msg': dbg_msg, 'ts': time.time()}
 
     return (
-        html.Div(f'✅ {action} {quantity} {symbol} @ Market{sl_txt}{tp_txt}',
+        html.Div(f'✅ {action} {quantity} {symbol} ({asset_type}) @ Market{sl_txt}{tp_txt}',
                  style={'color': color, 'fontWeight': 'bold'}),
         (refresh_counter or 0) + 1,
         dbg
@@ -940,14 +977,15 @@ def close_all_positions(n, refresh_counter):
     for pos in positions:
         sym = pos['symbol']
         qty = abs(pos['position'])
+        asset_type = pos.get('asset_type', 'STOCK')
         if qty <= 0:
             continue
         action = 'SELL' if pos['position'] > 0 else 'BUY'
-        res = submit_market_order(sym, action, qty)
+        res = submit_market_order(sym, action, qty, asset_type)
         if res['success']:
             closed += 1
             closed_symbols.add(sym)
-            ticker = ib.get_ticker(sym) or {}
+            ticker = ib.get_ticker(sym, asset_type) or {}
             p      = ticker.get('price') or ticker.get('last')
             if p:
                 exit_prices[sym] = p
@@ -1024,7 +1062,7 @@ def update_positions_table(n, _refresh, _btn):
                 debug_lines.append(msg)
             else:
                 # Grace uplynula, opravdu orphan
-                ticker = ib.get_ticker(sym) or {}
+                ticker = ib.get_ticker(sym, tt.get('asset_type', 'STOCK')) or {}
                 exit_p = ticker.get('price') or ticker.get('last') or tt.get('entry_price', 0)
                 trade_tracker.close_trade(tt['id'], exit_p)
                 del open_trades[sym]
@@ -1054,12 +1092,13 @@ def update_positions_table(n, _refresh, _btn):
         pnl_c = '#26a69a' if pos['unrealized_pnl'] >= 0 else '#ef5350'
         sym   = pos['symbol']
         tt    = open_trades.get(sym, {})
+        asset_type = pos.get('asset_type', tt.get('asset_type', 'STOCK'))
         entry_t  = trade_tracker.fmt_time(tt.get('entry_time')) if tt else '–'
         sl_txt   = f"${tt['sl']:.2f}"  if tt.get('sl')  else '–'
         tp_txt   = f"${tt['tp']:.2f}"  if tt.get('tp')  else '–'
         trade_id = tt.get('id', '')
         rows.append(html.Tr([
-            html.Td(sym, style={'fontWeight': 'bold'}),
+            html.Td(f"{sym} ({asset_type})", style={'fontWeight': 'bold'}),
             html.Td('LONG' if pos['position'] > 0 else 'SHORT',
                     style={'color': '#00d4ff'}),
             html.Td(abs(pos['position'])),
@@ -1131,15 +1170,16 @@ def close_single_position(n_clicks_list, refresh_counter):
     positions = ib.get_positions() or []
     ib_pos    = next((p for p in positions if p['symbol'] == sym and p['position'] != 0), None)
 
+    asset_type = ib_pos.get('asset_type', trade.get('asset_type', 'STOCK')) if ib_pos else trade.get('asset_type', 'STOCK')
     qty = abs(ib_pos['position']) if ib_pos else trade['qty']
     act = 'SELL' if ((ib_pos and ib_pos['position'] > 0) or (not ib_pos and trade['side'] == 'BUY')) else 'BUY'
 
-    res = submit_market_order(sym, act, qty)
+    res = submit_market_order(sym, act, qty, asset_type)
     if not res['success']:
         dbg = {'msg': f'[TRADE][ERR] CLOSE {sym} {qty}x — {res.get("error")}', 'ts': time.time()}
         return html.Div(f'❌ {res.get("error")}', style={'color': '#ef5350', 'fontWeight': 'bold'}), dbg, dash.no_update
 
-    ticker     = ib.get_ticker(sym) or {}
+    ticker     = ib.get_ticker(sym, asset_type) or {}
     exit_price = ticker.get('price') or ticker.get('last') or trade.get('entry_price', 0)
     trade_tracker.close_trade(trade_id, exit_price)
 
@@ -1329,6 +1369,7 @@ app.clientside_callback(
             return window.dash_clientside.no_update;
         var sym    = chartData.symbol;
         var tf     = chartData.timeframe.replace(/ /g, '_');
+        var assetType = chartData.asset_type || 'STOCK';
         var active = [];
         if (settings.sma)  active.push('sma');
         if (settings.ema)  active.push('ema');
@@ -1340,7 +1381,7 @@ app.clientside_callback(
                 window.lwcManager.setIndicators({ok:true,sma:null,ema:null,rsi:null,macd:null});
             return null;
         }
-        var url = '/api/indicators/' + sym + '/' + tf + '?active=' + active.join(',');
+        var url = '/api/indicators/' + sym + '/' + tf + '?active=' + active.join(',') + '&asset_type=' + encodeURIComponent(assetType);
         d('IND', 'Fetching: ' + url);
         fetch(url).then(function(r){return r.json();}).then(function(data){
             if (!data.ok){d('ERR','IND FAIL: '+(data.error||'unknown'));return;}
@@ -1362,8 +1403,9 @@ app.clientside_callback(
         if (n < 1) return n;
         var d = window.lwcDebug || function() {};
         var sym = (document.getElementById('symbol-input')&&document.getElementById('symbol-input').value||'AAPL').toUpperCase();
-        d('API','=== TICK DIAG: '+sym+' ===');
-        fetch('/api/diag/tick/'+sym).then(function(r){return r.json();}).then(function(j){
+        var assetType = (document.getElementById('asset-type-select')&&document.getElementById('asset-type-select').value||'STOCK').toUpperCase();
+        d('API','=== TICK DIAG: '+sym+' ('+assetType+') ===');
+        fetch('/api/diag/tick/'+sym+'?asset_type='+encodeURIComponent(assetType)).then(function(r){return r.json();}).then(function(j){
             d('API','connected='+j.tick_sub_connected+'  iter='+j.iterations+'  mdt='+j.mdt+'  mode='+j.mode);
             d('API','subscribed='+JSON.stringify(j.subscribed_symbols));
             var lx=j.latest;
@@ -1386,8 +1428,9 @@ app.clientside_callback(
         if (n < 1) return n;
         var d = window.lwcDebug || function() {};
         var sym = (document.getElementById('symbol-input')&&document.getElementById('symbol-input').value||'AAPL').toUpperCase();
-        d('API','=== SNAPSHOT TEST: '+sym+' (ceka ~3s...) ===');
-        fetch('/api/test/snapshot/'+sym).then(function(r){return r.json();}).then(function(j){
+        var assetType = (document.getElementById('asset-type-select')&&document.getElementById('asset-type-select').value||'STOCK').toUpperCase();
+        d('API','=== SNAPSHOT TEST: '+sym+' ('+assetType+') (ceka ~3s...) ===');
+        fetch('/api/test/snapshot/'+sym+'?asset_type='+encodeURIComponent(assetType)).then(function(r){return r.json();}).then(function(j){
             if(j.ok)d('API','SNAP OK: last='+j.last+'  close='+j.close+'  bid='+j.bid+'  ask='+j.ask+'  vol='+j.volume+'  conId='+j.conId);
             else d('ERR','SNAP FAIL: '+j.error);
             if(j.errors&&j.errors.length>0)d('ERR','Snapshot IB errory: '+JSON.stringify(j.errors));
@@ -1465,11 +1508,11 @@ app.clientside_callback(
     Output('diag1-trigger','data'), Input('diag1-btn','n_clicks')
 )
 app.clientside_callback(
-    """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};d('API','TEST 2: Hist. data...');fetch('/api/test-hist/AAPL').then(r=>r.json()).then(j=>{if(j.ok)d('API','OK: '+j.bars+' baru za '+j.elapsed+'s');else d('ERR','FAIL: '+j.error);}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
+    """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};var assetType=(document.getElementById('asset-type-select')&&document.getElementById('asset-type-select').value||'STOCK').toUpperCase();d('API','TEST 2: Hist. data...');fetch('/api/test-hist/AAPL?asset_type='+encodeURIComponent(assetType)).then(r=>r.json()).then(j=>{if(j.ok)d('API','OK: '+j.bars+' baru za '+j.elapsed+'s');else d('ERR','FAIL: '+j.error);}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
     Output('diag2-trigger','data'), Input('diag2-btn','n_clicks')
 )
 app.clientside_callback(
-    """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};d('API','TEST 3: Fetch+nakreslit...');fetch('/api/test-hist/AAPL').then(r=>r.json()).then(j=>{if(!j.ok){d('ERR','Fail: '+j.error);return;}d('API','OK: '+j.bars+' baru');if(window.lwcManager)window.lwcManager.testChart();}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
+    """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};var assetType=(document.getElementById('asset-type-select')&&document.getElementById('asset-type-select').value||'STOCK').toUpperCase();d('API','TEST 3: Fetch+nakreslit...');fetch('/api/test-hist/AAPL?asset_type='+encodeURIComponent(assetType)).then(r=>r.json()).then(j=>{if(!j.ok){d('ERR','Fail: '+j.error);return;}d('API','OK: '+j.bars+' baru');if(window.lwcManager)window.lwcManager.testChart();}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
     Output('diag3-trigger','data'), Input('diag3-btn','n_clicks')
 )
 app.clientside_callback(
@@ -1490,11 +1533,12 @@ app.clientside_callback(
     [Output('price-display', 'children'),
      Output('price-change-display', 'children')],
     Input('price-update-interval', 'n_intervals'),
-    State('symbol-input', 'value')
+    [State('symbol-input', 'value'),
+     State('asset-type-select', 'value')]
 )
-def update_price_display(n, symbol):
+def update_price_display(n, symbol, asset_type):
     if not symbol or not ib.is_connected(): return 'Last: $0.00', ''
-    ticker = ib.get_ticker(symbol)
+    ticker = ib.get_ticker(symbol, normalize_asset_type(asset_type))
     if not ticker: return 'Last: $0.00', ''
     lp = ticker.get('price', 0) or ticker.get('last', 0)
     pc = ticker.get('close', lp) or lp

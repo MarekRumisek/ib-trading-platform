@@ -42,7 +42,8 @@ def test_order():
         print("🚀 PLACING TEST ORDER")
         print("="*60)
         
-        contract = Stock('AAPL', 'SMART', 'USD')
+        from contract_utils import create_contract
+        contract = create_contract('AAPL', 'STOCK')
         order = MarketOrder('BUY', 1)
         order.transmit = True
         order.outsideRth = True
