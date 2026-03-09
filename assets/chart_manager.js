@@ -852,6 +852,9 @@
     addIndicator: addIndicator,
     removeIndicator: removeIndicator,
     setIndicators: setIndicators,
+    getCandleSeries: function () {
+      return candleSeries;
+    },
     clearSubCharts: clearSubCharts,
   };
 

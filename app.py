@@ -260,6 +260,29 @@ def api_trades_open():
     return jsonify({'ok': True, 'trades': trades})
 
 
+@server.route('/api/trades/active_lines', methods=['GET'])
+def api_trades_active_lines():
+    sym = (freq.args.get('symbol') or app_state.get('current_symbol', 'AAPL')).upper()
+    asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
+    trades = []
+
+    for t in trade_tracker.get_open_trades():
+        if t.get('symbol') != sym:
+            continue
+        if normalize_asset_type(t.get('asset_type', 'STOCK')) != asset_type:
+            continue
+        trades.append({
+            'symbol': t.get('symbol'),
+            'asset_type': normalize_asset_type(t.get('asset_type', 'STOCK')),
+            'entry_price': t.get('entry_price'),
+            'sl': t.get('sl'),
+            'tp': t.get('tp'),
+            'side': t.get('side'),
+        })
+
+    return jsonify(trades)
+
+
 @server.route('/api/trades/history', methods=['GET'])
 def api_trades_history():
     limit  = int(freq.args.get('limit', 50))
@@ -927,18 +950,86 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
                         style={'color': '#ef5350', 'fontWeight': 'bold'}), dash.no_update, dbg
 
     fill_price = result.get('fill_price') or cur_price
-    trade_tracker.open_trade(
-        symbol=symbol, side=action, qty=quantity,
-        entry_price=fill_price,
-        asset_type=asset_type,
-        sl=sl, tp=tp,
-        note=note or ''
+    symbol = (symbol or '').upper()
+    remaining_qty = float(quantity or 0)
+    tracker_status = 'opened'
+
+    open_trades = trade_tracker.get_open_trades()
+    opposing_trades = sorted(
+        [
+            t for t in open_trades
+            if t.get('symbol') == symbol
+            and normalize_asset_type(t.get('asset_type', 'STOCK')) == asset_type
+            and t.get('side') != action
+        ],
+        key=lambda t: t.get('entry_time', 0)
     )
+
+    if opposing_trades:
+        print(f"[TRADE] MATCH | {action} {quantity}x {symbol} ({asset_type}) -> {len(opposing_trades)} opposing open trade(s)")
+
+        for existing in opposing_trades:
+            if remaining_qty <= 0:
+                break
+
+            existing_qty = float(existing.get('qty') or 0)
+            if existing_qty <= 0:
+                continue
+
+            if remaining_qty < existing_qty:
+                updated_qty = None
+                with trade_tracker._lock:
+                    trades = trade_tracker._read()
+                    for stored in trades:
+                        if stored.get('id') == existing.get('id') and stored.get('status') == 'open':
+                            updated_qty = round(existing_qty - remaining_qty, 8)
+                            stored['qty'] = updated_qty
+                            trade_tracker._write_atomic(trades)
+                            break
+
+                if updated_qty is not None:
+                    print(
+                        f"[TRADE] PARTIAL CLOSE | id={existing.get('id')} "
+                        f"closed_qty={remaining_qty} remaining_qty={updated_qty} fill={fill_price}"
+                    )
+                    tracker_status = 'partially_closed'
+                    remaining_qty = 0
+                else:
+                    print(f"[TRADE][WARN] PARTIAL CLOSE | id={existing.get('id')} not found during update")
+                break
+
+            closed_trade = trade_tracker.close_trade(existing.get('id'), fill_price)
+            if closed_trade:
+                tracker_status = 'closed'
+                remaining_qty = round(remaining_qty - existing_qty, 8)
+            else:
+                print(f"[TRADE][WARN] CLOSE | id={existing.get('id')} failed during opposing match")
+
+    if remaining_qty > 0:
+        trade_tracker.open_trade(
+            symbol=symbol, side=action, qty=remaining_qty,
+            entry_price=fill_price,
+            asset_type=asset_type,
+            sl=sl, tp=tp,
+            note=note or ''
+        )
+        if tracker_status in ('closed', 'partially_closed'):
+            tracker_status = 'flipped'
+        else:
+            tracker_status = 'opened'
 
     sl_txt  = f' | SL ${sl:.2f}' if sl else ''
     tp_txt  = f' | TP ${tp:.2f}' if tp else ''
+    tracker_txt = ''
+    if tracker_status == 'closed':
+        tracker_txt = ' | tracker=closed opposing open trade'
+    elif tracker_status == 'partially_closed':
+        tracker_txt = ' | tracker=partial close of opposing open trade'
+    elif tracker_status == 'flipped':
+        tracker_txt = f' | tracker=closed opposing trade + opened {remaining_qty:g}'
     dbg_msg = (f'[TRADE] {action} {quantity}x {symbol} ({asset_type}) @ Market'
                f' | fill=${fill_price:.2f}{sl_txt}{tp_txt}'
+               f'{tracker_txt}'
                f'{" | note: " + note if note else ""}')
     dbg = {'msg': dbg_msg, 'ts': time.time()}
 
@@ -1490,6 +1581,43 @@ app.clientside_callback(
 )
 
 app.clientside_callback(
+    """
+    function(n, refreshCounter, chartData, symbolInput, assetTypeInput) {
+        var d = window.lwcDebug || function() {};
+        var sym = ((chartData && chartData.symbol) || symbolInput || 'AAPL').toUpperCase();
+        var assetType = ((chartData && chartData.asset_type) || assetTypeInput || 'STOCK').toUpperCase();
+        if (!sym) return window.dash_clientside.no_update;
+
+        fetch('/api/trades/active_lines?symbol=' + encodeURIComponent(sym) + '&asset_type=' + encodeURIComponent(assetType))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (window.lwcManager && window.lwcManager.setTradeLines) {
+                    window.lwcManager.setTradeLines(data || []);
+                    d('TRADE', 'Trade lines refreshed: ' + sym + ' (' + assetType + ') -> ' + ((data && data.length) || 0));
+                } else {
+                    d('ERR', 'lwcManager.setTradeLines() neexistuje');
+                }
+            })
+            .catch(function(e) {
+                d('ERR', 'TRADE lines fetch error: ' + e);
+                if (window.lwcManager && window.lwcManager.setTradeLines) {
+                    window.lwcManager.setTradeLines([]);
+                }
+            });
+
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('hidden-state', 'children', allow_duplicate=True),
+    [Input('trades-refresh-interval', 'n_intervals'),
+     Input('trade-refresh-store', 'data')],
+    [State('chart-data-store', 'data'),
+     State('symbol-input', 'value'),
+     State('asset-type-select', 'value')],
+    prevent_initial_call=True
+)
+
+app.clientside_callback(
     """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};d('API','=== TEST 1: IB spojeni ===');fetch('/api/diag').then(r=>r.json()).then(j=>{d('API','connected='+j.connected+' account='+j.account_id);d('API','tick_sub: connected='+j.tick_sub.connected+' iter='+j.tick_sub.iterations+' mdt='+j.tick_sub.mdt+' mode='+j.tick_sub.mode);if(j.tick_sub.ib_errors&&j.tick_sub.ib_errors.length>0){d('ERR','IB errory: '+JSON.stringify(j.tick_sub.ib_errors));}}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
     Output('diag1-trigger','data'), Input('diag1-btn','n_clicks')
 )
@@ -1608,6 +1736,114 @@ app.index_string = '''
         <footer>
             {%config%}
             {%scripts%}
+            <script>
+                (function () {
+                    var tradePriceLines = [];
+
+                    function getDebug() {
+                        return window.lwcDebug || function () {};
+                    }
+
+                    function getCandleSeries() {
+                        if (!window.lwcManager || typeof window.lwcManager.getCandleSeries !== 'function') {
+                            return null;
+                        }
+                        try {
+                            return window.lwcManager.getCandleSeries();
+                        } catch (e) {
+                            return null;
+                        }
+                    }
+
+                    function clearTradeLines() {
+                        var candleSeries = getCandleSeries();
+                        if (!candleSeries) {
+                            tradePriceLines = [];
+                            return;
+                        }
+                        tradePriceLines.forEach(function (line) {
+                            try {
+                                candleSeries.removePriceLine(line);
+                            } catch (e) {}
+                        });
+                        tradePriceLines = [];
+                    }
+
+                    function addTradeLine(candleSeries, price, color, title, lineStyle) {
+                        if (!candleSeries || price === null || price === undefined || price === '') return;
+                        var numericPrice = parseFloat(price);
+                        if (!isFinite(numericPrice)) return;
+                        try {
+                            tradePriceLines.push(candleSeries.createPriceLine({
+                                price: numericPrice,
+                                color: color,
+                                lineWidth: 1,
+                                lineStyle: lineStyle,
+                                axisLabelVisible: true,
+                                title: title
+                            }));
+                        } catch (e) {
+                            getDebug()('ERR', 'createPriceLine selhal: ' + e.message);
+                        }
+                    }
+
+                    function setTradeLines(trades) {
+                        var candleSeries = getCandleSeries();
+                        if (!candleSeries) {
+                            setTimeout(function () { setTradeLines(trades || []); }, 300);
+                            return;
+                        }
+
+                        clearTradeLines();
+
+                        if (!Array.isArray(trades) || trades.length === 0) {
+                            getDebug()('TRADE', 'Trade lines cleared');
+                            return;
+                        }
+
+                        trades.forEach(function (trade) {
+                            var side = ((trade && trade.side) || 'BUY').toUpperCase();
+                            addTradeLine(
+                                candleSeries,
+                                trade.entry_price,
+                                side === 'BUY' ? '#ffd54f' : '#ffffff',
+                                'Entry',
+                                LightweightCharts.LineStyle.Solid
+                            );
+                            if (trade.sl !== null && trade.sl !== undefined) {
+                                addTradeLine(
+                                    candleSeries,
+                                    trade.sl,
+                                    '#ef5350',
+                                    'SL',
+                                    LightweightCharts.LineStyle.Dashed
+                                );
+                            }
+                            if (trade.tp !== null && trade.tp !== undefined) {
+                                addTradeLine(
+                                    candleSeries,
+                                    trade.tp,
+                                    '#26a69a',
+                                    'TP',
+                                    LightweightCharts.LineStyle.Dashed
+                                );
+                            }
+                        });
+
+                        getDebug()('TRADE', 'Trade lines updated: ' + trades.length + ' trade(s), ' + tradePriceLines.length + ' line(s)');
+                    }
+
+                    function attachTradeLines() {
+                        if (!window.lwcManager) {
+                            setTimeout(attachTradeLines, 300);
+                            return;
+                        }
+                        window.lwcManager.setTradeLines = setTradeLines;
+                    }
+
+                    attachTradeLines();
+                })();
+            </script>
             {%renderer%}
         </footer>
     </body>
