@@ -903,6 +903,8 @@ class IBConnector:
     def get_recent_orders(self, limit=10):
         if not self.is_connected(): return []
         try:
+            print('[ORDERS] get_recent_orders — calling reqOpenOrders to refresh live status')
+            self.ib.reqOpenOrders()
             result = []
             for fill in self.executions[-limit:]:
                 ed = fill.execution

@@ -266,18 +266,29 @@ def api_trades_active_lines():
     asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
     trades = []
 
+    # Issue #4: look up IB positions to use avgCost as entry line price
+    ib_positions = ib.get_positions() or [] if ib.is_connected() else []
+
     for t in trade_tracker.get_open_trades():
         if t.get('symbol') != sym:
             continue
         if normalize_asset_type(t.get('asset_type', 'STOCK')) != asset_type:
             continue
+        ib_pos = next((p for p in ib_positions if p['symbol'] == sym and
+                       normalize_asset_type(p.get('asset_type', 'STOCK')) == asset_type), None)
+        avg_cost_used = False
+        entry_price = t.get('entry_price')
+        if ib_pos and ib_pos.get('avgCost'):
+            entry_price = float(ib_pos['avgCost'])
+            avg_cost_used = True
         trades.append({
             'symbol': t.get('symbol'),
             'asset_type': normalize_asset_type(t.get('asset_type', 'STOCK')),
-            'entry_price': t.get('entry_price'),
+            'entry_price': entry_price,
             'sl': t.get('sl'),
             'tp': t.get('tp'),
             'side': t.get('side'),
+            'avg_cost_used': avg_cost_used,
         })
 
     return jsonify(trades)
@@ -1006,12 +1017,19 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
                 print(f"[TRADE][WARN] CLOSE | id={existing.get('id')} failed during opposing match")
 
     if remaining_qty > 0:
+        # Issue #3: pass avg_cost from IB position if available
+        ib_positions = ib.get_positions() or []
+        ib_pos_new = next((p for p in ib_positions if p['symbol'] == symbol and
+                           normalize_asset_type(p.get('asset_type', 'STOCK')) == asset_type), None)
+        open_avg_cost = float(ib_pos_new['avgCost']) if ib_pos_new and ib_pos_new.get('avgCost') else None
+        print(f'[TRADE] open_trade avg_cost from IB: {open_avg_cost}')
         trade_tracker.open_trade(
             symbol=symbol, side=action, qty=remaining_qty,
             entry_price=fill_price,
             asset_type=asset_type,
             sl=sl, tp=tp,
-            note=note or ''
+            note=note or '',
+            avg_cost=open_avg_cost
         )
         if tracker_status in ('closed', 'partially_closed'):
             tracker_status = 'flipped'
@@ -1260,6 +1278,14 @@ def close_single_position(n_clicks_list, refresh_counter):
     exit_price = ticker.get('price') or ticker.get('last') or trade.get('entry_price', 0)
     trade_tracker.close_trade(trade_id, exit_price)
 
+    # Issue #2: recalculate P&L using IB avgCost as real cost basis
+    if ib_pos and ib_pos.get('avgCost'):
+        avg_cost = float(ib_pos['avgCost'])
+        direction_mult = 1 if trade.get('side') == 'BUY' else -1
+        real_pnl = round(direction_mult * (float(exit_price) - avg_cost) * float(trade.get('qty', qty)), 2)
+        print(f'[TRADE] P&L recalc using avgCost={avg_cost} exit={exit_price} pnl={real_pnl}')
+        trade_tracker.patch_trade(trade_id, {'pnl': real_pnl})
+
     updated = trade_tracker.get_trade(trade_id)
     pnl     = updated.get('pnl') if updated else None
     pnl_txt = f" | P&L: {'+'if (pnl or 0)>=0 else ''}${pnl:.2f}" if pnl is not None else ''
@@ -1293,6 +1319,12 @@ def update_trade_history(_n, _refresh):
         pnl_s  = f"{'+'if (pnl or 0)>=0 else ''}${pnl:.2f}" if pnl is not None else '–'
         sl_txt = f"${t['sl']:.2f}"  if t.get('sl')  else '–'
         tp_txt = f"${t['tp']:.2f}"  if t.get('tp')  else '–'
+        # Issue #3: commission = (avg_cost - entry_price) * qty
+        if t.get('avg_cost') and t.get('entry_price') and t.get('qty'):
+            commission = round((float(t['avg_cost']) - float(t['entry_price'])) * float(t['qty']), 4)
+            comm_s = f"-${abs(commission):.4f}"
+        else:
+            comm_s = '–'
         rows.append(html.Tr([
             html.Td(str(i),  style={'color': '#555', 'fontSize': '12px'}),
             html.Td(t['symbol'], style={'fontWeight': 'bold'}),
@@ -1307,6 +1339,7 @@ def update_trade_history(_n, _refresh):
             html.Td(sl_txt, style={'color': '#ef9a9a', 'fontSize': '12px'}),
             html.Td(tp_txt, style={'color': '#a5d6a7', 'fontSize': '12px'}),
             html.Td(t.get('note', ''), style={'color': '#888', 'fontSize': '12px'}),
+            html.Td(comm_s, style={'color': '#ef9a9a', 'fontSize': '12px'}),
             html.Td(pnl_s, style={'color': pnl_c, 'fontWeight': 'bold'}),
         ]))
 
@@ -1315,7 +1348,7 @@ def update_trade_history(_n, _refresh):
             html.Th('#'), html.Th('Symbol'), html.Th('Side'), html.Th('Qty'),
             html.Th('Entry $'), html.Th('Vstup'),
             html.Th('Exit $'),  html.Th('Výstup'),
-            html.Th('SL'), html.Th('TP'), html.Th('Poznámka'), html.Th('P&L')
+            html.Th('SL'), html.Th('TP'), html.Th('Poznámka'), html.Th('Komise'), html.Th('P&L')
         ])),
         html.Tbody(rows)
     ], style={'width': '100%', 'borderCollapse': 'collapse'})

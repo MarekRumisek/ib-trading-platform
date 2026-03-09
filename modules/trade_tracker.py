@@ -82,7 +82,8 @@ class TradeTracker:
                    asset_type: str = 'STOCK',
                    sl: float = None,
                    tp: float = None,
-                   note: str = '') -> dict:
+                   note: str = '',
+                   avg_cost: float = None) -> dict:
         """Zaznamenat nový otevřený obchod. Vrátí záznam."""
         trade = {
             'id':           self._make_id(symbol),
@@ -92,6 +93,7 @@ class TradeTracker:
             'order_type':   order_type.upper(),
             'asset_type':   normalize_asset_type(asset_type),
             'entry_price':  float(entry_price) if entry_price else None,
+            'avg_cost':     float(avg_cost) if avg_cost else None,
             'entry_time':   int(time.time()),
             'sl':           float(sl) if sl else None,
             'tp':           float(tp) if tp else None,
@@ -201,6 +203,20 @@ class TradeTracker:
                 if t['id'] == trade_id:
                     return t
         return None
+
+    def patch_trade(self, trade_id: str, fields: dict) -> bool:
+        """Atomically update arbitrary fields on a trade record. Returns True if found."""
+        print(f"{_D} PATCH | id={trade_id} fields={list(fields.keys())}")
+        with self._lock:
+            trades = self._read()
+            for t in trades:
+                if t['id'] == trade_id:
+                    t.update(fields)
+                    self._write_atomic(trades)
+                    print(f"{_D} PATCH | OK id={trade_id}")
+                    return True
+        print(f"{_D} PATCH | WARN: trade_id={trade_id} not found")
+        return False
 
     def check_sl_tp(self, symbol: str, current_price: float) -> list:
         """Zkontroluje všechny open trady pro symbol a vrátí seznam triggerů.
