@@ -1024,18 +1024,11 @@ def update_positions_table(n, _refresh, _btn):
     if not ib.is_connected():
         return html.Div('Not connected', style={'color': '#888'}), dash.no_update
 
-    positions   = ib.get_positions() or []
+    positions = ib.get_positions() or []
     open_trades = {t['symbol']: t for t in trade_tracker.get_open_trades()}
-
-    # ----------------------------------------------------------------
-    # ORPHAN SYNC – grace period: čekáme ORPHAN_GRACE sekund po open
-    # než prohlásíme trade za orphan (IB fill může trvat chvíli)
-    # ----------------------------------------------------------------
-    ORPHAN_GRACE = 30          # sekund
-    now          = int(time.time())
-    ib_symbols   = {p['symbol'] for p in positions}
-    sync_msgs    = []
-    debug_lines  = []
+    now = int(time.time())
+    ib_symbols = {p['symbol'] for p in positions}
+    debug_lines = []
 
     # Vždy loguj stav do konzole
     ib_pos_str = str([(p['symbol'], p['position']) for p in positions])
@@ -1050,35 +1043,20 @@ def update_positions_table(n, _refresh, _btn):
         debug_lines.append(f'[SYNC] IB pozice : {ib_pos_str}')
         debug_lines.append(f'[SYNC] TT open   : {tt_str}')
 
-    for sym, tt in list(open_trades.items()):
-        age = now - tt.get('entry_time', now)
-        if sym not in ib_symbols:
-            if age < ORPHAN_GRACE:
-                # Stále v grace window – čekáme na IB fill
-                msg = (f'[SYNC] ⏳ {sym} GRACE {age}s/{ORPHAN_GRACE}s'
-                       f' | entry={tt.get("entry_price")} SL={tt.get("sl")} TP={tt.get("tp")}'
-                       f' → čekám na IB fill')
-                print(msg)
-                debug_lines.append(msg)
-            else:
-                # Grace uplynula, opravdu orphan
-                ticker = ib.get_ticker(sym, tt.get('asset_type', 'STOCK')) or {}
-                exit_p = ticker.get('price') or ticker.get('last') or tt.get('entry_price', 0)
-                trade_tracker.close_trade(tt['id'], exit_p)
-                del open_trades[sym]
-                msg = (f'[SYNC] ⚠️ Orphan {sym} auto-closed @ ${exit_p:.2f}'
-                       f' | age={age}s > grace={ORPHAN_GRACE}s | IB pos=0')
-                sync_msgs.append(msg)
-                debug_lines.append(msg)
-                print(f"[SYNC] Orphan trade {sym} closed in TradeTracker (age={age}s)")
-        else:
-            # Trade je v IB i v trackeru – OK
+    for sym, tt in open_trades.items():
+        if sym in ib_symbols:
             ib_pos = next((p['position'] for p in positions if p['symbol'] == sym), '?')
+            age = now - tt.get('entry_time', now)
             msg = (f'[SYNC] ✅ {sym} OK'
                    f' | age={age}s | IB pos={ib_pos}'
                    f' | SL={tt.get("sl")} TP={tt.get("tp")}')
-            print(msg)
-            debug_lines.append(msg)
+        else:
+            age = now - tt.get('entry_time', now)
+            msg = (f'[SYNC] ℹ️ {sym} metadata only in TT'
+                   f' | age={age}s | waiting for IB position')
+
+        print(msg)
+        debug_lines.append(msg)
 
     dbg = dash.no_update
     if debug_lines:
@@ -1093,6 +1071,14 @@ def update_positions_table(n, _refresh, _btn):
         sym   = pos['symbol']
         tt    = open_trades.get(sym, {})
         asset_type = pos.get('asset_type', tt.get('asset_type', 'STOCK'))
+        if tt:
+            msg = (f'[SYNC] ✅ Row enrich {sym}'
+                   f' | SL={tt.get("sl")} TP={tt.get("tp")}')
+        else:
+            msg = f'[SYNC] ℹ️ Row enrich {sym} | no TT metadata'
+        print(msg)
+        debug_lines.append(msg)
+
         entry_t  = trade_tracker.fmt_time(tt.get('entry_time')) if tt else '–'
         sl_txt   = f"${tt['sl']:.2f}"  if tt.get('sl')  else '–'
         tp_txt   = f"${tt['tp']:.2f}"  if tt.get('tp')  else '–'
