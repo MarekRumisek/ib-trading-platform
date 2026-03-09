@@ -742,8 +742,20 @@ def update_account_info(n):
             f"${d.get('buying_power', 0):,.2f}")
 
 
+_TOPUP_DURATION = {
+    '1 min':   '2 H',
+    '5 mins':  '6 H',
+    '15 mins': '1 D',
+    '30 mins': '2 D',
+    '1 hour':  '4 D',
+    '1 day':   '3 M',
+}
+
 @app.callback(
-    Output('chart-data-store', 'data'),
+    [Output('chart-data-store', 'data'),
+     Output('tick-enabled-store', 'data', allow_duplicate=True),
+     Output('tick-toggle-btn', 'children', allow_duplicate=True),
+     Output('tick-toggle-btn', 'className', allow_duplicate=True)],
     [Input('load-chart-btn', 'n_clicks'),
      Input('tf-1m',  'n_clicks'), Input('tf-5m',  'n_clicks'),
      Input('tf-15m', 'n_clicks'), Input('tf-30m', 'n_clicks'),
@@ -779,13 +791,34 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger, s
         _cb_status['step'] = 'IB_returned'
         _cb_status['bars'] = len(bars)
         print(f"[CB] IB/Cache returned {len(bars)} bars")
+
+        # Top-up: append fresh bars from IB to fill the gap between cache and current time
+        if bars and ib.is_connected():
+            topup_dur = _TOPUP_DURATION.get(tf, '1 D')
+            print(f"[CB] Top-up: fetching last {topup_dur} for {symbol} ({tf})")
+            fresh_bars = ib.get_historical_data(symbol, topup_dur, tf, asset_type)
+            if fresh_bars:
+                last_cached_time = bars[-1]['time']
+                new_bars = [b for b in fresh_bars if b['time'] > last_cached_time]
+                if new_bars:
+                    bars = bars + new_bars
+                    print(f'[CB] Top-up: +{len(new_bars)} fresh bars appended (gap filled)')
+                else:
+                    print(f'[CB] Top-up: no new bars (cache already current)')
+            else:
+                print(f'[CB] Top-up: IB returned no bars for {symbol} {tf}')
+
         _cb_status['step'] = 'done'
-        return {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars}
+        chart_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars}
+
+        # Auto-enable tick on chart load
+        print('[TICK] Auto-enabled on chart load')
+        return chart_data, True, '⚡ TICK: ON', 'tick-btn tick-on'
     except Exception as e:
         _cb_status['step'] = 'ERROR'
         _cb_status['error'] = str(e)
         print(f"[CB] EXCEPTION: {e}")
-        return dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update
 
 
 @app.callback(
