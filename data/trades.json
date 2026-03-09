@@ -158,5 +158,53 @@
     "exit_time": 1772727857,
     "pnl": -0.28,
     "status": "closed"
+  },
+  {
+    "id": "AAPL_1773069030055",
+    "symbol": "AAPL",
+    "side": "BUY",
+    "qty": 1.0,
+    "order_type": "MARKET",
+    "entry_price": 257.8,
+    "entry_time": 1773069030,
+    "sl": 247.49,
+    "tp": 268.11,
+    "note": "Test 4",
+    "exit_price": 257.63,
+    "exit_time": 1773069070,
+    "pnl": -0.17,
+    "status": "closed"
+  },
+  {
+    "id": "AAPL_1773069164616",
+    "symbol": "AAPL",
+    "side": "SELL",
+    "qty": 1.0,
+    "order_type": "MARKET",
+    "entry_price": 257.3,
+    "entry_time": 1773069164,
+    "sl": 267.59,
+    "tp": 247.01,
+    "note": "Test 5",
+    "exit_price": 257.34,
+    "exit_time": 1773069345,
+    "pnl": -0.04,
+    "status": "closed"
+  },
+  {
+    "id": "AAPL_1773069202768",
+    "symbol": "AAPL",
+    "side": "SELL",
+    "qty": 1.0,
+    "order_type": "MARKET",
+    "entry_price": 257.48,
+    "entry_time": 1773069202,
+    "sl": 267.78,
+    "tp": 247.18,
+    "note": "Test 6",
+    "exit_price": 257.34,
+    "exit_time": 1773069335,
+    "pnl": 0.14,
+    "status": "closed"
   }
 ]

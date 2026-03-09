@@ -7,6 +7,7 @@ from dash import dcc, html, Input, Output, State
 from datetime import datetime, timedelta
 from flask import jsonify, request as freq
 from ib_connector import IBConnector
+from order_handler import OrderHandler
 import config
 from modules.data_store import data_store
 from modules.indicators import SMA, EMA, RSI, MACD
@@ -17,6 +18,12 @@ import signal
 
 def graceful_shutdown():
     print("[SHUTDOWN] Disconnecting from IB...")
+    try:
+        global order_handler
+        if order_handler:
+            order_handler.stop()
+    except:
+        pass
     try:
         ib.disconnect()
     except:
@@ -34,7 +41,22 @@ app = dash.Dash(
 )
 
 ib = IBConnector()
+order_handler = None
 server = app.server
+
+
+def submit_market_order(symbol, action, quantity):
+    global order_handler
+
+    if not order_handler or not order_handler.running:
+        return {'success': False, 'error': 'Order handler not running'}
+
+    return order_handler.place_order_async(
+        symbol=(symbol or '').upper(),
+        action=action,
+        quantity=quantity,
+        order_type='MARKET'
+    )
 
 _cb_status = {
     'step': 'idle', 'symbol': None, 'tf': None,
@@ -862,7 +884,7 @@ def place_order(buy_clicks, sell_clicks, symbol, quantity,
         mult = (1 + float(tp_pct) / 100) if action == 'BUY' else (1 - float(tp_pct) / 100)
         tp   = round(cur_price * mult, 2)
 
-    result = ib.place_market_order(symbol, action, quantity)
+    result = submit_market_order(symbol, action, quantity)
     if not result['success']:
         dbg = {'msg': f'[TRADE][ERR] {action} {quantity} {symbol} — {result["error"]}', 'ts': time.time()}
         return html.Div(f'❌ {result["error"]}',
@@ -909,29 +931,35 @@ def close_all_positions(n, refresh_counter):
         dbg = {'msg': '[TRADE][ERR] CLOSE ALL — NOT CONNECTED', 'ts': time.time()}
         return '❌ Not connected', dash.no_update, dbg
 
-    positions = ib.get_positions() or []
-    errors    = []
-    closed    = 0
+    positions       = ib.get_positions() or []
+    errors          = []
+    closed          = 0
+    closed_symbols  = set()
+    exit_prices     = {}
 
     for pos in positions:
+        sym = pos['symbol']
         qty = abs(pos['position'])
         if qty <= 0:
             continue
         action = 'SELL' if pos['position'] > 0 else 'BUY'
-        res = ib.place_market_order(pos['symbol'], action, qty)
+        res = submit_market_order(sym, action, qty)
         if res['success']:
             closed += 1
+            closed_symbols.add(sym)
+            ticker = ib.get_ticker(sym) or {}
+            p      = ticker.get('price') or ticker.get('last')
+            if p:
+                exit_prices[sym] = p
         else:
-            errors.append(pos['symbol'])
+            errors.append(sym)
 
-    exit_prices = {}
-    for pos in positions:
-        sym    = pos['symbol']
-        ticker = ib.get_ticker(sym) or {}
-        p      = ticker.get('price') or ticker.get('last')
-        if p:
-            exit_prices[sym] = p
-    trade_tracker.close_all_open(exit_prices)
+    if closed_symbols:
+        for trade in trade_tracker.get_open_trades():
+            if trade['symbol'] not in closed_symbols:
+                continue
+            exit_price = exit_prices.get(trade['symbol'], trade.get('entry_price', 0))
+            trade_tracker.close_trade(trade['id'], exit_price)
 
     err_txt = f' | chyba u: {", ".join(errors)}' if errors else ''
     dbg_msg = (f'[TRADE] CLOSE ALL → {closed}/{len(positions)} pozic zavřeno'
@@ -1068,39 +1096,49 @@ def update_positions_table(n, _refresh, _btn):
 # ------------------------------------------------------------------
 @app.callback(
     [Output('order-feedback', 'children', allow_duplicate=True),
-     Output('trade-debug-store', 'data', allow_duplicate=True)],
+     Output('trade-debug-store', 'data', allow_duplicate=True),
+     Output('trade-refresh-store', 'data', allow_duplicate=True)],
     Input({'type': 'close-pos-btn', 'trade_id': dash.ALL}, 'n_clicks'),
+    State('trade-refresh-store', 'data'),
     prevent_initial_call=True
 )
-def close_single_position(n_clicks_list):
+def close_single_position(n_clicks_list, refresh_counter):
     ctx = dash.callback_context
     if not ctx.triggered:
-        return dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update
     triggered = ctx.triggered[0]
     if not triggered['value']:
-        return dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update
 
     import json as _json
     prop_id  = triggered['prop_id']
     id_part  = prop_id.split('.')[0]
     trade_id = _json.loads(id_part).get('trade_id', '')
     if not trade_id:
-        return dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update
 
     trade = trade_tracker.get_trade(trade_id)
     if not trade:
         dbg = {'msg': f'[TRADE][ERR] Close single — trade {trade_id} nenalezen', 'ts': time.time()}
-        return html.Div('❌ Trade nenalezen', style={'color': '#ef5350'}), dbg
+        return html.Div('❌ Trade nenalezen', style={'color': '#ef5350'}), dbg, dash.no_update
 
     sym = trade['symbol']
-    qty = trade['qty']
-    act = 'SELL' if trade['side'] == 'BUY' else 'BUY'
 
     if not ib.is_connected():
         dbg = {'msg': f'[TRADE][ERR] Close {sym} — NOT CONNECTED', 'ts': time.time()}
-        return html.Div('❌ Not connected', style={'color': '#ef5350'}), dbg
+        return html.Div('❌ Not connected', style={'color': '#ef5350'}), dbg, dash.no_update
 
-    res        = ib.place_market_order(sym, act, qty)
+    positions = ib.get_positions() or []
+    ib_pos    = next((p for p in positions if p['symbol'] == sym and p['position'] != 0), None)
+
+    qty = abs(ib_pos['position']) if ib_pos else trade['qty']
+    act = 'SELL' if ((ib_pos and ib_pos['position'] > 0) or (not ib_pos and trade['side'] == 'BUY')) else 'BUY'
+
+    res = submit_market_order(sym, act, qty)
+    if not res['success']:
+        dbg = {'msg': f'[TRADE][ERR] CLOSE {sym} {qty}x — {res.get("error")}', 'ts': time.time()}
+        return html.Div(f'❌ {res.get("error")}', style={'color': '#ef5350', 'fontWeight': 'bold'}), dbg, dash.no_update
+
     ticker     = ib.get_ticker(sym) or {}
     exit_price = ticker.get('price') or ticker.get('last') or trade.get('entry_price', 0)
     trade_tracker.close_trade(trade_id, exit_price)
@@ -1115,7 +1153,7 @@ def close_single_position(n_clicks_list):
                f' | IB: {"OK" if res["success"] else "ERR " + str(res.get("error",""))}')
     dbg = {'msg': dbg_msg, 'ts': time.time()}
 
-    return html.Div(msg_ui, style={'color': color, 'fontWeight': 'bold'}), dbg
+    return html.Div(msg_ui, style={'color': color, 'fontWeight': 'bold'}), dbg, (refresh_counter or 0) + 1
 
 
 # ------------------------------------------------------------------
@@ -1555,6 +1593,14 @@ if __name__ == '__main__':
     if ib.connect():
         print("✅ Connected to IB Gateway!")
         time.sleep(2)  # ← PŘIDEJ TADY — dá TWS čas uvolnit session
+        print(f"🔧 Initializing order handler (clientId: {config.IB_CLIENT_ID + 1})...")
+        order_handler = OrderHandler()
+        order_handler.start()
+        time.sleep(2)
+        if order_handler.ib and order_handler.ib.isConnected():
+            print("✅ Order handler ready!")
+        else:
+            print("❌ Order handler connection failed")
     else:
         print("❌ Failed to connect")
     print("http://localhost:8050  |  Ctrl+C to stop")
