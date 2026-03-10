@@ -7,8 +7,7 @@ from dash import dcc, html, Input, Output, State
 from datetime import datetime, timedelta
 from flask import jsonify, request as freq
 from contract_utils import create_contract, get_cache_symbol, normalize_asset_type
-from ib_connector import IBConnector
-from order_handler import OrderHandler
+import ib_gateway  # Unified IB API facade
 import config
 from modules.data_store import data_store
 from modules.indicators import SMA, EMA, RSI, MACD
@@ -20,13 +19,7 @@ import signal
 def graceful_shutdown():
     print("[SHUTDOWN] Disconnecting from IB...")
     try:
-        global order_handler
-        if order_handler:
-            order_handler.stop()
-    except:
-        pass
-    try:
-        ib.disconnect()
+        ib_gateway.disconnect()
     except:
         pass
     print("[SHUTDOWN] Done.")
@@ -41,23 +34,17 @@ app = dash.Dash(
     serve_locally=True
 )
 
-ib = IBConnector()
-order_handler = None
 server = app.server
 
 
 def submit_market_order(symbol, action, quantity, asset_type='STOCK'):
-    global order_handler
-
-    if not order_handler or not order_handler.running:
-        return {'success': False, 'error': 'Order handler not running'}
-
-    return order_handler.place_order_async(
+    """Submit a market order via ib_gateway."""
+    return ib_gateway.place_order(
         symbol=(symbol or '').upper(),
-        asset_type=normalize_asset_type(asset_type),
         action=action,
         quantity=quantity,
-        order_type='MARKET'
+        order_type='MARKET',
+        asset_type=normalize_asset_type(asset_type)
     )
 
 _cb_status = {
@@ -82,32 +69,32 @@ DURATION_MAP = {
 def get_tick(symbol):
     sym        = symbol.upper()
     asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
-    price      = ib.get_latest_price(sym, asset_type)
+    price      = ib_gateway.get_latest_price(sym, asset_type)
     return jsonify({'time': int(datetime.now().timestamp()), 'price': price, 'asset_type': asset_type})
 
 @server.route('/api/deep_load_status/<symbol>/<tf>')
 def deep_load_status(symbol, tf):
     asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
-    return jsonify(ib.get_deep_load_status(symbol.upper(), tf.replace('_', ' '), asset_type))
+    return jsonify(ib_gateway.get_deep_load_status(symbol.upper(), tf.replace('_', ' '), asset_type))
 
 
 @server.route('/api/diag/tick/<symbol>')
 def api_diag_tick(symbol):
     sym        = symbol.upper()
     asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
-    ts         = ib._tick_sub
+    ts         = ib_gateway.get_tick_subscriber()
     return jsonify({
         'symbol':             sym,
         'asset_type':         asset_type,
-        'tick_sub_connected': ts.is_connected,
-        'iterations':         ts.iterations,
-        'mdt':                ts._mdt,
-        'mode':               ts.mode,
-        'subscribed_symbols': ts.subscribed_symbols,
-        'pending':            list(ts._pending),
-        'latest':             ts.get_ticker_data(sym, asset_type) or {},
-        'raw_fields':         ts.get_raw_data(sym, asset_type),
-        'ib_errors':          ts.get_last_errors(),
+        'tick_sub_connected': ts.is_connected if ts else False,
+        'iterations':         ts.iterations if ts else 0,
+        'mdt':                ts._mdt if ts else 0,
+        'mode':               ts.mode if ts else 'none',
+        'subscribed_symbols': ts.subscribed_symbols if ts else [],
+        'pending':            list(ts._pending) if ts else [],
+        'latest':             ts.get_ticker_data(sym, asset_type) or {} if ts else {},
+        'raw_fields':         ts.get_raw_data(sym, asset_type) if ts else {},
+        'ib_errors':          ts.get_last_errors() if ts else [],
         'time':               datetime.now().strftime('%H:%M:%S')
     })
 
@@ -169,18 +156,19 @@ def api_test_snapshot(symbol):
 
 @server.route('/api/diag')
 def api_diag():
+    ts = ib_gateway.get_tick_subscriber()
     return jsonify({
-        'connected':   ib.is_connected(),
-        'account_id':  ib.account_id,
+        'connected':   ib_gateway.is_connected(),
+        'account_id':  ib_gateway.get_account_id(),
         'cb_status':   _cb_status,
         'app_state':   app_state,
         'tick_sub': {
-            'connected':  ib._tick_sub.is_connected,
-            'iterations': ib._tick_sub.iterations,
-            'mdt':        ib._tick_sub._mdt,
-            'mode':       ib._tick_sub.mode,
-            'subscribed': ib._tick_sub.subscribed_symbols,
-            'ib_errors':  ib._tick_sub.get_last_errors(),
+            'connected':  ts.is_connected if ts else False,
+            'iterations': ts.iterations if ts else 0,
+            'mdt':        ts._mdt if ts else 0,
+            'mode':       ts.mode if ts else 'none',
+            'subscribed': ts.subscribed_symbols if ts else [],
+            'ib_errors':  ts.get_last_errors() if ts else [],
         },
         'time': datetime.now().strftime('%H:%M:%S')
     })
@@ -191,9 +179,9 @@ def api_test_hist(symbol):
     t0 = time.time()
     try:
         asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
-        if not ib.is_connected():
+        if not ib_gateway.is_connected():
             return jsonify({'ok': False, 'error': 'NOT CONNECTED', 'elapsed': 0})
-        bars    = ib.get_historical_data(symbol.upper(), '2 D', '5 mins', asset_type)
+        bars    = ib_gateway.get_candles(symbol.upper(), '5 mins', count=200, asset_type=asset_type)
         elapsed = round(time.time() - t0, 2)
         if bars:
             return jsonify({'ok': True, 'bars': len(bars), 'elapsed': elapsed,
@@ -268,7 +256,7 @@ def api_trades_active_lines():
 
     # Issue #4 + #3: use avgCost from IB positions (live) or from stored avg_cost in trade record.
     # Priority: IB live avgCost > stored avg_cost from fills > fill_price (entry_price).
-    ib_positions = ib.get_positions() if ib.is_connected() else []
+    ib_positions = ib_gateway.get_positions() if ib_gateway.is_connected() else []
 
     for t in trade_tracker.get_open_trades():
         if t.get('symbol') != sym:
@@ -318,7 +306,7 @@ def api_trade_close(trade_id):
     if not exit_price:
         trade = trade_tracker.get_trade(trade_id)
         if trade:
-            ticker = ib.get_ticker(trade['symbol'], trade.get('asset_type', 'STOCK'))
+            ticker = ib_gateway.get_tick(trade['symbol'], trade.get('asset_type', 'STOCK'))
             if ticker:
                 exit_price = ticker.get('price') or ticker.get('last') or trade.get('entry_price')
 
@@ -340,7 +328,7 @@ def api_trades_close_all():
     symbols      = list({(t['symbol'], t.get('asset_type', 'STOCK')) for t in open_trades})
     exit_prices  = {}
     for sym, asset_type in symbols:
-        ticker = ib.get_ticker(sym, asset_type)
+        ticker = ib_gateway.get_tick(sym, asset_type)
         if ticker:
             p = ticker.get('price') or ticker.get('last')
             if p:
@@ -727,7 +715,7 @@ app.layout = html.Div([
     Input('connection-check-interval', 'n_intervals')
 )
 def update_connection_status(n):
-    if ib.is_connected():
+    if ib_gateway.is_connected():
         return html.Span([html.Span('⚪', style={'color': '#26a69a', 'marginRight': '5px'}),
                           html.Span('Connected to IB Gateway')])
     return html.Span([html.Span('⚪', style={'color': '#ef5350', 'marginRight': '5px'}),
@@ -741,9 +729,9 @@ def update_connection_status(n):
     Input('connection-check-interval', 'n_intervals')
 )
 def update_account_info(n):
-    if not ib.is_connected():
+    if not ib_gateway.is_connected():
         return 'Not Connected', '$0.00', '$0.00'
-    d = ib.get_account_info()
+    d = ib_gateway.get_account_info()
     return (d.get('account_id', 'N/A'),
             f"${d.get('net_liquidation', 0):,.2f}",
             f"${d.get('buying_power', 0):,.2f}")
@@ -816,7 +804,7 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
             # === FIRST LOAD or RESET: fetch N candles from now ===
             print(f"[CB] INITIAL LOAD: {symbol} ({asset_type}) | {tf} | n={n_candles} | Trigger={btn}")
             _cb_status['step'] = 'requesting_IB'
-            bars = ib.get_n_bars(symbol, n_candles, tf, asset_type, end_time=None)
+            bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=None)
             _cb_status['step'] = 'IB_returned'
             _cb_status['bars'] = len(bars)
             print(f"[CB] IB returned {len(bars)} bars")
@@ -848,7 +836,7 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
             if not oldest_time:
                 print("[CB] APPEND: no oldest_time, treating as initial")
                 # Fall back to initial load
-                bars = ib.get_n_bars(symbol, n_candles, tf, asset_type, end_time=None)
+                bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=None)
                 new_meta = {
                     'load_count': 1,
                     'oldest_time': bars[0]['time'] if bars else None,
@@ -864,7 +852,7 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
             _cb_status['step'] = 'requesting_IB_older'
             
             # Fetch older bars ending just before oldest_time
-            older_bars = ib.get_n_bars(symbol, n_candles, tf, asset_type, end_time=oldest_time - 1)
+            older_bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=oldest_time - 1)
             _cb_status['step'] = 'IB_returned'
             _cb_status['bars'] = len(older_bars)
             print(f"[CB] IB returned {len(older_bars)} older bars")
@@ -1014,12 +1002,12 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
     asset_type = normalize_asset_type(asset_type)
     app_state['current_asset_type'] = asset_type
 
-    if not ib.is_connected():
+    if not ib_gateway.is_connected():
         dbg = {'msg': f'[TRADE][ERR] {action} {symbol} ({asset_type}) — NOT CONNECTED', 'ts': time.time()}
         return html.Div('❌ Not connected!',
                         style={'color': '#ef5350', 'fontWeight': 'bold'}), dash.no_update, dbg
 
-    ticker    = ib.get_ticker(symbol, asset_type) or {}
+    ticker    = ib_gateway.get_tick(symbol, asset_type) or {}
     cur_price = ticker.get('price') or ticker.get('last') or 0
 
     sl = None
@@ -1101,7 +1089,7 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
     if remaining_qty > 0:
         # Issue #3 + #2: use avg_cost from execution fills (fill_price + commission/shares)
         # This is more reliable than the positions cache which may be stale right after fill.
-        open_avg_cost, open_commission = ib.get_fill_avg_cost(symbol, asset_type)
+        open_avg_cost, open_commission = ib_gateway.get_fill_avg_cost(symbol, asset_type)
         print(f'[TRADE] open_trade avg_cost from fills: {open_avg_cost} commission: {open_commission}')
         trade_tracker.open_trade(
             symbol=symbol, side=action, qty=remaining_qty,
@@ -1154,11 +1142,11 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
 def close_all_positions(n, refresh_counter):
     if not n:
         return '', dash.no_update, dash.no_update
-    if not ib.is_connected():
+    if not ib_gateway.is_connected():
         dbg = {'msg': '[TRADE][ERR] CLOSE ALL — NOT CONNECTED', 'ts': time.time()}
         return '❌ Not connected', dash.no_update, dbg
 
-    positions       = ib.get_positions() or []
+    positions       = ib_gateway.get_positions() or []
     errors          = []
     closed          = 0
     closed_symbols  = set()
@@ -1175,7 +1163,7 @@ def close_all_positions(n, refresh_counter):
         if res['success']:
             closed += 1
             closed_symbols.add(sym)
-            ticker = ib.get_ticker(sym, asset_type) or {}
+            ticker = ib_gateway.get_tick(sym, asset_type) or {}
             p      = ticker.get('price') or ticker.get('last')
             if p:
                 exit_prices[sym] = p
@@ -1211,10 +1199,10 @@ def close_all_positions(n, refresh_counter):
     prevent_initial_call='initial_duplicate'
 )
 def update_positions_table(n, _refresh, _btn):
-    if not ib.is_connected():
+    if not ib_gateway.is_connected():
         return html.Div('Not connected', style={'color': '#888'}), dash.no_update
 
-    positions = ib.get_positions() or []
+    positions = ib_gateway.get_positions() or []
     open_trades = {t['symbol']: t for t in trade_tracker.get_open_trades()}
     now = int(time.time())
     ib_symbols = {p['symbol'] for p in positions}
@@ -1339,11 +1327,11 @@ def close_single_position(n_clicks_list, refresh_counter):
 
     sym = trade['symbol']
 
-    if not ib.is_connected():
+    if not ib_gateway.is_connected():
         dbg = {'msg': f'[TRADE][ERR] Close {sym} — NOT CONNECTED', 'ts': time.time()}
         return html.Div('❌ Not connected', style={'color': '#ef5350'}), dbg, dash.no_update
 
-    positions = ib.get_positions() or []
+    positions = ib_gateway.get_positions() or []
     ib_pos    = next((p for p in positions if p['symbol'] == sym and p['position'] != 0), None)
 
     asset_type = ib_pos.get('asset_type', trade.get('asset_type', 'STOCK')) if ib_pos else trade.get('asset_type', 'STOCK')
@@ -1355,7 +1343,7 @@ def close_single_position(n_clicks_list, refresh_counter):
         dbg = {'msg': f'[TRADE][ERR] CLOSE {sym} {qty}x — {res.get("error")}', 'ts': time.time()}
         return html.Div(f'❌ {res.get("error")}', style={'color': '#ef5350', 'fontWeight': 'bold'}), dbg, dash.no_update
 
-    ticker     = ib.get_ticker(sym, asset_type) or {}
+    ticker     = ib_gateway.get_tick(sym, asset_type) or {}
     exit_price = ticker.get('price') or ticker.get('last') or trade.get('entry_price', 0)
     trade_tracker.close_trade(trade_id, exit_price)
 
@@ -1445,9 +1433,9 @@ def update_trade_history(_n, _refresh):
     Input('positions-update-interval', 'n_intervals')
 )
 def update_orders_table(n):
-    if not ib.is_connected():
+    if not ib_gateway.is_connected():
         return html.Div('Not connected', style={'color': '#888'})
-    orders = ib.get_recent_orders(limit=10)
+    orders = ib_gateway.get_recent_orders(limit=10)
     if not orders:
         return html.Div('No recent orders', style={'color': '#888'})
     icons  = {'Filled': '✅', 'Submitted': '⏳', 'Cancelled': '❌', 'PendingSubmit': '🕒'}
@@ -1783,8 +1771,8 @@ app.clientside_callback(
      State('asset-type-select', 'value')]
 )
 def update_price_display(n, symbol, asset_type):
-    if not symbol or not ib.is_connected(): return 'Last: $0.00', ''
-    ticker = ib.get_ticker(symbol, normalize_asset_type(asset_type))
+    if not symbol or not ib_gateway.is_connected(): return 'Last: $0.00', ''
+    ticker = ib_gateway.get_tick(symbol, normalize_asset_type(asset_type))
     if not ticker: return 'Last: $0.00', ''
     lp = ticker.get('price', 0) or ticker.get('last', 0)
     pc = ticker.get('close', lp) or lp
@@ -1988,17 +1976,9 @@ app.index_string = '''
 if __name__ == '__main__':
     print("🚀 Starting IB Trading Platform v3.0.0...")
     print(f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
-    if ib.connect():
+    if ib_gateway.connect():
         print("✅ Connected to IB Gateway!")
-        time.sleep(2)  # ← PŘIDEJ TADY — dá TWS čas uvolnit session
-        print(f"🔧 Initializing order handler (clientId: {config.IB_CLIENT_ID + 1})...")
-        order_handler = OrderHandler()
-        order_handler.start()
-        time.sleep(2)
-        if order_handler.ib and order_handler.ib.isConnected():
-            print("✅ Order handler ready!")
-        else:
-            print("❌ Order handler connection failed")
+        time.sleep(2)  # Give TWS time to release session
     else:
         print("❌ Failed to connect")
     print("http://localhost:8050  |  Ctrl+C to stop")

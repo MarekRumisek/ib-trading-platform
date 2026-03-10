@@ -22,10 +22,12 @@ Only files and directories listed here actually exist in the repository.
 ib-trading-platform/
 ├── app.py                  ← Main entry point (Dash UI + Flask API)
 ├── app_simple.py           ← Flask version using OrderHandler pattern
-├── ib_connector.py         ← All IB API logic (3 classes, 3 clientIds)
-├── order_handler.py        ← Dedicated thread for order submission
+├── ib_gateway.py           ← 🆕 Unified facade for IB API (USE THIS)
+├── ib_connector.py         ← Internal: IB API logic (3 classes, 3 clientIds)
+├── order_handler.py        ← Internal: Dedicated thread for order submission
+├── contract_utils.py       ← Contract creation utilities
 ├── config.py               ← IB connection configuration
-├── debug.py                ← Diagnostic tools
+├── debug.py                ← Interactive CLI debug tool (imports ib_gateway only)
 ├── test_order.py           ← Diagnostic script for testing orders
 ├── requirements.txt
 ├── .gitignore
@@ -46,6 +48,7 @@ ib-trading-platform/
 │   └── custom.css
 └── data/                   ← Runtime data, in .gitignore — not committed
     ├── trades/trades.json  ← Closed trade history (append-only)
+    ├── debug.log           ← Debug log from ib_gateway
     └── bars/               ← Parquet bar cache: {SYMBOL}_{TF}_{YYYY-MM}.parquet
 ```
 
@@ -55,6 +58,51 @@ ib-trading-platform/
 - `assets/indicators.js` — planned, not implemented
 - `modules/indicators/bollinger.py` — planned, not implemented
 - `modules/indicators/atr.py` — planned, not implemented
+
+---
+
+## 🟢 NEW: ib_gateway.py — Unified API Facade
+
+**All code should import `ib_gateway` instead of `ib_connector` or `order_handler`.**
+
+```python
+# ✅ CORRECT
+import ib_gateway
+
+ib_gateway.connect()
+candles = ib_gateway.get_candles('AAPL', '5 mins', count=60)
+tick = ib_gateway.get_tick('AAPL')
+info = ib_gateway.get_account_info()
+positions = ib_gateway.get_positions()
+result = ib_gateway.place_order('AAPL', 'BUY', 1, 'MARKET')
+ib_gateway.disconnect()
+
+# Kill orphaned connections
+ib_gateway.kill_all_connections()
+
+# ❌ WRONG — do not import these directly
+from ib_connector import IBConnector
+from order_handler import OrderHandler
+```
+
+### ib_gateway Functions
+
+| Function                                                                | Returns        | Description                         |
+| ----------------------------------------------------------------------- | -------------- | ----------------------------------- |
+| `connect(client_id_offset=0)`                                           | `bool`         | Connect to IB                       |
+| `disconnect()`                                                          | `None`         | Disconnect from IB                  |
+| `reconnect()`                                                           | `bool`         | Reconnect                           |
+| `is_connected()`                                                        | `bool`         | Check connection status             |
+| `get_candles(symbol, timeframe, count, asset_type)`                     | `list[dict]`   | Get OHLCV data                      |
+| `get_tick(symbol, asset_type)`                                          | `dict or None` | Get current price                   |
+| `subscribe_tick(symbol, asset_type)`                                    | `None`         | Subscribe to live ticks             |
+| `unsubscribe_tick(symbol, asset_type)`                                  | `None`         | Unsubscribe                         |
+| `get_account_info()`                                                    | `dict`         | Account balance, margin             |
+| `get_positions()`                                                       | `list[dict]`   | Open positions                      |
+| `place_order(symbol, action, qty, order_type, limit_price, asset_type)` | `dict`         | Place order                         |
+| `kill_all_connections()`                                                | `dict`         | Kill all IB connections, free ports |
+| `get_tick_diagnostics()`                                                | `dict`         | Tick subscriber diagnostics         |
+| `test_connection()`                                                     | `dict`         | Test and diagnose connection        |
 
 ---
 
@@ -78,11 +126,11 @@ Paper Trading TWS needs time to validate an order. Without `ib.sleep()` + `time.
 ### Correct Pattern for Placing Orders
 
 ```python
-# ✅ CORRECT: Use OrderHandler
-from order_handler import OrderHandler
-handler = OrderHandler()
-handler.start()
-result = handler.place_order(symbol='AAPL', action='BUY', quantity=1)
+# ✅ CORRECT: Use ib_gateway
+import ib_gateway
+
+ib_gateway.connect()
+result = ib_gateway.place_order(symbol='AAPL', action='BUY', quantity=1)
 
 # ❌ WRONG: Direct call from a Flask route
 @app.route('/buy')
@@ -182,6 +230,7 @@ Do not guess method signatures — always check API.md first.
 - `modules/*.py` must not import `app.py` or `ib_connector.py`
 - `ib_connector.py` must not import anything from `modules/`
 - All communication goes through `app.py` as the mediator
+- **NEW:** Use `import ib_gateway` instead of `from ib_connector import IBConnector`
 
 ### `modules/data_store.py`
 
@@ -243,7 +292,7 @@ Output: `list[dict]` with keys `time, value` (or multi-key dict for MACD)
 
 **Dash callbacks:**
 
-- Load Chart → `ib_connector.get_historical_data()` → `dcc.Store` → JS `loadData()`
+- Load Chart → `ib_gateway.get_candles()` → `dcc.Store` → JS `loadData()`
 - TF buttons → change `barSizeSetting` + `durationStr`, reinitialize chart
 - TICK ON/OFF → JS `setTickEnabled()`
 - Tick Diag, Snapshot Test → Flask endpoints via `fetch()`
@@ -295,6 +344,7 @@ DEBUG_CONNECTION = True  # verbose connection logs
 ## Testing
 
 ```bash
+python debug.py                    # interactive CLI for IB testing (uses ib_gateway)
 python modules/data_store.py       # demo: save/load bars
 python modules/trade_tracker.py    # demo: save trade and statistics
 python test_order.py               # diagnose IB connection + place BUY 1 AAPL, monitor 15s
@@ -358,3 +408,10 @@ Do not reference these as existing. Implement only when explicitly requested.
 - US markets open? (9:30–16:00 ET)
 - Symbol uppercase? (AAPL not aapl)
 - Market data subscription active on IB account?
+
+### CODE mode restrictions:
+
+- Max 1 file edit per cycle
+- No opening unrelated files
+- Must reference existing plan/task ID
+- Scratchpad-only planning (no codegen)
