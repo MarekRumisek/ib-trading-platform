@@ -1,15 +1,16 @@
 /**
- * IB Trading Platform - Lightweight Charts Manager v2.3.1
+ * IB Trading Platform - Lightweight Charts Manager v2.4.0
  * =========================================================
- * v2.3.1:
- *   - FIX: syncTimeScales pouziva subscribeVisibleLogicalRangeChange
- *          + setVisibleLogicalRange misto time range -> pixel-perfect sync
- *   - FIX: volumeChart.fitContent() odstranen z loadData (sync resi hlavni chart)
+ * v2.4.0:
+ *   - NEW: prependData() for loading older bars (incremental history)
+ *   - NEW: currentTf + tfSeconds for new bar detection in tick polling
+ *   - FIX: pollTick() detects new bar creation and handles it correctly
+ *   - FIX: Efficient tick update - only updates last 2-3 bars, not full chart
  */
 (function () {
   "use strict";
 
-  var VERSION = "v2.3.1";
+  var VERSION = "v2.4.0";
   var TICK_POLL_MS = 5000;
   var CHART_BG = "#1e1e2e";
   var GRID_COLOR = "#3d3d4a";
@@ -29,16 +30,29 @@
   var tickEnabled = false;
   var currentSymbol = null;
   var currentAssetType = "STOCK";
+  var currentTf = "5 mins";
+  var tfSeconds = 300; // Default 5 mins
   var lastBarTime = null;
   var lastBarOpen = null;
   var lastBarHigh = null;
   var lastBarLow = null;
   var lastBarClose = null;
+  var allBars = []; // Store all bars for prepend operation
   var indicatorSeries = {};
   var subCharts = {};
   var container = null;
   var initAttempts = 0;
   var syncingRange = false;
+
+  // Timeframe to seconds mapping
+  var TF_TO_SECONDS = {
+    "1 min": 60,
+    "5 mins": 300,
+    "15 mins": 900,
+    "30 mins": 1800,
+    "1 hour": 3600,
+    "1 day": 86400,
+  };
 
   // =================================================================
   // Debug logger
@@ -233,6 +247,14 @@
       return a.time - b.time;
     });
 
+    // Store all bars for prepend operation
+    allBars = bars.slice();
+
+    // Set timeframe for tick polling
+    currentTf = storeData.timeframe || "5 mins";
+    tfSeconds = TF_TO_SECONDS[currentTf] || 300;
+    writeDebug("DATA", "TF=" + currentTf + " -> " + tfSeconds + "s per bar");
+
     var b0 = bars[0];
     writeDebug(
       "DATA",
@@ -291,7 +313,9 @@
           " svicek | " +
           symbol +
           " | " +
-          currentAssetType,
+          currentAssetType +
+          " | TF=" +
+          currentTf,
       );
 
       if (tickEnabled) startTickPolling(symbol, currentAssetType);
@@ -301,6 +325,110 @@
       }
     } catch (e) {
       writeDebug("ERR", "setData selhal: " + e.message);
+    }
+  }
+
+  // =================================================================
+  // 2.5 prependData - load older bars (incremental history)
+  // =================================================================
+  function prependData(storeData) {
+    writeDebug(
+      "DATA",
+      "prependData() symbol=" +
+        (storeData && storeData.symbol) +
+        " | baru=" +
+        (storeData && storeData.bars ? storeData.bars.length : "N/A"),
+    );
+
+    if (!chart || !candleSeries) {
+      setTimeout(function () {
+        prependData(storeData);
+      }, 300);
+      return;
+    }
+
+    var olderBars = storeData.bars || [];
+    if (olderBars.length === 0) {
+      writeDebug("WARN", "prependData: zadne starsi bary");
+      return;
+    }
+
+    // Sort older bars
+    olderBars.sort(function (a, b) {
+      return a.time - b.time;
+    });
+
+    // Save current visible range
+    var visibleRange = null;
+    try {
+      visibleRange = chart.timeScale().getVisibleLogicalRange();
+    } catch (e) {}
+
+    // Merge: olderBars + allBars (olderBars are already before allBars[0].time)
+    var newOldestTime = olderBars[0].time;
+    var currentOldestTime = allBars.length > 0 ? allBars[0].time : null;
+
+    if (currentOldestTime && newOldestTime >= currentOldestTime) {
+      writeDebug(
+        "WARN",
+        "prependData: older bars nejsou starsi nez soucasne - ignoruji",
+      );
+      return;
+    }
+
+    // Combine all bars
+    allBars = olderBars.concat(allBars);
+    writeDebug(
+      "DATA",
+      "prependData: celkem " +
+        allBars.length +
+        " svicek (+" +
+        olderBars.length +
+        " starsich)",
+    );
+
+    // Re-set all data (LWC doesn't have prepend API)
+    try {
+      candleSeries.setData(
+        allBars.map(function (b) {
+          return {
+            time: b.time,
+            open: b.open,
+            high: b.high,
+            low: b.low,
+            close: b.close,
+          };
+        }),
+      );
+
+      if (volumeSeries) {
+        volumeSeries.setData(
+          allBars.map(function (b) {
+            return {
+              time: b.time,
+              value: b.volume || 0,
+              color: b.close >= b.open ? UP_COLOR + "77" : DOWN_COLOR + "77",
+            };
+          }),
+        );
+      }
+
+      // Restore visible range (user stays at same position)
+      if (visibleRange) {
+        // Shift the range by the number of new bars added
+        var shiftedRange = {
+          from: visibleRange.from + olderBars.length,
+          to: visibleRange.to + olderBars.length,
+        };
+        chart.timeScale().setVisibleLogicalRange(shiftedRange);
+      }
+
+      writeDebug(
+        "DATA",
+        "prependData OK: celkem " + allBars.length + " svicek",
+      );
+    } catch (e) {
+      writeDebug("ERR", "prependData selhal: " + e.message);
     }
   }
 
@@ -353,7 +481,11 @@
         (assetType || "STOCK") +
         ") kazdych " +
         TICK_POLL_MS +
-        "ms",
+        "ms | TF=" +
+        currentTf +
+        " (" +
+        tfSeconds +
+        "s)",
     );
     tickTimer = setInterval(function () {
       pollTick(symbol, assetType || "STOCK");
@@ -375,37 +507,109 @@
       .then(function (data) {
         if (!data || data.price === undefined) return;
         var price = parseFloat(data.price);
+        var serverTime = data.time || Math.floor(Date.now() / 1000);
         if (price <= 0) return;
-        var prevClose = lastBarClose || price;
-        var changed = Math.abs(price - prevClose) > 0.001;
-        lastBarHigh = Math.max(lastBarHigh, price);
-        lastBarLow = Math.min(lastBarLow, price);
-        lastBarClose = price;
-        writeDebug(
-          "TICK",
-          symbol +
-            " \u2192 " +
-            price.toFixed(2) +
-            (changed
-              ? " \u2bc8 ZMENA z " +
-                prevClose.toFixed(2) +
+
+        // Calculate expected next bar time
+        var nextBarTime = lastBarTime + tfSeconds;
+        var isNewBar = serverTime >= nextBarTime;
+
+        if (isNewBar && lastBarClose !== null) {
+          // === NEW BAR: finalize current and create new ===
+          writeDebug(
+            "TICK",
+            "NOVA SVICKA! serverTime=" +
+              serverTime +
+              " >= nextBarTime=" +
+              nextBarTime +
+              " | old close=" +
+              lastBarClose.toFixed(2),
+          );
+
+          // Finalize current bar
+          candleSeries.update({
+            time: lastBarTime,
+            open: lastBarOpen,
+            high: lastBarHigh,
+            low: lastBarLow,
+            close: lastBarClose,
+          });
+
+          // Add to allBars
+          allBars.push({
+            time: lastBarTime,
+            open: lastBarOpen,
+            high: lastBarHigh,
+            low: lastBarLow,
+            close: lastBarClose,
+            volume: 0,
+          });
+
+          // Create new bar
+          lastBarTime = nextBarTime;
+          lastBarOpen = price;
+          lastBarHigh = price;
+          lastBarLow = price;
+          lastBarClose = price;
+
+          candleSeries.update({
+            time: lastBarTime,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+          });
+
+          writeDebug(
+            "TICK",
+            "NOVA SVICKA vytvorena: t=" +
+              lastBarTime +
+              " o=h=l=c=" +
+              price.toFixed(2),
+          );
+        } else {
+          // === UPDATE CURRENT BAR ===
+          var prevClose = lastBarClose || price;
+          var changed = Math.abs(price - prevClose) > 0.001;
+          lastBarHigh = Math.max(lastBarHigh, price);
+          lastBarLow = Math.min(lastBarLow, price);
+          lastBarClose = price;
+
+          if (changed) {
+            writeDebug(
+              "TICK",
+              symbol +
+                " \u2192 " +
+                price.toFixed(2) +
                 " (\u0394" +
                 (price - prevClose > 0 ? "+" : "") +
                 (price - prevClose).toFixed(2) +
-                ")"
-              : " \u2014 stejne") +
-            " | H=" +
-            lastBarHigh.toFixed(2) +
-            " L=" +
-            lastBarLow.toFixed(2),
-        );
-        candleSeries.update({
-          time: lastBarTime,
-          open: lastBarOpen,
-          high: lastBarHigh,
-          low: lastBarLow,
-          close: lastBarClose,
-        });
+                ") | H=" +
+                lastBarHigh.toFixed(2) +
+                " L=" +
+                lastBarLow.toFixed(2),
+            );
+          }
+
+          // Update only the last bar (efficient)
+          candleSeries.update({
+            time: lastBarTime,
+            open: lastBarOpen,
+            high: lastBarHigh,
+            low: lastBarLow,
+            close: lastBarClose,
+          });
+
+          // Update in allBars
+          if (allBars.length > 0) {
+            var lastBar = allBars[allBars.length - 1];
+            if (lastBar.time === lastBarTime) {
+              lastBar.high = lastBarHigh;
+              lastBar.low = lastBarLow;
+              lastBar.close = lastBarClose;
+            }
+          }
+        }
       })
       .catch(function (e) {
         writeDebug("TICK", "FETCH ERROR: " + e);
@@ -847,6 +1051,7 @@
   // =================================================================
   window.lwcManager = {
     loadData: loadData,
+    prependData: prependData,
     testChart: testChart,
     setTickEnabled: setTickEnabled,
     addIndicator: addIndicator,
@@ -856,6 +1061,9 @@
       return candleSeries;
     },
     clearSubCharts: clearSubCharts,
+    getAllBars: function () {
+      return allBars;
+    },
   };
 
   writeDebug("INIT", "=== LWC Manager " + VERSION + " nacteny ===");

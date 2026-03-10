@@ -1,0 +1,4 @@
+/* Skryti TradingView attribution ikonky na vsech LWC chartech */
+a[href*="tradingview.com"] {
+    display: none !important;
+}

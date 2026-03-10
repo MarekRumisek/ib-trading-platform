@@ -37,29 +37,9 @@ import threading
 import asyncio
 from queue import Queue
 import time
-import uuid
 from typing import Optional, Dict, Any
-from ib_async import IB, MarketOrder, LimitOrder
-from contract_utils import create_contract, normalize_asset_type, sanitize_symbol, ASSET_TYPE_FOREX
+from ib_async import IB, Stock, MarketOrder, LimitOrder
 import config
-
-# Base clientId for order handler; incremented on each reconnect to avoid conflicts
-# Use clientId 6+ to avoid conflicts with:
-#   1 = IBConnector main, 2 = _HistWorker, 3 = _TickSubscriber (fallback 4,5), 4 = POS-BG
-_ORDER_HANDLER_BASE_CLIENT_ID = config.IB_CLIENT_ID + 5
-_client_id_counter_lock = threading.Lock()
-_client_id_counter = _ORDER_HANDLER_BASE_CLIENT_ID
-
-
-def _next_client_id() -> int:
-    """Return next unique clientId for order handler connections."""
-    global _client_id_counter
-    with _client_id_counter_lock:
-        cid = _client_id_counter
-        # Cycle through range 6–9 to avoid conflicts with known clientIds (1–5, 10+)
-        _client_id_counter = cid + 1 if cid < 9 else _ORDER_HANDLER_BASE_CLIENT_ID
-        return cid
-
 
 class OrderHandler:
     """Thread-safe order handler with dedicated IB connection and event loop.
@@ -76,13 +56,11 @@ class OrderHandler:
     def __init__(self):
         """Initialize handler (IB connection created in thread)."""
         self.order_queue = Queue()
+        self.result_queue = Queue()
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self.loop: Optional[asyncio.AbstractEventLoop] = None
         self.ib: Optional[IB] = None
-        self._client_id: Optional[int] = None
-        self._pending: Dict[str, Dict[str, Any]] = {}
-        self._pending_lock = threading.Lock()
         
     def start(self):
         """Start the order handler thread."""
@@ -130,44 +108,30 @@ class OrderHandler:
         self.ib = IB()
         
         try:
-            # Connect to IB in this thread with clientId retry to avoid 326 collisions
-            last_error = None
-            for attempt in range(4):
-                self._client_id = _next_client_id()
-
-                if config.DEBUG_ORDERS:
-                    print(f"\n🔄 Order handler connecting to IB...")
-                    print(f"   Thread: {threading.current_thread().name}")
-                    print(f"   Host: {config.IB_HOST}:{config.IB_PORT}")
-                    print(f"   Client ID: {self._client_id}")
-
-                try:
-                    self.ib.connect(
-                        config.IB_HOST,
-                        config.IB_PORT,
-                        clientId=self._client_id  # Unique clientId per connection attempt
-                    )
-                    break
-                except Exception as e:
-                    last_error = e
-                    if config.DEBUG_ORDERS:
-                        print(f"❌ Order handler connect attempt {attempt + 1}/4 failed: {e}")
-                    time.sleep(0.5)
-            else:
-                raise last_error or RuntimeError('Order handler failed to connect to IB')
+            # Connect to IB in this thread
+            if config.DEBUG_ORDERS:
+                print(f"\n🔄 Order handler connecting to IB...")
+                print(f"   Thread: {threading.current_thread().name}")
+                print(f"   Host: {config.IB_HOST}:{config.IB_PORT}")
+                print(f"   Client ID: {config.IB_CLIENT_ID + 1}")
+            
+            self.ib.connect(
+                config.IB_HOST,
+                config.IB_PORT,
+                clientId=config.IB_CLIENT_ID + 1  # Different clientId!
+            )
             
             if config.DEBUG_ORDERS:
                 print("✅ Order handler connected to IB!")
                 print(f"🔄 Order handler event loop running\n")
-
-            self.ib.reqOpenOrders()
             
             # Process orders in this thread's event loop
             while self.running and self.ib.isConnected():
                 # Check for new orders
                 if not self.order_queue.empty():
                     order_data = self.order_queue.get()
-                    self._process_order(order_data)
+                    result = self._process_order(order_data)
+                    self.result_queue.put(result)
                 else:
                     # CRITICAL: Use ib.sleep() to keep event loop alive!
                     self.ib.sleep(0.01)
@@ -192,38 +156,24 @@ class OrderHandler:
         Returns:
             Order result dictionary
         """
-        correlation_id = order_data.get('correlation_id')
         symbol = order_data['symbol']
-        asset_type = normalize_asset_type(order_data.get('asset_type'))
         action = order_data['action']
         quantity = order_data['quantity']
         order_type = order_data['order_type']
         limit_price = order_data.get('limit_price')
         timeout = order_data.get('timeout', 15)
-        result = None
         
         if config.DEBUG_ORDERS:
             print("\n" + "="*60)
             print("🚀 ORDER HANDLER: PLACING ORDER")
             print("="*60)
-            print(f"📤 Order: {action} {quantity} {symbol} ({asset_type}) @ {order_type}")
+            print(f"📤 Order: {action} {quantity} {symbol} @ {order_type}")
             print(f"📝 Thread: {threading.current_thread().name}")
             print(f"🔗 IB Connected: {self.ib.isConnected()}")
         
         try:
-            # BUG 4 FIX: Default Forex quantity to 20000 (IDEALPRO minimum)
-            is_forex = (asset_type == ASSET_TYPE_FOREX)
-            if is_forex and quantity < 20000:
-                if config.DEBUG_ORDERS:
-                    print(f"⚠️ Forex quantity {quantity} below IDEALPRO minimum — adjusting to 20000")
-                quantity = 20000
-
             # Create contract
-            contract = create_contract(symbol, asset_type)
-            qualified = self.ib.qualifyContracts(contract)
-            if qualified:
-                contract = qualified[0]
-            print(f"📄 Contract: {sanitize_symbol(symbol, asset_type)} ({asset_type}) conId={getattr(contract, 'conId', None)}")
+            contract = Stock(symbol, 'SMART', 'USD')
             
             # Create order
             if order_type == 'LIMIT' and limit_price:
@@ -232,16 +182,11 @@ class OrderHandler:
                 order = MarketOrder(action, quantity)
             
             order.transmit = True
-            # BUG 3 FIX: Always use GTC to prevent TWS preset from forcing TIF=DAY
-            # and cancelling the order (error 10349).
-            # Forex trades 24/5 — outsideRth is irrelevant and triggers warning 2109.
-            order.tif = 'GTC'
-            if not is_forex:
-                order.outsideRth = True
+            order.outsideRth = True
             
             if config.DEBUG_ORDERS:
                 print(f"📨 Order created: {order_type}")
-                print(f"⚙️ Transmit: {order.transmit}, TIF: {order.tif}, OutsideRTH: {getattr(order, 'outsideRth', False)}")
+                print(f"⚙️ Transmit: {order.transmit}, OutsideRTH: {order.outsideRth}")
             
             # Place order
             print(f"\n🚀 Submitting to IB (timeout: {timeout}s)...")
@@ -325,7 +270,7 @@ class OrderHandler:
             # Determine success
             success = final_status in ['Submitted', 'Filled', 'PreSubmitted']
             
-            result = {
+            return {
                 'success': success,
                 'order_id': order_id,
                 'status': final_status,
@@ -340,26 +285,16 @@ class OrderHandler:
                 import traceback
                 traceback.print_exc()
             
-            result = {
+            return {
                 'success': False,
                 'error': str(e),
                 'order_id': None,
                 'status': 'Error'
             }
-
-        finally:
-            if correlation_id:
-                with self._pending_lock:
-                    pending = self._pending.get(correlation_id)
-                    if pending is not None:
-                        pending['result'] = result
-                        pending['event'].set()
-
-        return result
     
     def place_order_async(self, symbol: str, action: str, quantity: int,
                          order_type: str = 'MARKET', limit_price: Optional[float] = None,
-                         timeout: int = 15, asset_type: str = 'STOCK') -> Dict[str, Any]:
+                         timeout: int = 15) -> Dict[str, Any]:
         """Place order asynchronously through dedicated handler thread.
         
         This method is thread-safe and can be called from Flask routes.
@@ -386,21 +321,10 @@ class OrderHandler:
                 'success': False,
                 'error': 'Order handler not connected to IB'
             }
-
-        correlation_id = str(uuid.uuid4())
-        event = threading.Event()
-
-        with self._pending_lock:
-            self._pending[correlation_id] = {
-                'event': event,
-                'result': None
-            }
         
         # Queue the order
         order_data = {
-            'correlation_id': correlation_id,
             'symbol': symbol,
-            'asset_type': asset_type,
             'action': action,
             'quantity': quantity,
             'order_type': order_type,
@@ -412,14 +336,14 @@ class OrderHandler:
         
         # Wait for result (with timeout)
         max_wait = timeout + 10  # Extra buffer for processing
-        completed = event.wait(timeout=max_wait)
-
-        with self._pending_lock:
-            pending = self._pending.pop(correlation_id, None)
-
-        if completed and pending and pending['result'] is not None:
-            return pending['result']
-
+        start_time = time.time()
+        
+        while time.time() - start_time < max_wait:
+            if not self.result_queue.empty():
+                return self.result_queue.get()
+            time.sleep(0.1)
+        
+        # Timeout
         return {
             'success': False,
             'error': f'Order handler timeout after {max_wait}s'
