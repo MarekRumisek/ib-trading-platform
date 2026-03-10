@@ -43,6 +43,10 @@
   var container = null;
   var initAttempts = 0;
   var syncingRange = false;
+  var volumePaddingLeft = 0; // Pocet padding baru vlevo od prvniho OHLCV baru ve volumeSeries
+  var tickPollCount = 0; // counts poll cycles for indicator refresh
+  var INDICATOR_REFRESH_EVERY = 12; // refresh indicators every ~60s (12 * 5s)
+  var activeIndicatorSettings = null; // last known indicator settings
 
   // Timeframe to seconds mapping
   var TF_TO_SECONDS = {
@@ -253,6 +257,8 @@
     // Set timeframe for tick polling
     currentTf = storeData.timeframe || "5 mins";
     tfSeconds = TF_TO_SECONDS[currentTf] || 300;
+    tickPollCount = 0; // reset indicator refresh counter on new load
+    volumePaddingLeft = 0; // reset padding offset - bude nastaveno po nacteni indikatoru
     writeDebug("DATA", "TF=" + currentTf + " -> " + tfSeconds + "s per bar");
 
     var b0 = bars[0];
@@ -304,7 +310,7 @@
       currentSymbol = symbol;
       currentAssetType = storeData.asset_type || "STOCK";
 
-      // fitContent na hlavnim chartu spusti logicalRangeChange -> sync vsechno
+      // fitContent na hlavnim chartu spusti timeRangeChange -> sync volume (time-based)
       chart.timeScale().fitContent();
       writeDebug(
         "DATA",
@@ -421,12 +427,17 @@
           to: visibleRange.to + olderBars.length,
         };
         chart.timeScale().setVisibleLogicalRange(shiftedRange);
+        // Volume chart se synchronizuje automaticky pres subscribeVisibleTimeRangeChange
       }
 
       writeDebug(
         "DATA",
         "prependData OK: celkem " + allBars.length + " svicek",
       );
+      // Obnov indikatoru po pridani starsich baru (EMA/SMA potřebuje nová data)
+      if (activeIndicatorSettings) {
+        refreshIndicatorsIfNeeded();
+      }
     } catch (e) {
       writeDebug("ERR", "prependData selhal: " + e.message);
     }
@@ -492,9 +503,46 @@
     }, TICK_POLL_MS);
   }
 
+  function refreshIndicatorsIfNeeded() {
+    if (!activeIndicatorSettings || !currentSymbol || !currentTf) return;
+    var settings = activeIndicatorSettings;
+    var active = [];
+    if (settings.sma) active.push("sma");
+    if (settings.ema) active.push("ema");
+    if (settings.rsi) active.push("rsi");
+    if (settings.macd) active.push("macd");
+    if (active.length === 0) return;
+    var tf = currentTf.replace(/ /g, "_");
+    var url =
+      "/api/indicators/" +
+      currentSymbol +
+      "/" +
+      tf +
+      "?active=" +
+      active.join(",") +
+      "&asset_type=" +
+      encodeURIComponent(currentAssetType);
+    fetch(url)
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (data) {
+        if (!data.ok) return;
+        if (window.lwcManager && window.lwcManager.setIndicators)
+          window.lwcManager.setIndicators(data);
+      })
+      .catch(function (e) {
+        writeDebug("IND", "Auto-refresh error: " + e);
+      });
+  }
+
   function pollTick(symbol, assetType) {
     if (!tickEnabled || !symbol || !candleSeries || lastBarTime === null)
       return;
+    tickPollCount++;
+    if (tickPollCount % INDICATOR_REFRESH_EVERY === 0) {
+      refreshIndicatorsIfNeeded();
+    }
     fetch(
       "/api/tick/" +
         encodeURIComponent(symbol) +
@@ -507,35 +555,78 @@
       .then(function (data) {
         if (!data || data.price === undefined) return;
         var price = parseFloat(data.price);
-        var serverTime = data.time || Math.floor(Date.now() / 1000);
         if (price <= 0) return;
 
-        // Calculate expected next bar time
-        var nextBarTime = lastBarTime + tfSeconds;
-        var isNewBar = serverTime >= nextBarTime;
+        // Use tick's own timestamp to determine which bar it belongs to.
+        // This correctly handles demo account ~15min delay: the tick's timestamp
+        // reflects the actual market time, not the current system clock.
+        var tickTime = data.time
+          ? parseInt(data.time)
+          : Math.floor(Date.now() / 1000);
 
-        if (isNewBar && lastBarClose !== null) {
-          // === NEW BAR: finalize current and create new ===
+        // Align tick timestamp to the bar it belongs to (floor to TF boundary)
+        var tickBarTime = Math.floor(tickTime / tfSeconds) * tfSeconds;
+
+        // Determine if this tick belongs to last known bar, a past bar, or a new bar
+        if (tickBarTime < lastBarTime) {
+          // === DELAYED TICK: belongs to a previous bar - update that bar in allBars ===
           writeDebug(
             "TICK",
-            "NOVA SVICKA! serverTime=" +
-              serverTime +
-              " >= nextBarTime=" +
-              nextBarTime +
+            "DELAYED TICK: tickBarTime=" +
+              tickBarTime +
+              " < lastBarTime=" +
+              lastBarTime +
+              " | Updating past bar with price=" +
+              price.toFixed(2),
+          );
+          // Find and update the matching bar in allBars
+          for (var i = allBars.length - 1; i >= 0; i--) {
+            if (allBars[i].time === tickBarTime) {
+              allBars[i].high = Math.max(allBars[i].high, price);
+              allBars[i].low = Math.min(allBars[i].low, price);
+              allBars[i].close = price;
+              candleSeries.update({
+                time: allBars[i].time,
+                open: allBars[i].open,
+                high: allBars[i].high,
+                low: allBars[i].low,
+                close: allBars[i].close,
+              });
+              break;
+            }
+          }
+          return;
+        }
+
+        if (tickBarTime > lastBarTime && lastBarClose !== null) {
+          // === NEW BAR: tick belongs to a bar after the current one ===
+          writeDebug(
+            "TICK",
+            "NOVA SVICKA! tickBarTime=" +
+              tickBarTime +
+              " > lastBarTime=" +
+              lastBarTime +
               " | old close=" +
               lastBarClose.toFixed(2),
           );
 
-          // Finalize current bar
-          candleSeries.update({
-            time: lastBarTime,
-            open: lastBarOpen,
-            high: lastBarHigh,
-            low: lastBarLow,
-            close: lastBarClose,
-          });
+          // Finalize current bar in allBars
+          if (
+            allBars.length > 0 &&
+            allBars[allBars.length - 1].time === lastBarTime
+          ) {
+            allBars[allBars.length - 1].high = lastBarHigh;
+            allBars[allBars.length - 1].low = lastBarLow;
+            allBars[allBars.length - 1].close = lastBarClose;
+          }
 
-          // Add to allBars
+          // Create new bar at the correct tick bar time
+          lastBarTime = tickBarTime;
+          lastBarOpen = price;
+          lastBarHigh = price;
+          lastBarLow = price;
+          lastBarClose = price;
+
           allBars.push({
             time: lastBarTime,
             open: lastBarOpen,
@@ -544,13 +635,6 @@
             close: lastBarClose,
             volume: 0,
           });
-
-          // Create new bar
-          lastBarTime = nextBarTime;
-          lastBarOpen = price;
-          lastBarHigh = price;
-          lastBarLow = price;
-          lastBarClose = price;
 
           candleSeries.update({
             time: lastBarTime,
@@ -568,7 +652,7 @@
               price.toFixed(2),
           );
         } else {
-          // === UPDATE CURRENT BAR ===
+          // === UPDATE CURRENT BAR (tickBarTime === lastBarTime) ===
           var prevClose = lastBarClose || price;
           var changed = Math.abs(price - prevClose) > 0.001;
           lastBarHigh = Math.max(lastBarHigh, price);
@@ -633,12 +717,17 @@
   }
 
   // =================================================================
-  // 6. syncTimeScales  *** KLIC FIX: logical range misto time range ***
+  // 6. syncTimeScales  - time range sync pro volume chart
   //
-  //  subscribeVisibleLogicalRangeChange + setVisibleLogicalRange
-  //  zarucuje pixel-perfect sync bez posunu pri zoumu/scrollu
+  //  Pouzivame setVisibleRange (time-based) misto setVisibleLogicalRange,
+  //  protoze hlavni chart muze mit overlay serie (EMA/SMA) s historickymi
+  //  daty ktere posunuji logical indexy. Volume chart ma jen OHLCV data,
+  //  takze logical indexy neodpovidaji. Time-based sync je korektni.
   // =================================================================
   function syncTimeScales(sourceChart, targetCharts) {
+    // Logical range sync - pouzivame logical indexy pro plynuly scroll/zoom.
+    // EMA/SMA overlay serie jsou filtrovany na timestamps shodne s OHLCV,
+    // takze logical indexy jsou shodne mezi hlavnim chartem a volume chartem.
     sourceChart
       .timeScale()
       .subscribeVisibleLogicalRangeChange(function (range) {
@@ -962,14 +1051,16 @@
   // =================================================================
   // 11. setIndicators
   // =================================================================
-  function setIndicators(data) {
+  function setIndicators(data, settingsOverride) {
     if (!chart || !candleSeries) {
       writeDebug("IND", "setIndicators: chart neni ready, zkousim za 500ms");
       setTimeout(function () {
-        setIndicators(data);
+        setIndicators(data, settingsOverride);
       }, 500);
       return;
     }
+    // Store settings for auto-refresh during tick polling
+    if (settingsOverride) activeIndicatorSettings = settingsOverride;
     writeDebug(
       "IND",
       "=== setIndicators() ok=" +
@@ -988,9 +1079,18 @@
     );
 
     if (data.sma) {
+      // Omez SMA data na timestamps ktere existuji v OHLCV barech (allBars).
+      var ohlcvTimesForSma = {};
+      allBars.forEach(function (b) {
+        ohlcvTimesForSma[b.time] = true;
+      });
       var smaData = data.sma
         .filter(function (d) {
-          return d.value !== null && d.value !== undefined;
+          return (
+            d.value !== null &&
+            d.value !== undefined &&
+            ohlcvTimesForSma[d.time]
+          );
         })
         .map(function (d) {
           return { time: d.time, value: d.value };
@@ -1010,9 +1110,17 @@
     }
 
     if (data.ema) {
+      // Omez EMA data na timestamps ktere existuji v OHLCV barech (allBars).
+      // EMA muze mit vice historickych bodu nez zobrаzene svicky - ty by posouvaly timeline vlevo.
+      var ohlcvTimes = {};
+      allBars.forEach(function (b) {
+        ohlcvTimes[b.time] = true;
+      });
       var emaData = data.ema
         .filter(function (d) {
-          return d.value !== null && d.value !== undefined;
+          return (
+            d.value !== null && d.value !== undefined && ohlcvTimes[d.time]
+          );
         })
         .map(function (d) {
           return { time: d.time, value: d.value };
@@ -1044,6 +1152,19 @@
     }
     removeSubContainer("lwc-macd-container");
     if (data.macd) createMacdChart(data.macd);
+
+    // Pridat padding bary do volumeSeries pro timestamps EMA/SMA (historicke body pred prvni svickou).
+    // Tim volume chart zna cely casovy rozsah a muze se oddalit stejne jako hlavni chart.
+    // Resync volume chartu s hlavnim chartem (EMA/SMA maj uz stejne timestamps jako OHLCV)
+    if (volumeChart) {
+      setTimeout(function () {
+        try {
+          var curRange = chart.timeScale().getVisibleLogicalRange();
+          if (curRange)
+            volumeChart.timeScale().setVisibleLogicalRange(curRange);
+        } catch (e) {}
+      }, 50);
+    }
   }
 
   // =================================================================

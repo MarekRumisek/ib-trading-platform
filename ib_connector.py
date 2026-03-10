@@ -661,6 +661,13 @@ class _HistWorker:
             if len(result) > n:
                 result = result[-n:]
             print(f"[HIST] fetch_n_bars: {len(result)} bars for {symbol} ({asset_type}) | end_time={end_time} | duration={duration_str}")
+            
+            # Save to data_store so indicators can use it
+            if result:
+                from modules.data_store import data_store
+                cache_symbol = get_cache_symbol(symbol, asset_type)
+                data_store.append_bars(cache_symbol, bar_size, result)
+                
             return result
         finally:
             try: ib.disconnect()

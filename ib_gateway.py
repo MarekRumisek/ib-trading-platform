@@ -422,7 +422,7 @@ def place_order(
         if order_type == 'LIMIT' and limit_price is None:
             return {'success': False, 'message': 'LIMIT order requires limit_price'}
         
-        result = _order_handler.place_order(
+        result = _order_handler.place_order_async(
             symbol=symbol,
             action=action,
             quantity=quantity,

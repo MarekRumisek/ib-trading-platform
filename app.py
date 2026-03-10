@@ -326,7 +326,7 @@ app.layout = html.Div([
                         title='Simple Moving Average (20)'),
             html.Button('EMA 20',  id='ind-ema-btn',  n_clicks=1, className='ind-btn ind-active',
                         title='Exponential Moving Average (20)'),
-            html.Button('RSI 14',  id='ind-rsi-btn',  n_clicks=1, className='ind-btn ind-active',
+            html.Button('RSI 14',  id='ind-rsi-btn',  n_clicks=0, className='ind-btn',
                         title='Relative Strength Index (14)'),
             html.Button('MACD',    id='ind-macd-btn', n_clicks=0, className='ind-btn',
                         title='MACD 12/26/9'),
@@ -349,7 +349,7 @@ app.layout = html.Div([
         dcc.Store(id='tick-sync-dummy', data=None),
         dcc.Store(id='deep-load-finished-trigger', data=False),
         dcc.Store(id='indicator-settings-store',
-                  data={'sma': False, 'ema': True, 'rsi': True, 'macd': False}),
+                  data={'sma': False, 'ema': True, 'rsi': False, 'macd': False}),
         dcc.Store(id='indicators-data-store'),
         dcc.Store(id='trade-refresh-store', data=0),
         dcc.Store(id='trade-debug-store', data=None),
@@ -477,15 +477,6 @@ app.layout = html.Div([
     html.Div([
         html.H3('📈 Trade History', style={'marginBottom': '15px'}),
         html.Div(id='trade-history-table')
-    ], style={'padding': '20px', 'background': '#2d2d3a',
-              'borderRadius': '8px', 'marginBottom': '20px'}),
-
-    # ================================================================
-    # RECENT ORDERS (IB)
-    # ================================================================
-    html.Div([
-        html.H3('📋 Recent Orders', style={'marginBottom': '15px'}),
-        html.Div(id='orders-table')
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
@@ -676,7 +667,7 @@ def update_cache_status(n, symbol, asset_type):
     tf         = app_state.get('current_timeframe', '5 mins')
     status = data_store.get_cache_status(get_cache_symbol(sym, asset_type), tf)
     if not status['cached']:
-        return html.Span('Cache: Prázdná', style={'color': '#888', 'background': '#333'})
+        return ""
     bars_str = f"{status['total_bars']:,}".replace(',', ' ')
     age = status['age_seconds']
     if age < 60:      age_str = f"{int(age)}s"
@@ -969,25 +960,26 @@ def update_positions_table(n, _refresh, _btn):
         return html.Div('Not connected', style={'color': '#888'}), dash.no_update
 
     positions = ib_gateway.get_positions() or []
-    open_trades = {t['symbol']: t for t in trade_tracker.get_open_trades()}
+    open_trades_list = trade_tracker.get_open_trades()
     now = int(time.time())
     ib_symbols = {p['symbol'] for p in positions}
     debug_lines = []
 
     # Vždy loguj stav do konzole
     ib_pos_str = str([(p['symbol'], p['position']) for p in positions])
-    tt_str     = str([(s, f"age={(now - t.get('entry_time', now))}s",
+    tt_str     = str([(t['symbol'], f"age={(now - t.get('entry_time', now))}s",
                        f"SL={t.get('sl')} TP={t.get('tp')}")
-                      for s, t in open_trades.items()])
+                      for t in open_trades_list])
     print(f"[SYNC] n={n} | IB={ib_pos_str} | TT={tt_str}")
 
     # Do debug panelu pošli stav jen pokud jsou otevřené trady nebo IB pozice
-    if open_trades or positions:
+    if open_trades_list or positions:
         debug_lines.append(f'[SYNC] ── tick n={n} ──────────────')
         debug_lines.append(f'[SYNC] IB pozice : {ib_pos_str}')
         debug_lines.append(f'[SYNC] TT open   : {tt_str}')
 
-    for sym, tt in open_trades.items():
+    for tt in open_trades_list:
+        sym = tt['symbol']
         if sym in ib_symbols:
             ib_pos = next((p['position'] for p in positions if p['symbol'] == sym), '?')
             age = now - tt.get('entry_time', now)
@@ -1006,49 +998,131 @@ def update_positions_table(n, _refresh, _btn):
     if debug_lines:
         dbg = {'msg': '\n'.join(debug_lines), 'ts': time.time(), 'multi': True}
 
-    if not positions:
+    if not positions and not open_trades_list:
         return html.Div('Žádné otevřené pozice', style={'color': '#888'}), dbg
 
     rows = []
+    
+    # Group trades by symbol to match with IB positions
+    trades_by_symbol = {}
+    for t in open_trades_list:
+        trades_by_symbol.setdefault(t['symbol'], []).append(t)
+        
+    # First, show all IB positions, matching them with TT trades if possible
+    processed_trade_ids = set()
     for pos in positions:
         pnl_c = '#26a69a' if pos['unrealized_pnl'] >= 0 else '#ef5350'
         sym   = pos['symbol']
-        tt    = open_trades.get(sym, {})
-        asset_type = pos.get('asset_type', tt.get('asset_type', 'STOCK'))
-        if tt:
-            msg = (f'[SYNC] ✅ Row enrich {sym}'
-                   f' | SL={tt.get("sl")} TP={tt.get("tp")}')
-        else:
-            msg = f'[SYNC] ℹ️ Row enrich {sym} | no TT metadata'
-        print(msg)
-        debug_lines.append(msg)
+        
+        # Find matching trades for this symbol
+        matching_trades = trades_by_symbol.get(sym, [])
+        
+        if matching_trades:
+            # If we have multiple trades for this position, we show them as separate rows
+            # but we need to divide the position size and PnL proportionally
+            total_qty = sum(t.get('qty', 0) for t in matching_trades)
+            
+            for tt in matching_trades:
+                processed_trade_ids.add(tt['id'])
+                asset_type = pos.get('asset_type', tt.get('asset_type', 'STOCK'))
+                
+                msg = (f'[SYNC] ✅ Row enrich {sym}'
+                       f' | SL={tt.get("sl")} TP={tt.get("tp")}')
+                print(msg)
+                debug_lines.append(msg)
 
-        entry_t  = trade_tracker.fmt_time(tt.get('entry_time')) if tt else '–'
-        sl_txt   = f"${tt['sl']:.2f}"  if tt.get('sl')  else '–'
-        tp_txt   = f"${tt['tp']:.2f}"  if tt.get('tp')  else '–'
-        trade_id = tt.get('id', '')
-        rows.append(html.Tr([
-            html.Td(f"{sym} ({asset_type})", style={'fontWeight': 'bold'}),
-            html.Td('LONG' if pos['position'] > 0 else 'SHORT',
-                    style={'color': '#00d4ff'}),
-            html.Td(abs(pos['position'])),
-            html.Td(f"${pos['avg_cost']:.2f}"),
-            html.Td(f"${pos['market_value']:.2f}"),
-            html.Td(f"${pos['unrealized_pnl']:.2f} ({pos['unrealized_pnl_pct']:.2f}%)",
-                    style={'color': pnl_c, 'fontWeight': 'bold'}),
-            html.Td(entry_t, style={'color': '#aaa', 'fontSize': '12px'}),
-            html.Td(sl_txt,  style={'color': '#ef9a9a', 'fontSize': '12px'}),
-            html.Td(tp_txt,  style={'color': '#a5d6a7', 'fontSize': '12px'}),
-            html.Td(
-                html.Button('✖ Close', id={'type': 'close-pos-btn', 'trade_id': trade_id},
-                            n_clicks=0,
-                            style={'padding': '4px 10px', 'background': '#b71c1c',
-                                   'border': 'none', 'borderRadius': '4px',
-                                   'color': 'white', 'cursor': 'pointer',
-                                   'fontSize': '12px'})
-                if trade_id else html.Span('–', style={'color': '#555'})
-            ),
-        ]))
+                entry_t  = trade_tracker.fmt_time(tt.get('entry_time'))
+                sl_txt   = f"${tt['sl']:.2f}"  if tt.get('sl')  else '–'
+                tp_txt   = f"${tt['tp']:.2f}"  if tt.get('tp')  else '–'
+                trade_id = tt.get('id', '')
+                
+                # Calculate proportional values if there are multiple trades
+                trade_qty = tt.get('qty', 0)
+                proportion = trade_qty / total_qty if total_qty > 0 else 1
+                
+                # Use trade's entry price for PnL calculation if available, otherwise proportional IB PnL
+                if tt.get('entry_price'):
+                    mult = 1 if tt.get('side', 'BUY') == 'BUY' else -1
+                    current_price = pos['market_value'] / abs(pos['position']) if pos['position'] != 0 else 0
+                    trade_pnl = mult * (current_price - tt['entry_price']) * trade_qty
+                    trade_pnl_pct = (trade_pnl / (tt['entry_price'] * trade_qty)) * 100 if tt['entry_price'] > 0 else 0
+                else:
+                    trade_pnl = pos['unrealized_pnl'] * proportion
+                    trade_pnl_pct = pos['unrealized_pnl_pct']
+                
+                trade_pnl_c = '#26a69a' if trade_pnl >= 0 else '#ef5350'
+                
+                rows.append(html.Tr([
+                    html.Td(f"{sym} ({asset_type})", style={'fontWeight': 'bold'}),
+                    html.Td(tt.get('side', 'LONG' if pos['position'] > 0 else 'SHORT'),
+                            style={'color': '#00d4ff'}),
+                    html.Td(trade_qty),
+                    html.Td(f"${tt.get('entry_price', pos['avg_cost']):.2f}"),
+                    html.Td(f"${(pos['market_value'] * proportion):.2f}"),
+                    html.Td(f"${trade_pnl:.2f} ({trade_pnl_pct:.2f}%)",
+                            style={'color': trade_pnl_c, 'fontWeight': 'bold'}),
+                    html.Td(entry_t, style={'color': '#aaa', 'fontSize': '12px'}),
+                    html.Td(sl_txt,  style={'color': '#ef9a9a', 'fontSize': '12px'}),
+                    html.Td(tp_txt,  style={'color': '#a5d6a7', 'fontSize': '12px'}),
+                    html.Td(
+                        html.Button('✖ Close', id={'type': 'close-pos-btn', 'trade_id': trade_id},
+                                    n_clicks=0,
+                                    style={'padding': '4px 10px', 'background': '#b71c1c',
+                                           'border': 'none', 'borderRadius': '4px',
+                                           'color': 'white', 'cursor': 'pointer',
+                                           'fontSize': '12px'})
+                    ),
+                ]))
+        else:
+            # Position without TT metadata
+            msg = f'[SYNC] ℹ️ Row enrich {sym} | no TT metadata'
+            print(msg)
+            debug_lines.append(msg)
+
+            rows.append(html.Tr([
+                html.Td(f"{sym} ({pos.get('asset_type', 'STOCK')})", style={'fontWeight': 'bold'}),
+                html.Td('LONG' if pos['position'] > 0 else 'SHORT',
+                        style={'color': '#00d4ff'}),
+                html.Td(abs(pos['position'])),
+                html.Td(f"${pos['avg_cost']:.2f}"),
+                html.Td(f"${pos['market_value']:.2f}"),
+                html.Td(f"${pos['unrealized_pnl']:.2f} ({pos['unrealized_pnl_pct']:.2f}%)",
+                        style={'color': pnl_c, 'fontWeight': 'bold'}),
+                html.Td('–', style={'color': '#aaa', 'fontSize': '12px'}),
+                html.Td('–',  style={'color': '#ef9a9a', 'fontSize': '12px'}),
+                html.Td('–',  style={'color': '#a5d6a7', 'fontSize': '12px'}),
+                html.Td(html.Span('–', style={'color': '#555'})),
+            ]))
+            
+    # Add any TT trades that don't have matching IB positions (e.g. waiting for fill)
+    for tt in open_trades_list:
+        if tt['id'] not in processed_trade_ids:
+            sym = tt['symbol']
+            asset_type = tt.get('asset_type', 'STOCK')
+            entry_t  = trade_tracker.fmt_time(tt.get('entry_time'))
+            sl_txt   = f"${tt['sl']:.2f}"  if tt.get('sl')  else '–'
+            tp_txt   = f"${tt['tp']:.2f}"  if tt.get('tp')  else '–'
+            trade_id = tt.get('id', '')
+            
+            rows.append(html.Tr([
+                html.Td(f"{sym} ({asset_type})", style={'fontWeight': 'bold'}),
+                html.Td(tt.get('side', 'LONG'), style={'color': '#00d4ff'}),
+                html.Td(tt.get('qty', 0)),
+                html.Td(f"${tt.get('entry_price', 0):.2f}"),
+                html.Td("Pending..."),
+                html.Td("–", style={'color': '#888', 'fontWeight': 'bold'}),
+                html.Td(entry_t, style={'color': '#aaa', 'fontSize': '12px'}),
+                html.Td(sl_txt,  style={'color': '#ef9a9a', 'fontSize': '12px'}),
+                html.Td(tp_txt,  style={'color': '#a5d6a7', 'fontSize': '12px'}),
+                html.Td(
+                    html.Button('✖ Cancel', id={'type': 'close-pos-btn', 'trade_id': trade_id},
+                                n_clicks=0,
+                                style={'padding': '4px 10px', 'background': '#b71c1c',
+                                       'border': 'none', 'borderRadius': '4px',
+                                       'color': 'white', 'cursor': 'pointer',
+                                       'fontSize': '12px'})
+                ),
+            ]))
 
     return html.Table([
         html.Thead(html.Tr([
@@ -1101,7 +1175,10 @@ def close_single_position(n_clicks_list, refresh_counter):
     ib_pos    = next((p for p in positions if p['symbol'] == sym and p['position'] != 0), None)
 
     asset_type = ib_pos.get('asset_type', trade.get('asset_type', 'STOCK')) if ib_pos else trade.get('asset_type', 'STOCK')
-    qty = abs(ib_pos['position']) if ib_pos else trade['qty']
+    # Fix: use the individual trade's qty, not the total IB position (which sums all trades for that symbol).
+    # Using ib_pos['position'] caused the close button to submit qty=N (all trades combined),
+    # closing all positions at once and/or opening unintended reverse positions.
+    qty = trade['qty']
     act = 'SELL' if ((ib_pos and ib_pos['position'] > 0) or (not ib_pos and trade['side'] == 'BUY')) else 'BUY'
 
     res = submit_market_order(sym, act, qty, asset_type)
@@ -1191,37 +1268,6 @@ def update_trade_history(_n, _refresh):
     ], style={'width': '100%', 'borderCollapse': 'collapse'})
 
 
-# ------------------------------------------------------------------
-# ORDERS TABLE (IB)
-# ------------------------------------------------------------------
-@app.callback(
-    Output('orders-table', 'children'),
-    Input('positions-update-interval', 'n_intervals')
-)
-def update_orders_table(n):
-    if not ib_gateway.is_connected():
-        return html.Div('Not connected', style={'color': '#888'})
-    orders = ib_gateway.get_recent_orders(limit=10)
-    if not orders:
-        return html.Div('No recent orders', style={'color': '#888'})
-    icons  = {'Filled': '✅', 'Submitted': '⏳', 'Cancelled': '❌', 'PendingSubmit': '🕒'}
-    colors = {'Filled': '#26a69a', 'Submitted': '#ffa726',
-               'Cancelled': '#ef5350', 'PendingSubmit': '#42a5f5'}
-    rows = []
-    for o in orders:
-        rows.append(html.Tr([
-            html.Td(o['time']),
-            html.Td(f"{o['action']} {o['quantity']} {o['symbol']}"),
-            html.Td(f"@ {o['price']}"),
-            html.Td(f"{icons.get(o['status'],'?')} {o['status']}",
-                    style={'color': colors.get(o['status'], '#888'), 'fontWeight': 'bold'})
-        ]))
-    return html.Table([
-        html.Thead(html.Tr([html.Th('Time'), html.Th('Order'),
-                            html.Th('Price'), html.Th('Status')])),
-        html.Tbody(rows)
-    ], style={'width': '100%', 'borderCollapse': 'collapse'})
-
 
 # ------------------------------------------------------------------
 # TRADE DEBUG STORE → debug-log-area (clientside)
@@ -1250,7 +1296,8 @@ app.clientside_callback(
 
 app.clientside_callback(
     """function(n){if(n>0&&window.lwcDebug)window.lwcDebug('BTN','Load Chart n='+n+' - cekam na Python/IB...');return n;}""",
-    Output('load-click-log', 'data'), Input('load-chart-btn', 'n_clicks')
+    Output('chart-trigger-store', 'data', allow_duplicate=True), Input('load-chart-btn', 'n_clicks'),
+    prevent_initial_call=True
 )
 
 app.clientside_callback(
@@ -1346,7 +1393,7 @@ app.clientside_callback(
             if (!data.ok){d('ERR','IND FAIL: '+(data.error||'unknown'));return;}
             d('IND','OK: '+active.join(',')+' | bars='+data.bars);
             if (window.lwcManager && window.lwcManager.setIndicators)
-                window.lwcManager.setIndicators(data);
+                window.lwcManager.setIndicators(data, settings);
             else d('ERR','lwcManager.setIndicators() neexistuje');
         }).catch(function(e){d('ERR','IND fetch error: '+e);});
         return window.dash_clientside.no_update;
