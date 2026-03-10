@@ -619,10 +619,8 @@ class _HistWorker:
         secs_per_bar = TF_SECONDS.get(bar_size, 300)
         # Calculate duration with 2x buffer for gaps/weekends
         total_secs = n * secs_per_bar * 2
-        if total_secs < 3600:
+        if total_secs < 86400:
             duration_str = f"{int(total_secs)} S"
-        elif total_secs < 86400:
-            duration_str = f"{int(total_secs / 3600)} H"
         else:
             duration_str = f"{int(total_secs / 86400) + 1} D"
 
