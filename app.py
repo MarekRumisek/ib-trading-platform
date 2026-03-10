@@ -47,11 +47,6 @@ def submit_market_order(symbol, action, quantity, asset_type='STOCK'):
         asset_type=normalize_asset_type(asset_type)
     )
 
-_cb_status = {
-    'step': 'idle', 'symbol': None, 'tf': None,
-    'bars': None, 'error': None, 'ts': None,
-}
-
 DURATION_MAP = {
     '1 min':   '1 D',
     '5 mins':  '2 D',
@@ -76,127 +71,6 @@ def get_tick(symbol):
 def deep_load_status(symbol, tf):
     asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
     return jsonify(ib_gateway.get_deep_load_status(symbol.upper(), tf.replace('_', ' '), asset_type))
-
-
-@server.route('/api/diag/tick/<symbol>')
-def api_diag_tick(symbol):
-    sym        = symbol.upper()
-    asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
-    ts         = ib_gateway.get_tick_subscriber()
-    return jsonify({
-        'symbol':             sym,
-        'asset_type':         asset_type,
-        'tick_sub_connected': ts.is_connected if ts else False,
-        'iterations':         ts.iterations if ts else 0,
-        'mdt':                ts._mdt if ts else 0,
-        'mode':               ts.mode if ts else 'none',
-        'subscribed_symbols': ts.subscribed_symbols if ts else [],
-        'pending':            list(ts._pending) if ts else [],
-        'latest':             ts.get_ticker_data(sym, asset_type) or {} if ts else {},
-        'raw_fields':         ts.get_raw_data(sym, asset_type) if ts else {},
-        'ib_errors':          ts.get_last_errors() if ts else [],
-        'time':               datetime.now().strftime('%H:%M:%S')
-    })
-
-
-@server.route('/api/test/snapshot/<symbol>')
-def api_test_snapshot(symbol):
-    import asyncio
-    from ib_async import IB
-
-    sym        = symbol.upper()
-    asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
-    result     = {}
-
-    async def _do_snapshot():
-        ib_test = IB()
-        errors  = []
-        def on_err(reqId, code, msg, c):
-            errors.append(f"[{code}] {msg}")
-        ib_test.errorEvent += on_err
-        try:
-            await ib_test.connectAsync(
-                config.IB_HOST, config.IB_PORT,
-                clientId=config.IB_CLIENT_ID + 9
-            )
-            ib_test.reqMarketDataType(3)
-            contract = create_contract(sym, asset_type)
-            await ib_test.qualifyContractsAsync(contract)
-            snaps = await ib_test.reqTickersAsync(contract)
-            if snaps:
-                t = snaps[0]
-                def s(v):
-                    if v is None: return None
-                    if isinstance(v, float) and v != v: return 'NaN'
-                    return v
-                result.update({
-                    'ok':     True,
-                    'symbol': sym,
-                    'asset_type': asset_type,
-                    'conId':  contract.conId,
-                    'last':   s(t.last),
-                    'close':  s(t.close),
-                    'bid':    s(t.bid),
-                    'ask':    s(t.ask),
-                    'volume': s(t.volume),
-                    'errors': errors,
-                    'time':   datetime.now().strftime('%H:%M:%S')
-                })
-            else:
-                result.update({'ok': False, 'error': 'no tickers returned', 'errors': errors})
-        except Exception as e:
-            result.update({'ok': False, 'error': str(e), 'errors': errors})
-        finally:
-            try: ib_test.disconnect()
-            except Exception: pass
-
-    asyncio.run(_do_snapshot())
-    return jsonify(result)
-
-
-@server.route('/api/diag')
-def api_diag():
-    ts = ib_gateway.get_tick_subscriber()
-    return jsonify({
-        'connected':   ib_gateway.is_connected(),
-        'account_id':  ib_gateway.get_account_id(),
-        'cb_status':   _cb_status,
-        'app_state':   app_state,
-        'tick_sub': {
-            'connected':  ts.is_connected if ts else False,
-            'iterations': ts.iterations if ts else 0,
-            'mdt':        ts._mdt if ts else 0,
-            'mode':       ts.mode if ts else 'none',
-            'subscribed': ts.subscribed_symbols if ts else [],
-            'ib_errors':  ts.get_last_errors() if ts else [],
-        },
-        'time': datetime.now().strftime('%H:%M:%S')
-    })
-
-
-@server.route('/api/test-hist/<symbol>')
-def api_test_hist(symbol):
-    t0 = time.time()
-    try:
-        asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
-        if not ib_gateway.is_connected():
-            return jsonify({'ok': False, 'error': 'NOT CONNECTED', 'elapsed': 0})
-        bars    = ib_gateway.get_candles(symbol.upper(), '5 mins', count=200, asset_type=asset_type)
-        elapsed = round(time.time() - t0, 2)
-        if bars:
-            return jsonify({'ok': True, 'bars': len(bars), 'elapsed': elapsed,
-                            'asset_type': asset_type,
-                            'first': bars[0], 'last': bars[-1]})
-        return jsonify({'ok': False, 'error': 'EMPTY', 'elapsed': elapsed})
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e),
-                        'elapsed': round(time.time() - t0, 2)})
-
-
-@server.route('/api/cb-status')
-def api_cb_status():
-    return jsonify(_cb_status)
-
 
 @server.route('/api/indicators/<symbol>/<tf>')
 def api_indicators(symbol, tf):
@@ -470,17 +344,9 @@ app.layout = html.Div([
         dcc.Store(id='chart-trigger-store'),
         dcc.Store(id='chart-append-store'),  # For loading older bars
         dcc.Store(id='chart-meta-store', data={'load_count': 0, 'oldest_time': None, 'total_bars': 0, 'symbol': None, 'tf': None}),
-        dcc.Store(id='test-chart-trigger'),
-        dcc.Store(id='clear-log-trigger'),
-        dcc.Store(id='copy-log-trigger'),
-        dcc.Store(id='load-click-log'),
-        dcc.Store(id='diag1-trigger'),
-        dcc.Store(id='diag2-trigger'),
-        dcc.Store(id='diag3-trigger'),
-        dcc.Store(id='diag-tick-trigger'),
-        dcc.Store(id='diag-snap-trigger'),
         dcc.Store(id='active-tf-store', data='tf-5m'),
         dcc.Store(id='tick-enabled-store', data=False),
+        dcc.Store(id='tick-sync-dummy', data=None),
         dcc.Store(id='deep-load-finished-trigger', data=False),
         dcc.Store(id='indicator-settings-store',
                   data={'sma': False, 'ema': True, 'rsi': True, 'macd': False}),
@@ -623,78 +489,6 @@ app.layout = html.Div([
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
-    # ================================================================
-    # DEBUG PANEL
-    # ================================================================
-    html.Div([
-        html.H3('🔧 Debug Panel',
-                style={'marginBottom': '10px', 'color': '#ff9800'}),
-        html.Div([
-            html.Span('Python callback: ', style={'fontWeight': 'bold', 'color': '#00d4ff'}),
-            html.Span(id='debug-python-info', children='(ceka na Load Chart...)',
-                      style={'fontFamily': 'monospace', 'fontSize': '13px'})
-        ], style={'marginBottom': '12px', 'padding': '8px',
-                  'background': '#0d0d1a', 'borderRadius': '5px'}),
-        html.Div([
-            html.Div('🧪 Diagnostika:',
-                     style={'color': '#ff9800', 'fontWeight': 'bold',
-                            'marginBottom': '8px', 'fontSize': '13px'}),
-            html.Button('1️⃣ IB Spojeni', id='diag1-btn', n_clicks=0,
-                        style={'padding': '10px 14px', 'marginRight': '6px',
-                               'background': '#1565c0', 'border': 'none',
-                               'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
-            html.Button('2️⃣ Hist. data', id='diag2-btn', n_clicks=0,
-                        style={'padding': '10px 14px', 'marginRight': '6px',
-                               'background': '#6a1599', 'border': 'none',
-                               'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
-            html.Button('3️⃣ Nakreslit', id='diag3-btn', n_clicks=0,
-                        style={'padding': '10px 14px', 'marginRight': '6px',
-                               'background': '#1b5e20', 'border': 'none',
-                               'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
-            html.Button('🔍 Tick Diag', id='diag-tick-btn', n_clicks=0,
-                        style={'padding': '10px 14px', 'marginRight': '6px',
-                               'background': '#4a148c', 'border': 'none',
-                               'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer',
-                               'fontWeight': 'bold'}),
-            html.Button('📸 Snapshot Test', id='diag-snap-btn', n_clicks=0,
-                        style={'padding': '10px 14px', 'marginRight': '6px',
-                               'background': '#b71c1c', 'border': 'none',
-                               'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer',
-                               'fontWeight': 'bold'}),
-        ], style={'marginBottom': '12px', 'padding': '10px',
-                  'background': '#0d1a2e', 'borderRadius': '5px',
-                  'border': '1px solid #1565c0'}),
-        html.Div([
-            html.Button('🧪 Test Chart', id='test-chart-btn', n_clicks=0,
-                        style={'padding': '10px 20px', 'marginRight': '10px',
-                               'background': '#ff9800', 'border': 'none',
-                               'borderRadius': '5px', 'color': 'black', 'cursor': 'pointer'}),
-            html.Button('📋 Zkopirovat', id='copy-log-btn', n_clicks=0,
-                        style={'padding': '10px 20px', 'marginRight': '10px',
-                               'background': '#26a69a', 'border': 'none',
-                               'borderRadius': '5px', 'color': 'white', 'cursor': 'pointer'}),
-            html.Button('🗑️ Smazat', id='clear-log-btn', n_clicks=0,
-                        style={'padding': '10px 20px', 'background': '#555',
-                               'border': 'none', 'borderRadius': '5px',
-                               'color': 'white', 'cursor': 'pointer'}),
-            html.Span(id='copy-status',
-                      style={'marginLeft': '10px', 'color': '#26a69a', 'fontSize': '13px'})
-        ], style={'marginBottom': '10px'}),
-        html.Textarea(
-            id='debug-log-area', rows=22,
-            placeholder='JS debug log...',
-            style={'width': '100%', 'boxSizing': 'border-box',
-                   'background': '#0d0d0d', 'color': '#00ff00',
-                   'fontFamily': 'monospace', 'fontSize': '12px',
-                   'border': '1px solid #333', 'borderRadius': '5px',
-                   'padding': '10px', 'resize': 'vertical'}
-        ),
-        html.Div('[INIT] [BTN] [CB] [TF] [TICK] [API] [DATA] [IND] [TRADE] [SYNC] [ERR] | v3.0',
-                 style={'marginTop': '8px', 'fontSize': '12px', 'color': '#888'})
-    ], style={'padding': '20px', 'background': '#1a1a2e',
-              'borderRadius': '8px', 'marginBottom': '20px',
-              'border': '2px solid #ff9800'}),
-
     dcc.Interval(id='cache-update-interval',     interval=2000,  n_intervals=0),
     dcc.Interval(id='price-update-interval',     interval=10000, n_intervals=0),
     dcc.Interval(id='positions-update-interval', interval=10000, n_intervals=0),
@@ -767,7 +561,6 @@ _TOPUP_DURATION = {
 )
 def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger, 
                     symbol, asset_type, n_candles, meta):
-    global _cb_status
     try:
         ctx = dash.callback_context
         btn = (ctx.triggered[0]['prop_id'].split('.')[0]
@@ -796,22 +589,13 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
                        prev_symbol != symbol or 
                        prev_tf != tf)
         
-        _cb_status = {'step': 'started', 'symbol': symbol, 'asset_type': asset_type, 'tf': tf,
-                      'bars': None, 'error': None,
-                      'ts': datetime.now().strftime('%H:%M:%S')}
-        
         if is_reset:
             # === FIRST LOAD or RESET: fetch N candles from now ===
             print(f"[CB] INITIAL LOAD: {symbol} ({asset_type}) | {tf} | n={n_candles} | Trigger={btn}")
-            _cb_status['step'] = 'requesting_IB'
             bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=None)
-            _cb_status['step'] = 'IB_returned'
-            _cb_status['bars'] = len(bars)
             print(f"[CB] IB returned {len(bars)} bars")
             
             if not bars:
-                _cb_status['step'] = 'ERROR'
-                _cb_status['error'] = 'No data returned'
                 return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, '❌ Žádná data'
             
             # Update meta
@@ -849,12 +633,9 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
                 return chart_data, None, new_meta, True, '⚡ TICK: ON', 'tick-btn tick-on', f"📊 {len(bars)} svíček"
             
             print(f"[CB] APPEND: {symbol} ({asset_type}) | {tf} | n={n_candles} | before={oldest_time}")
-            _cb_status['step'] = 'requesting_IB_older'
             
             # Fetch older bars ending just before oldest_time
             older_bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=oldest_time - 1)
-            _cb_status['step'] = 'IB_returned'
-            _cb_status['bars'] = len(older_bars)
             print(f"[CB] IB returned {len(older_bars)} older bars")
             
             if not older_bars:
@@ -878,24 +659,8 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
             return dash.no_update, append_data, new_meta, dash.no_update, dash.no_update, dash.no_update, bars_display
     
     except Exception as e:
-        _cb_status['step'] = 'ERROR'
-        _cb_status['error'] = str(e)
         print(f"[CB] EXCEPTION: {e}")
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, f'❌ {e}'
-
-
-@app.callback(
-    Output('debug-python-info', 'children'),
-    Input('chart-data-store', 'data')
-)
-def update_debug_python(data):
-    if not data: return '(prazdne)'
-    bars = data.get('bars', [])
-    if not bars:
-        return f"⚠️ {data.get('symbol')} | {data.get('timeframe')} | 0 BARU"
-    b0 = bars[0]
-    return (f"✅ {data.get('symbol')} | {data.get('timeframe')} "
-            f"| {len(bars)} baru | close[0]={b0['close']} close[-1]={bars[-1]['close']:.2f}")
 
 
 @app.callback(
@@ -1026,8 +791,9 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
 
     result = submit_market_order(symbol, action, quantity, asset_type)
     if not result['success']:
-        dbg = {'msg': f'[TRADE][ERR] {action} {quantity} {symbol} ({asset_type}) — {result["error"]}', 'ts': time.time()}
-        return html.Div(f'❌ {result["error"]}',
+        err_msg = result.get('message') or result.get('error') or 'Unknown error'
+        dbg = {'msg': f'[TRADE][ERR] {action} {quantity} {symbol} ({asset_type}) — {err_msg}', 'ts': time.time()}
+        return html.Div(f'❌ {err_msg}',
                         style={'color': '#ef5350', 'fontWeight': 'bold'}), dash.no_update, dbg
 
     fill_price = result.get('fill_price') or cur_price
@@ -1507,6 +1273,18 @@ app.clientside_callback(
     State('tick-enabled-store', 'data')
 )
 
+# Synchronize tick state to JS when Python changes tick-enabled-store (e.g., auto-enable on chart load)
+app.clientside_callback(
+    """
+    function(enabled) {
+        if (window.lwcManager) window.lwcManager.setTickEnabled(!!enabled);
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('tick-sync-dummy', 'data'),
+    Input('tick-enabled-store', 'data')
+)
+
 app.clientside_callback(
     """
     function(nSma, nEma, nRsi, nMacd, settings) {
@@ -1576,50 +1354,6 @@ app.clientside_callback(
     """,
     Output('indicators-data-store', 'data'),
     [Input('chart-data-store', 'data'), Input('indicator-settings-store', 'data')]
-)
-
-app.clientside_callback(
-    """
-    function(n) {
-        if (n < 1) return n;
-        var d = window.lwcDebug || function() {};
-        var sym = (document.getElementById('symbol-input')&&document.getElementById('symbol-input').value||'AAPL').toUpperCase();
-        var assetType = (document.getElementById('asset-type-select')&&document.getElementById('asset-type-select').value||'STOCK').toUpperCase();
-        d('API','=== TICK DIAG: '+sym+' ('+assetType+') ===');
-        fetch('/api/diag/tick/'+sym+'?asset_type='+encodeURIComponent(assetType)).then(function(r){return r.json();}).then(function(j){
-            d('API','connected='+j.tick_sub_connected+'  iter='+j.iterations+'  mdt='+j.mdt+'  mode='+j.mode);
-            d('API','subscribed='+JSON.stringify(j.subscribed_symbols));
-            var lx=j.latest;
-            d('API','LATEST: price='+(lx.price||0)+'  last='+(lx.last||0)+'  close='+(lx.close||0)+'  bid='+(lx.bid||0)+'  ask='+(lx.ask||0));
-            var rf=j.raw_fields;
-            if(rf.error)d('ERR','RAW: '+rf.error);
-            else d('API','RAW: last='+rf.last+'  close='+rf.close+'  bid='+rf.bid+'  ask='+rf.ask);
-            if(j.ib_errors&&j.ib_errors.length>0){d('ERR','=== IB ERRORY ('+j.ib_errors.length+') ===');j.ib_errors.forEach(function(e){d('ERR','IB: '+e);});}
-            else d('API','IB errory: zadne');
-        }).catch(function(e){d('ERR','TICK DIAG FAIL: '+e);});
-        return n;
-    }
-    """,
-    Output('diag-tick-trigger', 'data'), Input('diag-tick-btn', 'n_clicks')
-)
-
-app.clientside_callback(
-    """
-    function(n) {
-        if (n < 1) return n;
-        var d = window.lwcDebug || function() {};
-        var sym = (document.getElementById('symbol-input')&&document.getElementById('symbol-input').value||'AAPL').toUpperCase();
-        var assetType = (document.getElementById('asset-type-select')&&document.getElementById('asset-type-select').value||'STOCK').toUpperCase();
-        d('API','=== SNAPSHOT TEST: '+sym+' ('+assetType+') (ceka ~3s...) ===');
-        fetch('/api/test/snapshot/'+sym+'?asset_type='+encodeURIComponent(assetType)).then(function(r){return r.json();}).then(function(j){
-            if(j.ok)d('API','SNAP OK: last='+j.last+'  close='+j.close+'  bid='+j.bid+'  ask='+j.ask+'  vol='+j.volume+'  conId='+j.conId);
-            else d('ERR','SNAP FAIL: '+j.error);
-            if(j.errors&&j.errors.length>0)d('ERR','Snapshot IB errory: '+JSON.stringify(j.errors));
-        }).catch(function(e){d('ERR','SNAP TEST FAIL: '+e);});
-        return n;
-    }
-    """,
-    Output('diag-snap-trigger', 'data'), Input('diag-snap-btn', 'n_clicks')
 )
 
 app.clientside_callback(
@@ -1735,31 +1469,6 @@ app.clientside_callback(
      State('symbol-input', 'value'),
      State('asset-type-select', 'value')],
     prevent_initial_call=True
-)
-
-app.clientside_callback(
-    """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};d('API','=== TEST 1: IB spojeni ===');fetch('/api/diag').then(r=>r.json()).then(j=>{d('API','connected='+j.connected+' account='+j.account_id);d('API','tick_sub: connected='+j.tick_sub.connected+' iter='+j.tick_sub.iterations+' mdt='+j.tick_sub.mdt+' mode='+j.tick_sub.mode);if(j.tick_sub.ib_errors&&j.tick_sub.ib_errors.length>0){d('ERR','IB errory: '+JSON.stringify(j.tick_sub.ib_errors));}}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
-    Output('diag1-trigger','data'), Input('diag1-btn','n_clicks')
-)
-app.clientside_callback(
-    """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};var assetType=(document.getElementById('asset-type-select')&&document.getElementById('asset-type-select').value||'STOCK').toUpperCase();d('API','TEST 2: Hist. data...');fetch('/api/test-hist/AAPL?asset_type='+encodeURIComponent(assetType)).then(r=>r.json()).then(j=>{if(j.ok)d('API','OK: '+j.bars+' baru za '+j.elapsed+'s');else d('ERR','FAIL: '+j.error);}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
-    Output('diag2-trigger','data'), Input('diag2-btn','n_clicks')
-)
-app.clientside_callback(
-    """function(n){if(n<1)return n;var d=window.lwcDebug||function(){};var assetType=(document.getElementById('asset-type-select')&&document.getElementById('asset-type-select').value||'STOCK').toUpperCase();d('API','TEST 3: Fetch+nakreslit...');fetch('/api/test-hist/AAPL?asset_type='+encodeURIComponent(assetType)).then(r=>r.json()).then(j=>{if(!j.ok){d('ERR','Fail: '+j.error);return;}d('API','OK: '+j.bars+' baru');if(window.lwcManager)window.lwcManager.testChart();}).catch(e=>d('ERR','FAIL: '+e));return n;}""",
-    Output('diag3-trigger','data'), Input('diag3-btn','n_clicks')
-)
-app.clientside_callback(
-    """function(n){if(n>0&&window.lwcManager)window.lwcManager.testChart();return n;}""",
-    Output('test-chart-trigger','data'), Input('test-chart-btn','n_clicks')
-)
-app.clientside_callback(
-    """function(n){if(n>0){var a=document.getElementById('debug-log-area');if(a){a.select();try{document.execCommand('copy');}catch(e){}a.setSelectionRange(0,0);navigator.clipboard&&navigator.clipboard.writeText(a.value);}}return n>0?'Zkopírováno ✓':'';}""",
-    Output('copy-status','children'), Input('copy-log-btn','n_clicks')
-)
-app.clientside_callback(
-    """function(n){if(n>0){var a=document.getElementById('debug-log-area');if(a)a.value='';}return n;}""",
-    Output('clear-log-trigger','data'), Input('clear-log-btn','n_clicks')
 )
 
 

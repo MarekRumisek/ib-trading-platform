@@ -21,14 +21,12 @@ Only files and directories listed here actually exist in the repository.
 ```
 ib-trading-platform/
 ├── app.py                  ← Main entry point (Dash UI + Flask API)
-├── app_simple.py           ← Flask version using OrderHandler pattern
 ├── ib_gateway.py           ← 🆕 Unified facade for IB API (USE THIS)
 ├── ib_connector.py         ← Internal: IB API logic (3 classes, 3 clientIds)
 ├── order_handler.py        ← Internal: Dedicated thread for order submission
 ├── contract_utils.py       ← Contract creation utilities
 ├── config.py               ← IB connection configuration
-├── debug.py                ← Interactive CLI debug tool (imports ib_gateway only)
-├── test_order.py           ← Diagnostic script for testing orders
+├── debug.py                ← CLI diagnostic tool (candles, buy, sell, status)
 ├── requirements.txt
 ├── .gitignore
 ├── modules/
@@ -344,13 +342,24 @@ DEBUG_CONNECTION = True  # verbose connection logs
 ## Testing
 
 ```bash
-python debug.py                    # interactive CLI for IB testing (uses ib_gateway)
+python debug.py candles            # fetch historical candles (default: AAPL 5 mins 60)
+python debug.py buy                # place test BUY MARKET order (default: 1 AAPL)
+python debug.py sell               # place test SELL MARKET order (default: 1 AAPL)
+python debug.py status             # check account status and open positions
 python modules/data_store.py       # demo: save/load bars
 python modules/trade_tracker.py    # demo: save trade and statistics
-python test_order.py               # diagnose IB connection + place BUY 1 AAPL, monitor 15s
 ```
 
 Every module must be runnable standalone — without Dash and without IB.
+
+---
+
+## Philosophy & Architecture
+
+- **Simplicity First:** Keep the number of files to an absolute minimum. Each file must have one clearly defined purpose.
+- **No Clutter:** Do not add debug UI panels or complex diagnostic endpoints to `app.py`. Keep the main application clean and focused on core functionality.
+- **CLI Diagnostics:** Use `debug.py` as the primary tool for diagnosing IB connection issues, testing data retrieval, and verifying order execution. It is designed to be fast, scriptable, and isolated from the UI.
+- **Iterative Development:** Build features incrementally. Verify each step using `debug.py` before integrating it into the Dash UI.
 
 ---
 
@@ -394,7 +403,7 @@ Do not reference these as existing. Implement only when explicitly requested.
 4. ⏰ Test during trading hours (15:30–22:00 CET for US markets)
 5. 🧵 Logs must show "Order handler connected"
 6. 🔧 `ib.sleep()` and `time.sleep()` in `order_handler.py` must be present — do not remove
-7. 🧪 Run `python test_order.py` for full diagnosis
+7. 🧪 Run `python debug.py buy` for full diagnosis
 8. 🐛 Set `DEBUG_ORDERS = True` in `config.py`
 
 ### Connection Failed
