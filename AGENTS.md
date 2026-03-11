@@ -19,6 +19,7 @@ Historical data provided to the AI may vary depending on strategy requirements a
 ### Tech Stack
 Backend: Python (Dash / Flask + ib_async)
 Frontend: Dash UI + TradingView Lightweight Charts
+IB Connection: Interactive Brokers TWS (Trader Workstation) via local IP API connection
 Active branch: feature/trade-management-collab-v3
 ### IB Paper Trading Notes
 The system is currently developed on an Interactive Brokers paper account.
