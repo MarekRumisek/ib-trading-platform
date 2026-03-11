@@ -31,6 +31,16 @@ ib.disconnect()
 ib.isConnected()  # → bool
 ```
 
+## Ports Reference
+| Environment | TWS    | IB Gateway |
+|-------------|--------|------------|
+| Paper       | 7497   | 4002       |
+| Live        | 7496   | 4001       |
+
+## External Docs (for Fetch MCP)
+- ib_async reference: https://ib-api-reloaded.github.io/ib_async/
+- TWS API setup: https://interactivebrokers.github.io/tws-api/initial_setup.html
+
 **Important:** Never use `time.sleep()` — always use `ib.sleep(seconds)` to keep the event loop running.
 
 ### ClientId convention in this project
