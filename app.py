@@ -6,7 +6,10 @@ import dash
 from dash import dcc, html, Input, Output, State
 from datetime import datetime, timedelta
 from flask import jsonify, request as freq
-from contract_utils import create_contract, get_cache_symbol, normalize_asset_type
+from contract_utils import create_contract, get_cache_symbol, normalize_asset_type, set_default_exchange
+from modules.logger import log
+from modules.market_hours import get_session_display
+from modules.config_store import config_store
 import ib_gateway  # Unified IB API facade
 import config
 from modules.data_store import data_store
@@ -17,12 +20,12 @@ import atexit
 import signal
 
 def graceful_shutdown():
-    print("[SHUTDOWN] Disconnecting from IB...")
+    log("INFO", "[SHUTDOWN] Disconnecting from IB...")
     try:
         ib_gateway.disconnect()
     except:
         pass
-    print("[SHUTDOWN] Done.")
+    log("INFO", "[SHUTDOWN] Done.")
 
 atexit.register(graceful_shutdown)
 
@@ -35,6 +38,13 @@ app = dash.Dash(
 )
 
 server = app.server
+
+
+def fmt_price(price, asset_type=None):
+    """Format price with appropriate decimal places: 4 for Forex, 2 for stocks."""
+    if asset_type and normalize_asset_type(asset_type) == 'FOREX':
+        return f"${price:.4f}"
+    return f"${price:.2f}"
 
 
 def submit_market_order(symbol, action, quantity, asset_type='STOCK'):
@@ -212,7 +222,14 @@ def api_trades_close_all():
 
 
 # ================================================================
-app_state = {'current_symbol': 'AAPL', 'current_timeframe': '5 mins', 'current_asset_type': 'STOCK'}
+app_state = {
+    'current_symbol': config_store.get('default_symbol', 'AAPL'),
+    'current_timeframe': config_store.get('default_timeframe', '5 mins'),
+    'current_asset_type': config_store.get('default_asset_type', 'STOCK'),
+    'current_exchange': config_store.get('default_exchange', 'SMART'),
+}
+# Sync contract_utils default exchange from persisted config
+set_default_exchange(app_state['current_exchange'])
 
 # ========== LAYOUT ==========
 
@@ -220,6 +237,9 @@ app.layout = html.Div([
     html.Div([
         html.H1("🚀 IB Trading Platform v3.0",
                 style={'display': 'inline-block', 'margin': 0, 'color': '#00d4ff'}),
+        html.Span(id='market-hours-badge',
+                  style={'display': 'inline-block', 'marginLeft': '20px', 'fontSize': '14px',
+                         'padding': '4px 12px', 'borderRadius': '12px', 'verticalAlign': 'middle'}),
         html.Div(id='connection-status',
                  style={'display': 'inline-block', 'float': 'right', 'fontSize': 18})
     ], style={'padding': '20px',
@@ -244,7 +264,7 @@ app.layout = html.Div([
         html.Div([
             html.Label('Symbol:', style={'marginRight': '10px', 'fontWeight': 'bold'}),
             dcc.Input(
-                id='symbol-input', type='text', value='AAPL',
+                id='symbol-input', type='text', value=config_store.get('default_symbol', 'AAPL'),
                 style={'width': '150px', 'padding': '8px', 'borderRadius': '5px',
                        'border': '2px solid #667eea', 'background': '#1e1e2e',
                        'color': 'white', 'fontSize': '16px'}
@@ -256,7 +276,21 @@ app.layout = html.Div([
                     {'label': 'Forex', 'value': 'FOREX'},
                     {'label': 'Crypto', 'value': 'CRYPTO'},
                 ],
-                value='STOCK',
+                value=config_store.get('default_asset_type', 'STOCK'),
+                clearable=False,
+                searchable=False,
+                style={'width': '140px', 'display': 'inline-block', 'marginLeft': '10px',
+                       'verticalAlign': 'middle', 'color': '#111'}
+            ),
+            dcc.Dropdown(
+                id='exchange-select',
+                options=[
+                    {'label': 'SMART (US)', 'value': 'SMART'},
+                    {'label': 'IBIS (DE)', 'value': 'IBIS'},
+                    {'label': 'AEB (NL)', 'value': 'AEB'},
+                    {'label': 'SBF (FR)', 'value': 'SBF'},
+                ],
+                value=config_store.get('default_exchange', 'SMART'),
                 clearable=False,
                 searchable=False,
                 style={'width': '140px', 'display': 'inline-block', 'marginLeft': '10px',
@@ -485,6 +519,7 @@ app.layout = html.Div([
     dcc.Interval(id='positions-update-interval', interval=10000, n_intervals=0),
     dcc.Interval(id='connection-check-interval', interval=10000, n_intervals=0),
     dcc.Interval(id='trades-refresh-interval',   interval=5000,  n_intervals=0),
+    dcc.Interval(id='market-hours-interval',     interval=60000, n_intervals=0),
     html.Div(id='hidden-state', style={'display': 'none'}),
     html.Div(id='deep-load-trigger-dummy', style={'display': 'none'})
 
@@ -505,6 +540,21 @@ def update_connection_status(n):
                           html.Span('Connected to IB Gateway')])
     return html.Span([html.Span('⚪', style={'color': '#ef5350', 'marginRight': '5px'}),
                       html.Span('Disconnected')])
+
+
+@app.callback(
+    Output('market-hours-badge', 'children'),
+    Output('market-hours-badge', 'style'),
+    Input('market-hours-interval', 'n_intervals')
+)
+def update_market_hours(n):
+    info = get_session_display()
+    style = {
+        'display': 'inline-block', 'marginLeft': '20px', 'fontSize': '14px',
+        'padding': '4px 12px', 'borderRadius': '12px', 'verticalAlign': 'middle',
+        'color': info['color'], 'background': '#1a1a2e', 'border': f'1px solid {info["color"]}',
+    }
+    return info['label'], style
 
 
 @app.callback(
@@ -582,9 +632,9 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
         
         if is_reset:
             # === FIRST LOAD or RESET: fetch N candles from now ===
-            print(f"[CB] INITIAL LOAD: {symbol} ({asset_type}) | {tf} | n={n_candles} | Trigger={btn}")
+            log("DEBUG", f"[CB] INITIAL LOAD: {symbol} ({asset_type}) | {tf} | n={n_candles} | Trigger={btn}")
             bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=None)
-            print(f"[CB] IB returned {len(bars)} bars")
+            log("DEBUG", f"[CB] IB returned {len(bars)} bars")
             
             if not bars:
                 return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, '❌ Žádná data'
@@ -602,14 +652,14 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
             chart_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars, 'mode': 'initial'}
             bars_display = f"📊 {len(bars)} svíček"
             
-            print('[TICK] Auto-enabled on chart load')
+            log('DEBUG', '[TICK] Auto-enabled on chart load')
             return chart_data, None, new_meta, True, '⚡ TICK: ON', 'tick-btn tick-on', bars_display
         
         else:
             # === APPEND: fetch older candles ===
             oldest_time = meta.get('oldest_time') if meta else None
             if not oldest_time:
-                print("[CB] APPEND: no oldest_time, treating as initial")
+                log("DEBUG", "[CB] APPEND: no oldest_time, treating as initial")
                 # Fall back to initial load
                 bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=None)
                 new_meta = {
@@ -623,11 +673,11 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
                 chart_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars, 'mode': 'initial'}
                 return chart_data, None, new_meta, True, '⚡ TICK: ON', 'tick-btn tick-on', f"📊 {len(bars)} svíček"
             
-            print(f"[CB] APPEND: {symbol} ({asset_type}) | {tf} | n={n_candles} | before={oldest_time}")
+            log("DEBUG", f"[CB] APPEND: {symbol} ({asset_type}) | {tf} | n={n_candles} | before={oldest_time}")
             
             # Fetch older bars ending just before oldest_time
             older_bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=oldest_time - 1)
-            print(f"[CB] IB returned {len(older_bars)} older bars")
+            log("DEBUG", f"[CB] IB returned {len(older_bars)} older bars")
             
             if not older_bars:
                 # No more historical data available
@@ -650,7 +700,7 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
             return dash.no_update, append_data, new_meta, dash.no_update, dash.no_update, dash.no_update, bars_display
     
     except Exception as e:
-        print(f"[CB] EXCEPTION: {e}")
+        log("INFO", f"[CB] EXCEPTION: {e}")
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, f'❌ {e}'
 
 
@@ -679,6 +729,23 @@ def update_cache_status(n, symbol, asset_type):
                          style={'color': '#4caf50', 'background': '#1b5e20'})
     return html.Span(f"💾 Parquet: {bars_str} barů | {age_str} staré",
                      style={'color': '#ffeb3b', 'background': '#e65100'})
+
+
+# ------------------------------------------------------------------
+# EXCHANGE SELECTOR: sync dropdown → app_state + contract_utils default
+# ------------------------------------------------------------------
+@app.callback(
+    Output('exchange-select', 'id'),
+    Input('exchange-select', 'value'),
+    prevent_initial_call=True
+)
+def update_exchange(exchange):
+    exchange = (exchange or 'SMART').strip().upper()
+    app_state['current_exchange'] = exchange
+    set_default_exchange(exchange)
+    config_store.set('default_exchange', exchange)
+    log("INFO", f"[EXCHANGE] Changed to: {exchange}")
+    return dash.no_update
 
 
 # ------------------------------------------------------------------
@@ -763,6 +830,17 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
         return html.Div('❌ Not connected!',
                         style={'color': '#ef5350', 'fontWeight': 'bold'}), dash.no_update, dbg
 
+    # Market hours warning (non-blocking)
+    _session = get_session_display()
+    _market_warn = ''
+    exchange = app_state.get('current_exchange', 'SMART')
+    if asset_type == 'STOCK':
+        is_eu_exchange = exchange in ('IBIS', 'AEB', 'SBF')
+        if is_eu_exchange and _session['status'] != 'EU_REGULAR':
+            _market_warn = f'⚠️ EU market closed ({_session["label"]}). '
+        elif not is_eu_exchange and _session['status'] != 'US_REGULAR':
+            _market_warn = f'⚠️ US market not in regular session ({_session["label"]}). '
+
     ticker    = ib_gateway.get_tick(symbol, asset_type) or {}
     cur_price = ticker.get('price') or ticker.get('last') or 0
 
@@ -771,14 +849,16 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
         sl = float(sl_price)
     elif sl_pct and cur_price:
         mult = (1 - float(sl_pct) / 100) if action == 'BUY' else (1 + float(sl_pct) / 100)
-        sl   = round(cur_price * mult, 2)
+        _prec = 4 if asset_type == 'FOREX' else 2
+        sl   = round(cur_price * mult, _prec)
 
     tp = None
     if tp_price:
         tp = float(tp_price)
     elif tp_pct and cur_price:
         mult = (1 + float(tp_pct) / 100) if action == 'BUY' else (1 - float(tp_pct) / 100)
-        tp   = round(cur_price * mult, 2)
+        _prec = 4 if asset_type == 'FOREX' else 2
+        tp   = round(cur_price * mult, _prec)
 
     result = submit_market_order(symbol, action, quantity, asset_type)
     if not result['success']:
@@ -804,7 +884,7 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
     )
 
     if opposing_trades:
-        print(f"[TRADE] MATCH | {action} {quantity}x {symbol} ({asset_type}) -> {len(opposing_trades)} opposing open trade(s)")
+        log("INFO", f"[TRADE] MATCH | {action} {quantity}x {symbol} ({asset_type}) -> {len(opposing_trades)} opposing open trade(s)")
 
         for existing in opposing_trades:
             if remaining_qty <= 0:
@@ -826,14 +906,14 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
                             break
 
                 if updated_qty is not None:
-                    print(
+                    log("INFO", 
                         f"[TRADE] PARTIAL CLOSE | id={existing.get('id')} "
                         f"closed_qty={remaining_qty} remaining_qty={updated_qty} fill={fill_price}"
                     )
                     tracker_status = 'partially_closed'
                     remaining_qty = 0
                 else:
-                    print(f"[TRADE][WARN] PARTIAL CLOSE | id={existing.get('id')} not found during update")
+                    log("INFO", f"[TRADE][WARN] PARTIAL CLOSE | id={existing.get('id')} not found during update")
                 break
 
             closed_trade = trade_tracker.close_trade(existing.get('id'), fill_price)
@@ -841,13 +921,13 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
                 tracker_status = 'closed'
                 remaining_qty = round(remaining_qty - existing_qty, 8)
             else:
-                print(f"[TRADE][WARN] CLOSE | id={existing.get('id')} failed during opposing match")
+                log("INFO", f"[TRADE][WARN] CLOSE | id={existing.get('id')} failed during opposing match")
 
     if remaining_qty > 0:
         # Issue #3 + #2: use avg_cost from execution fills (fill_price + commission/shares)
         # This is more reliable than the positions cache which may be stale right after fill.
         open_avg_cost, open_commission = ib_gateway.get_fill_avg_cost(symbol, asset_type)
-        print(f'[TRADE] open_trade avg_cost from fills: {open_avg_cost} commission: {open_commission}')
+        log('INFO', f'[TRADE] open_trade avg_cost from fills: {open_avg_cost} commission: {open_commission}')
         trade_tracker.open_trade(
             symbol=symbol, side=action, qty=remaining_qty,
             entry_price=fill_price,
@@ -862,8 +942,8 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
         else:
             tracker_status = 'opened'
 
-    sl_txt  = f' | SL ${sl:.2f}' if sl else ''
-    tp_txt  = f' | TP ${tp:.2f}' if tp else ''
+    sl_txt  = f' | SL {fmt_price(sl, asset_type)}' if sl else ''
+    tp_txt  = f' | TP {fmt_price(tp, asset_type)}' if tp else ''
     tracker_txt = ''
     if tracker_status == 'closed':
         tracker_txt = ' | tracker=closed opposing open trade'
@@ -872,14 +952,16 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
     elif tracker_status == 'flipped':
         tracker_txt = f' | tracker=closed opposing trade + opened {remaining_qty:g}'
     dbg_msg = (f'[TRADE] {action} {quantity}x {symbol} ({asset_type}) @ Market'
-               f' | fill=${fill_price:.2f}{sl_txt}{tp_txt}'
+               f' | fill={fmt_price(fill_price, asset_type)}{sl_txt}{tp_txt}'
                f'{tracker_txt}'
                f'{" | note: " + note if note else ""}')
     dbg = {'msg': dbg_msg, 'ts': time.time()}
 
     return (
-        html.Div(f'✅ {action} {quantity} {symbol} ({asset_type}) @ Market{sl_txt}{tp_txt}',
-                 style={'color': color, 'fontWeight': 'bold'}),
+        html.Div([
+            html.Span(f'{_market_warn}', style={'color': '#ffb74d'}) if _market_warn else None,
+            html.Span(f'✅ {action} {quantity} {symbol} ({asset_type}) @ Market{sl_txt}{tp_txt}'),
+        ], style={'color': color, 'fontWeight': 'bold'}),
         (refresh_counter or 0) + 1,
         dbg
     )
@@ -970,7 +1052,7 @@ def update_positions_table(n, _refresh, _btn):
     tt_str     = str([(t['symbol'], f"age={(now - t.get('entry_time', now))}s",
                        f"SL={t.get('sl')} TP={t.get('tp')}")
                       for t in open_trades_list])
-    print(f"[SYNC] n={n} | IB={ib_pos_str} | TT={tt_str}")
+    log("DEBUG", f"[SYNC] n={n} | IB={ib_pos_str} | TT={tt_str}")
 
     # Do debug panelu pošli stav jen pokud jsou otevřené trady nebo IB pozice
     if open_trades_list or positions:
@@ -991,7 +1073,7 @@ def update_positions_table(n, _refresh, _btn):
             msg = (f'[SYNC] ℹ️ {sym} metadata only in TT'
                    f' | age={age}s | waiting for IB position')
 
-        print(msg)
+        log("DEBUG", msg)
         debug_lines.append(msg)
 
     dbg = dash.no_update
@@ -1028,12 +1110,12 @@ def update_positions_table(n, _refresh, _btn):
                 
                 msg = (f'[SYNC] ✅ Row enrich {sym}'
                        f' | SL={tt.get("sl")} TP={tt.get("tp")}')
-                print(msg)
+                log("DEBUG", msg)
                 debug_lines.append(msg)
 
                 entry_t  = trade_tracker.fmt_time(tt.get('entry_time'))
-                sl_txt   = f"${tt['sl']:.2f}"  if tt.get('sl')  else '–'
-                tp_txt   = f"${tt['tp']:.2f}"  if tt.get('tp')  else '–'
+                sl_txt   = fmt_price(tt['sl'], asset_type) if tt.get('sl') else '–'
+                tp_txt   = fmt_price(tt['tp'], asset_type) if tt.get('tp') else '–'
                 trade_id = tt.get('id', '')
                 
                 # Calculate proportional values if there are multiple trades
@@ -1057,8 +1139,8 @@ def update_positions_table(n, _refresh, _btn):
                     html.Td(tt.get('side', 'LONG' if pos['position'] > 0 else 'SHORT'),
                             style={'color': '#00d4ff'}),
                     html.Td(trade_qty),
-                    html.Td(f"${tt.get('entry_price', pos['avg_cost']):.2f}"),
-                    html.Td(f"${(pos['market_value'] * proportion):.2f}"),
+                    html.Td(fmt_price(tt.get('entry_price', pos['avg_cost']), asset_type)),
+                    html.Td(fmt_price(pos['market_value'] * proportion, asset_type)),
                     html.Td(f"${trade_pnl:.2f} ({trade_pnl_pct:.2f}%)",
                             style={'color': trade_pnl_c, 'fontWeight': 'bold'}),
                     html.Td(entry_t, style={'color': '#aaa', 'fontSize': '12px'}),
@@ -1076,16 +1158,17 @@ def update_positions_table(n, _refresh, _btn):
         else:
             # Position without TT metadata
             msg = f'[SYNC] ℹ️ Row enrich {sym} | no TT metadata'
-            print(msg)
+            log("DEBUG", msg)
             debug_lines.append(msg)
 
+            _at = pos.get('asset_type', 'STOCK')
             rows.append(html.Tr([
-                html.Td(f"{sym} ({pos.get('asset_type', 'STOCK')})", style={'fontWeight': 'bold'}),
+                html.Td(f"{sym} ({_at})", style={'fontWeight': 'bold'}),
                 html.Td('LONG' if pos['position'] > 0 else 'SHORT',
                         style={'color': '#00d4ff'}),
                 html.Td(abs(pos['position'])),
-                html.Td(f"${pos['avg_cost']:.2f}"),
-                html.Td(f"${pos['market_value']:.2f}"),
+                html.Td(fmt_price(pos['avg_cost'], _at)),
+                html.Td(fmt_price(pos['market_value'], _at)),
                 html.Td(f"${pos['unrealized_pnl']:.2f} ({pos['unrealized_pnl_pct']:.2f}%)",
                         style={'color': pnl_c, 'fontWeight': 'bold'}),
                 html.Td('–', style={'color': '#aaa', 'fontSize': '12px'}),
@@ -1100,15 +1183,15 @@ def update_positions_table(n, _refresh, _btn):
             sym = tt['symbol']
             asset_type = tt.get('asset_type', 'STOCK')
             entry_t  = trade_tracker.fmt_time(tt.get('entry_time'))
-            sl_txt   = f"${tt['sl']:.2f}"  if tt.get('sl')  else '–'
-            tp_txt   = f"${tt['tp']:.2f}"  if tt.get('tp')  else '–'
+            sl_txt   = fmt_price(tt['sl'], asset_type) if tt.get('sl') else '–'
+            tp_txt   = fmt_price(tt['tp'], asset_type) if tt.get('tp') else '–'
             trade_id = tt.get('id', '')
             
             rows.append(html.Tr([
                 html.Td(f"{sym} ({asset_type})", style={'fontWeight': 'bold'}),
                 html.Td(tt.get('side', 'LONG'), style={'color': '#00d4ff'}),
                 html.Td(tt.get('qty', 0)),
-                html.Td(f"${tt.get('entry_price', 0):.2f}"),
+                html.Td(fmt_price(tt.get('entry_price', 0), asset_type)),
                 html.Td("Pending..."),
                 html.Td("–", style={'color': '#888', 'fontWeight': 'bold'}),
                 html.Td(entry_t, style={'color': '#aaa', 'fontSize': '12px'}),
@@ -1195,7 +1278,7 @@ def close_single_position(n_clicks_list, refresh_counter):
         avg_cost = float(ib_pos['avgCost'])
         direction_mult = 1 if trade.get('side') == 'BUY' else -1
         real_pnl = round(direction_mult * (float(exit_price) - avg_cost) * float(trade.get('qty', qty)), 2)
-        print(f'[TRADE] P&L recalc using avgCost={avg_cost} exit={exit_price} pnl={real_pnl}')
+        log('INFO', f'[TRADE] P&L recalc using avgCost={avg_cost} exit={exit_price} pnl={real_pnl}')
         trade_tracker.patch_trade(trade_id, {'pnl': real_pnl})
 
     updated = trade_tracker.get_trade(trade_id)
@@ -1204,7 +1287,7 @@ def close_single_position(n_clicks_list, refresh_counter):
 
     color   = '#26a69a' if res['success'] else '#ef5350'
     msg_ui  = f"✅ Closed {sym} {qty}x{pnl_txt}" if res['success'] else f"❌ {res['error']}"
-    dbg_msg = (f'[TRADE] CLOSE {sym} {qty}x @ ${exit_price:.2f}{pnl_txt}'
+    dbg_msg = (f'[TRADE] CLOSE {sym} {qty}x @ {fmt_price(exit_price, asset_type)}{pnl_txt}'
                f' | IB: {"OK" if res["success"] else "ERR " + str(res.get("error",""))}')
     dbg = {'msg': dbg_msg, 'ts': time.time()}
 
@@ -1228,9 +1311,10 @@ def update_trade_history(_n, _refresh):
     for i, t in enumerate(history, 1):
         pnl    = t.get('pnl')
         pnl_c  = '#26a69a' if (pnl or 0) >= 0 else '#ef5350'
+        _at = t.get('asset_type', 'STOCK')
         pnl_s  = f"{'+'if (pnl or 0)>=0 else ''}${pnl:.2f}" if pnl is not None else '–'
-        sl_txt = f"${t['sl']:.2f}"  if t.get('sl')  else '–'
-        tp_txt = f"${t['tp']:.2f}"  if t.get('tp')  else '–'
+        sl_txt = fmt_price(t['sl'], _at) if t.get('sl') else '–'
+        tp_txt = fmt_price(t['tp'], _at) if t.get('tp') else '–'
         # Commission: use stored value if available, fall back to (avg_cost - entry_price) * qty
         if t.get('commission') is not None:
             comm_s = f"-${abs(float(t['commission'])):.4f}"
@@ -1244,10 +1328,10 @@ def update_trade_history(_n, _refresh):
             html.Td(t['symbol'], style={'fontWeight': 'bold'}),
             html.Td(t['side'],   style={'color': '#00d4ff'}),
             html.Td(t['qty']),
-            html.Td(f"${t['entry_price']:.2f}" if t.get('entry_price') else '–'),
+            html.Td(fmt_price(t['entry_price'], _at) if t.get('entry_price') else '–'),
             html.Td(trade_tracker.fmt_time(t.get('entry_time')),
                     style={'color': '#aaa', 'fontSize': '12px'}),
-            html.Td(f"${t['exit_price']:.2f}" if t.get('exit_price') else '–'),
+            html.Td(fmt_price(t['exit_price'], _at) if t.get('exit_price') else '–'),
             html.Td(trade_tracker.fmt_time(t.get('exit_time')),
                     style={'color': '#aaa', 'fontSize': '12px'}),
             html.Td(sl_txt, style={'color': '#ef9a9a', 'fontSize': '12px'}),
@@ -1528,7 +1612,8 @@ app.clientside_callback(
 )
 def update_price_display(n, symbol, asset_type):
     if not symbol or not ib_gateway.is_connected(): return 'Last: $0.00', ''
-    ticker = ib_gateway.get_tick(symbol, normalize_asset_type(asset_type))
+    asset_type = normalize_asset_type(asset_type)
+    ticker = ib_gateway.get_tick(symbol, asset_type)
     if not ticker: return 'Last: $0.00', ''
     lp = ticker.get('price', 0) or ticker.get('last', 0)
     pc = ticker.get('close', lp) or lp
@@ -1538,9 +1623,10 @@ def update_price_display(n, symbol, asset_type):
     arrow  = '▲' if change >= 0 else '▼'
     color  = '#26a69a' if change >= 0 else '#ef5350'
     sign   = '+' if change >= 0 else ''
+    _prec = '4' if asset_type == 'FOREX' else '2'
     return (
-        f'Last: ${lp:.2f}',
-        html.Span(f' {arrow} {sign}${change:.2f} ({sign}{pct:.2f}%)', style={'color': color})
+        f'Last: ${lp:.{_prec}f}',
+        html.Span(f' {arrow} {sign}${change:.{_prec}f} ({sign}{pct:.2f}%)', style={'color': color})
     )
 
 
@@ -1730,12 +1816,12 @@ app.index_string = '''
 # ========== RUN ==========
 
 if __name__ == '__main__':
-    print("🚀 Starting IB Trading Platform v3.0.0...")
-    print(f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
+    log("INFO", "🚀 Starting IB Trading Platform v3.0.0...")
+    log("INFO", f"Connecting to {config.IB_HOST}:{config.IB_PORT}")
     if ib_gateway.connect():
-        print("✅ Connected to IB Gateway!")
+        log("INFO", "✅ Connected to IB Gateway!")
         time.sleep(2)  # Give TWS time to release session
     else:
-        print("❌ Failed to connect")
-    print("http://localhost:8050  |  Ctrl+C to stop")
+        log("INFO", "❌ Failed to connect")
+    log("INFO", "http://localhost:8050  |  Ctrl+C to stop")
     app.run_server(debug=True, use_reloader=False, host='0.0.0.0', port=8050)

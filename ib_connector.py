@@ -37,6 +37,7 @@ from contract_utils import (
     use_regular_trading_hours,
 )
 from modules.data_store import data_store
+from modules.logger import log
 import config
 import time
 import threading
@@ -73,7 +74,7 @@ class _TickSubscriber:
             name=f'IB-TickSub-cid{client_id}'
         )
         self._thread.start()
-        print(f"[TICK-SUB] Worker spusten (clientId={client_id})")
+        log("DEBUG", f"[TICK-SUB] Worker spusten (clientId={client_id})")
 
     def get_price(self, symbol: str, asset_type: str = 'STOCK') -> float:
         key = get_contract_key(symbol, asset_type)
@@ -174,7 +175,7 @@ class _TickSubscriber:
             if self._primary_key == key:
                 self._primary_key = None
         if not already_failed:
-            print(f"[TICK-SUB] INVALID {key}: {reason} -> subscription stopped")
+            log("DEBUG", f"[TICK-SUB] INVALID {key}: {reason} -> subscription stopped")
 
     @staticmethod
     def _extract_price(t) -> float:
@@ -215,11 +216,11 @@ class _TickSubscriber:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                print(f"[TICK-SUB] Outer error: {e}")
+                log("INFO", f"[TICK-SUB] Outer error: {e}")
             self._connected = False
             self._tickers   = {}
             self._mode      = 'init'
-            print("[TICK-SUB] Reconnecting in 10s...")
+            log("INFO", "[TICK-SUB] Reconnecting in 10s...")
             await asyncio.sleep(10)
 
     async def _connect_and_stream(self):
@@ -228,26 +229,26 @@ class _TickSubscriber:
             msg = f"[{errorCode}] reqId={reqId}: {errorString}"
             self._last_errors = (self._last_errors + [msg])[-20:]
             if errorCode not in (2104, 2106, 2107, 2108, 2158, 2119):
-                print(f"[TICK-SUB] IB_ERR [{errorCode}] reqId={reqId}: {errorString}")
+                log("INFO", f"[TICK-SUB] IB_ERR [{errorCode}] reqId={reqId}: {errorString}")
         ib.errorEvent += on_ib_error
         try:
             connected = False
             for offset in range(10):
                 cid = self._client_id + offset
                 try:
-                    print(f"[TICK-SUB] connectAsync clientId={cid}...")
+                    log("DEBUG", f"[TICK-SUB] connectAsync clientId={cid}...")
                     await ib.connectAsync(self._host, self._port, clientId=cid)
                     if offset > 0:
-                        print(f"[TICK-SUB] Pripojeno s fallback clientId={cid} (base={self._client_id})")
+                        log("INFO", f"[TICK-SUB] Pripojeno s fallback clientId={cid} (base={self._client_id})")
                     else:
-                        print(f"[TICK-SUB] Pripojeno! clientId={cid}")
+                        log("INFO", f"[TICK-SUB] Pripojeno! clientId={cid}")
                     connected = True
                     break
                 except Exception as e:
                     err_str = str(e)
                     is_conflict = 'TimeoutError' in type(e).__name__ or 'TimeoutError' in err_str or '326' in err_str
                     if is_conflict:
-                        print(f"[TICK-SUB] clientId={cid} in use (Error 326), trying cid={cid+1}...")
+                        log("DEBUG", f"[TICK-SUB] clientId={cid} in use (Error 326), trying cid={cid+1}...")
                         try: ib.disconnect()
                         except: pass
                         await asyncio.sleep(0.5)
@@ -282,7 +283,7 @@ class _TickSubscriber:
                             ib.cancelMktData(ticker)
                         except Exception:
                             pass
-                    print(f"[TICK-SUB] UNSUB {key}")
+                    log("DEBUG", f"[TICK-SUB] UNSUB {key}")
                 for key in new_syms:
                     try:
                         asset_type, sym = key.split(':', 1)
@@ -292,7 +293,7 @@ class _TickSubscriber:
                             self._mark_failed(key, 'qualified contract has conId=0')
                             continue
                         contracts_local[key] = contract
-                        print(f"[TICK-SUB] Contract OK: {sym} ({asset_type}) conId={contract.conId}")
+                        log("DEBUG", f"[TICK-SUB] Contract OK: {sym} ({asset_type}) conId={contract.conId}")
                         if self._mode == 'streaming':
                             ticker = ib.reqMktData(contract, '', False, False)
                             tickers_local[key] = ticker
@@ -303,21 +304,21 @@ class _TickSubscriber:
                                         self._latest[contract_key] = self._make_latest(t, p)
                                 return on_ticker
                             ticker.updateEvent += make_handler(key)
-                            print(f"[TICK-SUB] STREAM {sym} ({asset_type})")
+                            log("DEBUG", f"[TICK-SUB] STREAM {sym} ({asset_type})")
                         elif self._mode == 'hist_poll':
                             self._next_hist_poll = self._iterations
-                            print(f"[TICK-SUB] HIST_POLL {sym} ({asset_type}) (zadna mkt sub potreba)")
+                            log("DEBUG", f"[TICK-SUB] HIST_POLL {sym} ({asset_type}) (zadna mkt sub potreba)")
                     except ValueError as e:
                         self._mark_failed(key, str(e))
                     except Exception as e:
-                        print(f"[TICK-SUB] Subscribe error {key}: {e}")
+                        log("INFO", f"[TICK-SUB] Subscribe error {key}: {e}")
                         with self._lock:
                             if key not in self._failed_keys and key not in self._unsubscribe_pending:
                                 self._pending.add(key)
                 await asyncio.sleep(1.0)
                 self._iterations += 1
                 if self._mode != 'hist_poll' and self._has_error(10089):
-                    print("[TICK-SUB] Error 10089 -> HIST_POLL rezim")
+                    log("DEBUG", "[TICK-SUB] Error 10089 -> HIST_POLL rezim")
                     for t in list(tickers_local.values()):
                         try: ib.cancelMktData(t)
                         except Exception: pass
@@ -337,7 +338,7 @@ class _TickSubscriber:
                             for s in contracts_local
                         )
                         if no_data:
-                            print("[TICK-SUB] 15s bez dat -> SNAPSHOT")
+                            log("DEBUG", "[TICK-SUB] 15s bez dat -> SNAPSHOT")
                             for t in list(tickers_local.values()):
                                 try: ib.cancelMktData(t)
                                 except Exception: pass
@@ -353,11 +354,11 @@ class _TickSubscriber:
                                 p = self._extract_price(t)
                                 if p > 0:
                                     self._latest[key] = self._make_latest(t, p)
-                                    print(f"[TICK-SUB] SNAP {key}: p={p}")
+                                    log("DEBUG", f"[TICK-SUB] SNAP {key}: p={p}")
                         except Exception as e:
-                            print(f"[TICK-SUB] Snapshot err {key}: {e}")
+                            log("INFO", f"[TICK-SUB] Snapshot err {key}: {e}")
                     if self._has_error(10089):
-                        print("[TICK-SUB] Snapshot 10089 -> HIST_POLL")
+                        log("DEBUG", "[TICK-SUB] Snapshot 10089 -> HIST_POLL")
                         self._mode           = 'hist_poll'
                         self._mdt            = 99
                         self._next_hist_poll = self._iterations
@@ -385,12 +386,12 @@ class _TickSubscriber:
                                     'bar_time': str(bar_t),
                                     'iterations': self._iterations, 'ts': time.time()
                                 }
-                                print(f"[TICK-SUB] HIST_POLL {sym} ({asset_type}): close={price:.2f}  bar={bar_t}  ({len(bars)} bars)")
+                                log("DEBUG", f"[TICK-SUB] HIST_POLL {sym} ({asset_type}): close={price:.2f}  bar={bar_t}  ({len(bars)} bars)")
                             else:
-                                print(f"[TICK-SUB] HIST_POLL {sym} ({asset_type}): stale prazdne, retry za 5s")
+                                log("DEBUG", f"[TICK-SUB] HIST_POLL {sym} ({asset_type}): stale prazdne, retry za 5s")
                                 self._next_hist_poll = self._iterations + 5
                         except Exception as e:
-                            print(f"[TICK-SUB] HIST_POLL err {key}: {e}")
+                            log("DEBUG", f"[TICK-SUB] HIST_POLL err {key}: {e}")
                             self._next_hist_poll = self._iterations + 5
         finally:
             self._connected = False
@@ -417,7 +418,7 @@ class _HistWorker:
             name=f'IB-Hist-Worker-cid{client_id}'
         )
         self._thread.start()
-        print(f"[HIST] Worker thread spusten (clientId={client_id})")
+        log("DEBUG", f"[HIST] Worker thread spusten (clientId={client_id})")
         self._deep_load_status = {}
 
     def get_deep_load_status(self):
@@ -455,7 +456,7 @@ class _HistWorker:
                     bars = self._fetch_fresh(symbol, duration, bar_size, asset_type)
                     result.extend(bars)
                 except Exception as e:
-                    print(f"[HIST] Chyba pro {symbol}: {e}")
+                    log("INFO", f"[HIST] Chyba pro {symbol}: {e}")
                 finally:
                     done.set()
             elif cmd == 'fetch_n':
@@ -464,7 +465,7 @@ class _HistWorker:
                     bars = self._fetch_n_bars_fresh(symbol, n, bar_size, asset_type, end_time)
                     result.extend(bars)
                 except Exception as e:
-                    print(f"[HIST] fetch_n_bars chyba pro {symbol}: {e}")
+                    log("INFO", f"[HIST] fetch_n_bars chyba pro {symbol}: {e}")
                 finally:
                     done.set()
             elif cmd == 'deep_load':
@@ -499,7 +500,7 @@ class _HistWorker:
                     'status': 'running',
                     'msg': f'Krok {i+1}/{steps}'
                 }
-                print(f"[DEEP LOAD] {symbol} {timeframe} - Krok {i+1}/{steps}")
+                log("INFO", f"[DEEP LOAD] {symbol} {timeframe} - Krok {i+1}/{steps}")
                 bars = ib.reqHistoricalData(
                     contract, endDateTime=end_date, durationStr=duration_str,
                     barSizeSetting=timeframe,
@@ -507,7 +508,7 @@ class _HistWorker:
                     useRTH=use_regular_trading_hours(asset_type), formatDate=1, timeout=30
                 )
                 if not bars:
-                    print(f"[DEEP LOAD] Zadne dalsi data z IB pro {symbol}.")
+                    log("INFO", f"[DEEP LOAD] Zadne dalsi data z IB pro {symbol}.")
                     break
                 result = [{
                     'time':   _bar_date_to_unix(b.date),
@@ -524,7 +525,7 @@ class _HistWorker:
                 if i < steps - 1:
                     time.sleep(2.0)
             self._deep_load_status[key] = {'progress': '100%', 'status': 'done', 'msg': 'Dokonceno'}
-            print(f"[DEEP LOAD] {symbol} {timeframe} Dokoncen uspesne.")
+            log("INFO", f"[DEEP LOAD] {symbol} {timeframe} Dokoncen uspesne.")
         finally:
             try: ib.disconnect()
             except: pass
@@ -544,7 +545,7 @@ class _HistWorker:
             try:
                 ib.connect(self._host, self._port, clientId=cid, timeout=10)
                 if offset > 0:
-                    print(f"[HIST] Connected with fallback clientId={cid} (base={self._client_id})")
+                    log("INFO", f"[HIST] Connected with fallback clientId={cid} (base={self._client_id})")
                 return True
             except Exception as e:
                 last_exc = e
@@ -552,7 +553,7 @@ class _HistWorker:
                 # TimeoutError is what ib_async raises when TWS sends Error 326
                 is_conflict = 'TimeoutError' in type(e).__name__ or 'TimeoutError' in err_str or '326' in err_str
                 if is_conflict:
-                    print(f"[HIST] clientId={cid} in use (Error 326), trying cid={cid+1}...")
+                    log("DEBUG", f"[HIST] clientId={cid} in use (Error 326), trying cid={cid+1}...")
                     try: ib.disconnect()
                     except: pass
                     time.sleep(0.5)
@@ -563,30 +564,30 @@ class _HistWorker:
     def _fetch_fresh(self, symbol, duration, bar_size, asset_type='STOCK'):
         ib = IB()
         try:
-            print(f"[HIST-DIAG] _fetch_fresh START: {symbol} ({asset_type}) duration={duration} bar_size={bar_size}")
+            log("DEBUG", f"[HIST-DIAG] _fetch_fresh START: {symbol} ({asset_type}) duration={duration} bar_size={bar_size}")
             self._connect_with_retry(ib)
-            print(f"[HIST-DIAG] Connected OK, isConnected={ib.isConnected()}")
+            log("DEBUG", f"[HIST-DIAG] Connected OK, isConnected={ib.isConnected()}")
             ib.reqMarketDataType(4)
             contract = create_contract(symbol, asset_type)
-            print(f"[HIST-DIAG] Contract before qualify: {contract}")
+            log("DEBUG", f"[HIST-DIAG] Contract before qualify: {contract}")
             ib.qualifyContracts(contract)
-            print(f"[HIST-DIAG] Contract after qualify: conId={contract.conId}, {contract}")
+            log("DEBUG", f"[HIST-DIAG] Contract after qualify: conId={contract.conId}, {contract}")
             use_rth = use_regular_trading_hours(asset_type)
-            print(f"[HIST-DIAG] Calling reqHistoricalData timeout=30, useRTH={use_rth}...")
+            log("DEBUG", f"[HIST-DIAG] Calling reqHistoricalData timeout=30, useRTH={use_rth}...")
             bars = ib.reqHistoricalData(
                 contract, endDateTime='', durationStr=duration,
                 barSizeSetting=bar_size,
                 whatToShow=get_history_what_to_show(asset_type),
                 useRTH=use_rth, formatDate=1, timeout=30
             )
-            print(f"[HIST-DIAG] reqHistoricalData returned {len(bars) if bars else 0} bars")
+            log("DEBUG", f"[HIST-DIAG] reqHistoricalData returned {len(bars) if bars else 0} bars")
             result = [{
                 'time':   _bar_date_to_unix(b.date),
                 'open':   b.open, 'high': b.high,
                 'low':    b.low,  'close': b.close,
                 'volume': b.volume
             } for b in bars]
-            print(f"[HIST] OK: {len(result)} baru pro {symbol} ({normalize_asset_type(asset_type)})")
+            log("DEBUG", f"[HIST] OK: {len(result)} baru pro {symbol} ({normalize_asset_type(asset_type)})")
             return result
         finally:
             try: ib.disconnect()
@@ -626,12 +627,12 @@ class _HistWorker:
 
         ib = IB()
         try:
-            print(f"[HIST-N] _fetch_n_bars_fresh START: {symbol} ({asset_type}) n={n} bar_size={bar_size} duration={duration_str}")
+            log("DEBUG", f"[HIST-N] _fetch_n_bars_fresh START: {symbol} ({asset_type}) n={n} bar_size={bar_size} duration={duration_str}")
             self._connect_with_retry(ib)
             ib.reqMarketDataType(4)
             contract = create_contract(symbol, asset_type)
             ib.qualifyContracts(contract)
-            print(f"[HIST-N] Contract OK: conId={contract.conId}")
+            log("DEBUG", f"[HIST-N] Contract OK: conId={contract.conId}")
 
             # Build endDateTime string for IB
             if end_time:
@@ -641,14 +642,14 @@ class _HistWorker:
                 end_dt_str = ''
 
             use_rth = use_regular_trading_hours(asset_type)
-            print(f"[HIST-N] Calling reqHistoricalData timeout=30 useRTH={use_rth}...")
+            log("DEBUG", f"[HIST-N] Calling reqHistoricalData timeout=30 useRTH={use_rth}...")
             bars = ib.reqHistoricalData(
                 contract, endDateTime=end_dt_str, durationStr=duration_str,
                 barSizeSetting=bar_size,
                 whatToShow=get_history_what_to_show(asset_type),
                 useRTH=use_rth, formatDate=1, timeout=30
             )
-            print(f"[HIST-N] reqHistoricalData returned {len(bars) if bars else 0} bars")
+            log("DEBUG", f"[HIST-N] reqHistoricalData returned {len(bars) if bars else 0} bars")
             # Convert and sort by time
             result = [{
                 'time':   _bar_date_to_unix(b.date),
@@ -660,7 +661,7 @@ class _HistWorker:
             # Return exactly N bars (or less if not available)
             if len(result) > n:
                 result = result[-n:]
-            print(f"[HIST] fetch_n_bars: {len(result)} bars for {symbol} ({asset_type}) | end_time={end_time} | duration={duration_str}")
+            log("DEBUG", f"[HIST] fetch_n_bars: {len(result)} bars for {symbol} ({asset_type}) | end_time={end_time} | duration={duration_str}")
             
             # Save to data_store so indicators can use it
             if result:
@@ -739,7 +740,7 @@ class IBConnector:
           vraci spravna data.
         """
         poll_cid = config.IB_CLIENT_ID + 3
-        print(f"[POS-BG] Position poll thread started (clientId={poll_cid}, interval=3s)")
+        log("DEBUG", f"[POS-BG] Position poll thread started (clientId={poll_cid}, interval=3s)")
         ib_poll = IB()
 
         while True:
@@ -758,19 +759,19 @@ class IBConnector:
                     for offset in range(10):
                         cid_try = poll_cid + offset
                         try:
-                            print(f"[POS-BG] Connecting poll IB (clientId={cid_try})...")
+                            log("DEBUG", f"[POS-BG] Connecting poll IB (clientId={cid_try})...")
                             ib_poll.connect(
                                 config.IB_HOST, config.IB_PORT,
                                 clientId=cid_try, timeout=5
                             )
-                            print(f"[POS-BG] Poll IB connected (clientId={cid_try})")
+                            log("DEBUG", f"[POS-BG] Poll IB connected (clientId={cid_try})")
                             connected_bg = True
                             break
                         except Exception as e:
                             err_str = str(e)
                             is_conflict = 'TimeoutError' in type(e).__name__ or 'TimeoutError' in err_str or '326' in err_str
                             if is_conflict:
-                                print(f"[POS-BG] clientId={cid_try} in use, trying {cid_try+1}...")
+                                log("DEBUG", f"[POS-BG] clientId={cid_try} in use, trying {cid_try+1}...")
                                 try: ib_poll.disconnect()
                                 except: pass
                                 time.sleep(0.3)
@@ -811,10 +812,10 @@ class IBConnector:
                     self._positions_cache = result
 
                 if prev_syms != new_syms:
-                    print(f"[POS-BG] \U0001f4ca Cache ZMENENA: {prev_syms} -> {new_syms} | {len(result)} pozic")
+                    log("DEBUG", f"[POS-BG] \U0001f4ca Cache ZMENENA: {prev_syms} -> {new_syms} | {len(result)} pozic")
 
             except Exception as e:
-                print(f"[POS-BG] Error: {e}")
+                log("DEBUG", f"[POS-BG] Error: {e}")
                 try: ib_poll.disconnect()
                 except Exception: pass
 
@@ -825,10 +826,10 @@ class IBConnector:
     def connect(self):
         try:
             if config.DEBUG_CONNECTION:
-                print("=" * 60)
-                print(f"\U0001f4e1 CONNECTING | {config.CONNECTION_LABEL}")
-                print(f"Host={config.IB_HOST} Port={config.IB_PORT} ClientId={config.IB_CLIENT_ID}")
-                print("=" * 60)
+                log("INFO", "=" * 60)
+                log("INFO", f"\U0001f4e1 CONNECTING | {config.CONNECTION_LABEL}")
+                log("INFO", f"Host={config.IB_HOST} Port={config.IB_PORT} ClientId={config.IB_CLIENT_ID}")
+                log("INFO", "=" * 60)
             base_cid = config.IB_CLIENT_ID
             connected_main = False
             for offset in range(10):
@@ -839,14 +840,14 @@ class IBConnector:
                         clientId=cid_try, timeout=20
                     )
                     if offset > 0:
-                        print(f"[CONN] Connected with fallback clientId={cid_try} (base={base_cid})")
+                        log("INFO", f"[CONN] Connected with fallback clientId={cid_try} (base={base_cid})")
                     connected_main = True
                     break
                 except Exception as e:
                     err_str = str(e)
                     is_conflict = 'TimeoutError' in type(e).__name__ or 'TimeoutError' in err_str or '326' in err_str
                     if is_conflict:
-                        print(f"[CONN] clientId={cid_try} in use (Error 326), trying {cid_try+1}...")
+                        log("INFO", f"[CONN] clientId={cid_try} in use (Error 326), trying {cid_try+1}...")
                         try: self.ib.disconnect()
                         except: pass
                         time.sleep(0.5)
@@ -872,11 +873,11 @@ class IBConnector:
             try:
                 self.executions = self.ib.reqExecutions()
             except Exception as e:
-                print(f"\u26a0\ufe0f Executions: {e}")
-            print(f"\u2705 Connected | Account: {self.account_id}")
+                log("INFO", f"\u26a0\ufe0f Executions: {e}")
+            log("INFO", f"\u2705 Connected | Account: {self.account_id}")
             return True
         except Exception as e:
-            print(f"\u274c Connection failed: {e}")
+            log("INFO", f"\u274c Connection failed: {e}")
             self.connected = False
             return False
 
@@ -911,9 +912,9 @@ class IBConnector:
                 })
             with self._positions_lock:
                 self._positions_cache = result
-            print(f"[POS] Initial load: {len(result)} pozic | {[p['symbol'] for p in result]}")
+            log("DEBUG", f"[POS] Initial load: {len(result)} pozic | {[p['symbol'] for p in result]}")
         except Exception as e:
-            print(f"\u26a0\ufe0f _refresh_positions_from_main: {e}")
+            log("INFO", f"\u26a0\ufe0f _refresh_positions_from_main: {e}")
 
     def disconnect(self):
         if self.connected:
@@ -955,15 +956,15 @@ class IBConnector:
         self._tick_sub.set_primary_subscription(sym, asset_type)
         status = data_store.get_cache_status(cache_symbol, bar_size)
         if status['cached'] and status['is_fresh']:
-            print(f"[CACHE] HIT: {sym} ({asset_type}) | {bar_size} | {status['total_bars']} bars | FRESH")
+            log("DEBUG", f"[CACHE] HIT: {sym} ({asset_type}) | {bar_size} | {status['total_bars']} bars | FRESH")
             return data_store.get_bars(cache_symbol, bar_size)
         fetch_duration = duration
         if status['cached'] and status['age_seconds'] < 86400 * 7:
             missing_sec    = status['age_seconds']
             fetch_duration = f"{int(missing_sec + 3600)} S"
-            print(f"[CACHE] INCR: {sym} ({asset_type}) | {bar_size} | {status['total_bars']} bars existuji | Dotahuji chybejicich {fetch_duration}")
+            log("DEBUG", f"[CACHE] INCR: {sym} ({asset_type}) | {bar_size} | {status['total_bars']} bars existuji | Dotahuji chybejicich {fetch_duration}")
         else:
-            print(f"[CACHE] MISS/STALE: {sym} ({asset_type}) | {bar_size} | Stahuji celou defaultni delku: {duration}")
+            log("DEBUG", f"[CACHE] MISS/STALE: {sym} ({asset_type}) | {bar_size} | Stahuji celou defaultni delku: {duration}")
         new_bars = self._hist_worker.fetch(sym, fetch_duration, bar_size, asset_type)
         if new_bars:
             data_store.append_bars(cache_symbol, bar_size, new_bars)
@@ -1007,7 +1008,7 @@ class IBConnector:
                     info['cash_balance'] = float(av.value)
             return info
         except Exception as e:
-            print(f"\u274c account info: {e}"); return {}
+            log("INFO", f"\u274c account info: {e}"); return {}
 
     # ------------------------------------------------------------------
     # Orders
@@ -1030,7 +1031,7 @@ class IBConnector:
             qualified = self.ib.qualifyContracts(contract)
             if qualified:
                 contract = qualified[0]
-            print(f"  [ORDER] Contract: {sanitize_symbol(symbol, asset_type)} ({asset_type})")
+            log("INFO", f"  [ORDER] Contract: {sanitize_symbol(symbol, asset_type)} ({asset_type})")
             order    = (LimitOrder(action, quantity, limit_price)
                         if order_type == 'LIMIT' else MarketOrder(action, quantity))
             order.transmit   = True
@@ -1043,14 +1044,14 @@ class IBConnector:
                 self.ib.sleep(1)
                 cs = trade.orderStatus.status
                 if cs != last_status:
-                    print(f"  [ORDER] {symbol} {action} {quantity} -> {cs}")
+                    log("INFO", f"  [ORDER] {symbol} {action} {quantity} -> {cs}")
                     last_status = cs
                 if cs in _ORDER_TERMINAL_STATUSES:
                     break
 
             fs  = trade.orderStatus.status
             oid = trade.order.orderId if trade.order else None
-            print(f"  [ORDER] Final status: {fs} | orderId={oid}")
+            log("INFO", f"  [ORDER] Final status: {fs} | orderId={oid}")
 
             if fs in _ORDER_SUCCESS_STATUSES:
                 fill_price = trade.orderStatus.avgFillPrice or 0.0
@@ -1121,11 +1122,11 @@ class IBConnector:
                     commission = getattr(fill.commissionReport, 'commission', 0.0) or 0.0
                     shares     = ed.shares or 1
                     avg_cost   = round(ed.price + commission / shares, 6)
-                    print(f'[FILL] avg_cost for {sym}: fill_price={ed.price}'
+                    log('INFO', f'[FILL] avg_cost for {sym}: fill_price={ed.price}'
                           f' commission={commission} shares={shares} avg_cost={avg_cost}')
                     return avg_cost, commission
         except Exception as e:
-            print(f'[FILL] get_fill_avg_cost error: {e}')
+            log('INFO', f'[FILL] get_fill_avg_cost error: {e}')
         return None, None
 
     # ------------------------------------------------------------------
@@ -1135,7 +1136,7 @@ class IBConnector:
     def get_recent_orders(self, limit=10):
         if not self.is_connected(): return []
         try:
-            print('[ORDERS] get_recent_orders — calling reqExecutions to refresh fills')
+            log('DEBUG', '[ORDERS] get_recent_orders — calling reqExecutions to refresh fills')
             self.executions = self.ib.reqExecutions()
             result = []
             for fill in self.executions[-limit:]:
@@ -1166,7 +1167,7 @@ class IBConnector:
                 })
             return result[::-1][-limit:]
         except Exception as e:
-            print(f"\u274c orders: {e}"); return []
+            log("INFO", f"\u274c orders: {e}"); return []
 
     def __del__(self):
         self.disconnect()

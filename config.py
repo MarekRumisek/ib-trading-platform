@@ -65,6 +65,9 @@ ORDER_TIMEOUT = 15
 
 # ========== Debug Settings ==========
 
+# Log level: 'DEBUG' for verbose output, 'INFO' for important events only
+LOG_LEVEL = os.getenv('IB_LOG_LEVEL', 'INFO')
+
 # Enable verbose order logging
 DEBUG_ORDERS = True
 

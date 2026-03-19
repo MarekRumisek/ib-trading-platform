@@ -310,6 +310,16 @@
       currentSymbol = symbol;
       currentAssetType = storeData.asset_type || "STOCK";
 
+      // Update price precision based on asset type
+      var isForex = currentAssetType === "FOREX";
+      candleSeries.applyOptions({
+        priceFormat: {
+          type: "price",
+          precision: isForex ? 4 : 2,
+          minMove: isForex ? 0.0001 : 0.01,
+        },
+      });
+
       // fitContent na hlavnim chartu spusti timeRangeChange -> sync volume (time-based)
       chart.timeScale().fitContent();
       writeDebug(

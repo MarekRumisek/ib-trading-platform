@@ -5,6 +5,20 @@ ASSET_TYPE_STOCK = 'STOCK'
 ASSET_TYPE_FOREX = 'FOREX'
 ASSET_TYPE_CRYPTO = 'CRYPTO'
 
+# Default exchange for STOCK contracts (can be changed at runtime)
+_default_exchange = 'SMART'
+
+
+def set_default_exchange(exchange: str) -> None:
+    """Set the default exchange for STOCK contracts."""
+    global _default_exchange
+    _default_exchange = (exchange or 'SMART').strip().upper()
+
+
+def get_default_exchange() -> str:
+    """Get the current default exchange."""
+    return _default_exchange
+
 _ASSET_TYPE_ALIASES = {
     'STK': ASSET_TYPE_STOCK,
     'STOCK': ASSET_TYPE_STOCK,
@@ -32,6 +46,7 @@ def create_contract(
     symbol: str,
     asset_type: str | None = ASSET_TYPE_STOCK,
     currency: str | None = None,
+    exchange: str | None = None,
 ):
     asset_type = normalize_asset_type(asset_type)
     symbol = sanitize_symbol(symbol, asset_type)
@@ -49,7 +64,8 @@ def create_contract(
         return Forex(symbol)
     if asset_type == ASSET_TYPE_CRYPTO:
         return Crypto(symbol, currency='USD')
-    return Stock(symbol, 'SMART', 'USD')
+    exchange = (exchange or _default_exchange or 'SMART').strip().upper()
+    return Stock(symbol, exchange, 'USD')
 
 
 def get_contract_key(symbol: str, asset_type: str | None = ASSET_TYPE_STOCK) -> str:
