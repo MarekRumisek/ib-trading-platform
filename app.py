@@ -392,6 +392,13 @@ app.layout = html.Div([
                     html.Button('30m', id='tf2-30m', n_clicks=0, className='tf-btn'),
                     html.Button('1h',  id='tf2-1h',  n_clicks=0, className='tf-btn'),
                     html.Button('1D',  id='tf2-1d',  n_clicks=0, className='tf-btn tf-active'),
+                    html.Button(
+                        'Load Chart 2', id='load-chart2-btn', n_clicks=0,
+                        style={'marginLeft': '15px', 'padding': '8px 20px',
+                               'background': 'linear-gradient(135deg, #43a047 0%, #2e7d32 100%)',
+                               'border': 'none', 'borderRadius': '5px',
+                               'color': 'white', 'cursor': 'pointer', 'fontWeight': 'bold'}
+                    ),
                 ], style={'marginBottom': '10px', 'overflow': 'hidden', 'padding': '5px 0'}),
 
                 html.Div(id='lwc-container-2',
@@ -416,6 +423,7 @@ app.layout = html.Div([
         # Phase 3: Chart 2 stores
         dcc.Store(id='chart2-data-store'),
         dcc.Store(id='chart2-trigger-store'),
+        dcc.Store(id='chart2-append-store'),  # For loading older bars on chart2
         dcc.Store(id='chart2-meta-store', data={'load_count': 0, 'oldest_time': None, 'total_bars': 0, 'symbol': None, 'tf': None}),
         dcc.Store(id='active-tf2-store', data='tf2-1d'),
 
@@ -796,8 +804,9 @@ _TOPUP_DURATION = {
      State('chart-meta-store', 'data')],
     prevent_initial_call=True
 )
-def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger, 
+def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
                     symbol, asset_type, n_candles, meta):
+    print(f"[LOAD_CHART] Called! load_clicks={load_clicks}, tf1={tf1}, tf5={tf5}, tf15={tf15}, tf30={tf30}, tf1h={tf1h}, tf1d={tf1d}")
     try:
         ctx = dash.callback_context
         btn = (ctx.triggered[0]['prop_id'].split('.')[0]
@@ -815,6 +824,9 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
         tf         = app_state['current_timeframe']
         n_candles  = max(10, min(500, int(n_candles or 60)))
         
+        # INFO: Log inputs
+        log("INFO", f"[CB-DIAG] symbol={symbol} asset_type={asset_type} tf={tf} n_candles={n_candles} btn={btn}")
+        
         app_state['current_symbol'] = symbol
         app_state['current_asset_type'] = asset_type
         
@@ -828,9 +840,9 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
         
         if is_reset:
             # === FIRST LOAD or RESET: fetch N candles from now ===
-            log("DEBUG", f"[CB] INITIAL LOAD: {symbol} ({asset_type}) | {tf} | n={n_candles} | Trigger={btn}")
+            log("INFO", f"[CB] INITIAL LOAD: {symbol} ({asset_type}) | {tf} | n={n_candles} | Trigger={btn}")
             bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=None)
-            log("DEBUG", f"[CB] IB returned {len(bars)} bars")
+            log("INFO", f"[CB] IB returned {len(bars)} bars")
             
             if not bars:
                 return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, '❌ Žádná data'
@@ -848,7 +860,8 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
             chart_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars, 'mode': 'initial'}
             bars_display = f"📊 {len(bars)} svíček"
             
-            log('DEBUG', '[TICK] Auto-enabled on chart load')
+            log('INFO', f'[CB] VRACIM {len(bars)} SVICCEK DO STORE | tf={tf} | bars[0].time={bars[0]["time"] if bars else "N/A"}')
+            log('INFO', '[TICK] Auto-enabled on chart load')
             return chart_data, None, new_meta, True, '⚡ TICK: ON', 'tick-btn tick-on', bars_display
         
         else:
@@ -869,15 +882,44 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
                 chart_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars, 'mode': 'initial'}
                 return chart_data, None, new_meta, True, '⚡ TICK: ON', 'tick-btn tick-on', f"📊 {len(bars)} svíček"
             
-            log("DEBUG", f"[CB] APPEND: {symbol} ({asset_type}) | {tf} | n={n_candles} | before={oldest_time}")
+            log("DEBUG", f"[CB] APPEND: {symbol} ({asset_type}) | {tf} | n={n_candles} | before={oldest_time} | load_count={meta.get('load_count', 0)}")
             
-            # Fetch older bars ending just before oldest_time
-            older_bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=oldest_time - 1)
-            log("DEBUG", f"[CB] IB returned {len(older_bars)} older bars")
+            # For 1D timeframe, IB's end_time handling is problematic
+            # Instead, fetch without end_time and filter overlaps ourselves
+            log("DIAG", f"[CB] TF check: tf='{tf}' (type={type(tf).__name__}) | tf == '1 day': {tf == '1 day'}")
             
-            if not older_bars:
-                # No more historical data available
-                return dash.no_update, None, dash.no_update, dash.no_update, dash.no_update, dash.no_update, '⚠️ Žádná starší data'
+            if tf == '1 day':
+                # For daily bars: don't use end_time, just fetch and filter
+                older_bars = ib_gateway.get_n_bars(symbol, n_candles * 3, tf, asset_type, end_time=None)
+                log("DIAG", f"[CB] 1D: fetched {len(older_bars)} bars (no end_time filter)")
+                log("DIAG", f"[CB] 1D: oldest_time={oldest_time} | first_bar_time={older_bars[0]['time'] if older_bars else 'N/A'}")
+                
+                # Filter out bars that overlap with existing chart data
+                if older_bars and oldest_time:
+                    original_count = len(older_bars)
+                    older_bars = [b for b in older_bars if b['time'] < oldest_time]
+                    log("DIAG", f"[CB] 1D: filtered {original_count} -> {len(older_bars)} bars (removed overlapping)")
+                
+                if not older_bars or len(older_bars) == 0:
+                    log("DIAG", f"[CB] 1D: no older bars after filter - returning no_update")
+                    return dash.no_update, None, dash.no_update, dash.no_update, dash.no_update, dash.no_update, '⚠️ Žádná starší data'
+                
+                # Take only the first n_candles after filtering
+                older_bars = older_bars[:n_candles]
+                log("DIAG", f"[CB] 1D: taking first {len(older_bars)} bars")
+            else:
+                # For other timeframes: use end_time as before
+                tf_to_seconds = {'1 min': 60, '5 mins': 300, '15 mins': 900, '30 mins': 1800, '1 hour': 3600, '1 day': 86400}
+                secs_per_bar = tf_to_seconds.get(tf, 300)
+                append_offset = n_candles * secs_per_bar
+                append_end_time = oldest_time - append_offset
+                
+                older_bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=append_end_time)
+                
+                if not older_bars:
+                    return dash.no_update, None, dash.no_update, dash.no_update, dash.no_update, dash.no_update, '⚠️ Žádná starší data'
+            
+            log("DEBUG", f"[CB] IB returned {len(older_bars)} older bars | first_time={older_bars[0]['time'] if older_bars else 'N/A'}")
             
             # Update meta with new oldest time
             new_meta = {
@@ -905,8 +947,9 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
 # ------------------------------------------------------------------
 @app.callback(
     [Output('chart2-data-store', 'data'),
+     Output('chart2-append-store', 'data'),
      Output('chart2-meta-store', 'data')],
-    [Input('load-chart-btn', 'n_clicks'),
+    [Input('load-chart2-btn', 'n_clicks'),
      Input('tf2-1m', 'n_clicks'), Input('tf2-5m', 'n_clicks'),
      Input('tf2-15m', 'n_clicks'), Input('tf2-30m', 'n_clicks'),
      Input('tf2-1h', 'n_clicks'), Input('tf2-1d', 'n_clicks')],
@@ -918,11 +961,11 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
 )
 def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
                      symbol, asset_type, n_candles, meta):
-    """Load data for the context chart (chart 2). Simpler than main chart - no tick, no deep-load."""
+    """Load data for the context chart (chart 2). Supports both initial load and prepend (older bars)."""
     try:
         ctx = dash.callback_context
         btn = (ctx.triggered[0]['prop_id'].split('.')[0]
-               if ctx.triggered else 'load-chart-btn')
+               if ctx.triggered else 'load-chart2-btn')
         tf_map = {'tf2-1m': '1 min', 'tf2-5m': '5 mins',
                   'tf2-15m': '15 mins', 'tf2-30m': '30 mins',
                   'tf2-1h': '1 hour', 'tf2-1d': '1 day'}
@@ -938,29 +981,78 @@ def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
             # Default to 1 day for context chart if not specified
             tf = '1 day'
 
-        # Always do a full load (no append) for chart 2 per Phase 3 requirements
-        log("DEBUG", f"[CB2] LOAD: {symbol} ({asset_type}) | {tf} | n={n_candles} | Trigger={btn}")
-        bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=None)
-        log("DEBUG", f"[CB2] IB returned {len(bars)} bars")
+        # Check if this is a reset (symbol/TF changed) or append
+        prev_symbol = meta.get('symbol') if meta else None
+        prev_tf     = meta.get('tf') if meta else None
+        is_reset    = (btn in tf_map or 
+                       prev_symbol != symbol or 
+                       prev_tf != tf)
 
-        if not bars:
-            return dash.no_update, dash.no_update
+        if is_reset:
+            # === FIRST LOAD or RESET: fetch N candles from now ===
+            log("DEBUG", f"[CB2] INITIAL LOAD: {symbol} ({asset_type}) | {tf} | n={n_candles} | Trigger={btn}")
+            bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=None)
+            log("DEBUG", f"[CB2] IB returned {len(bars)} bars")
 
-        new_meta = {
-            'load_count': 1,
-            'oldest_time': bars[0]['time'] if bars else None,
-            'total_bars': len(bars),
-            'symbol': symbol,
-            'tf': tf,
-            'n_candles': n_candles
-        }
+            if not bars:
+                return dash.no_update, dash.no_update, dash.no_update
 
-        chart2_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars, 'mode': 'initial'}
-        return chart2_data, new_meta
+            new_meta = {
+                'load_count': 1,
+                'oldest_time': bars[0]['time'] if bars else None,
+                'total_bars': len(bars),
+                'symbol': symbol,
+                'tf': tf,
+                'n_candles': n_candles
+            }
+
+            chart2_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars, 'mode': 'initial'}
+            return chart2_data, None, new_meta
+
+        else:
+            # === APPEND: fetch older candles ===
+            oldest_time = meta.get('oldest_time') if meta else None
+            if not oldest_time:
+                log("DEBUG", "[CB2] APPEND: no oldest_time, treating as initial")
+                bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=None)
+                new_meta = {
+                    'load_count': 1,
+                    'oldest_time': bars[0]['time'] if bars else None,
+                    'total_bars': len(bars),
+                    'symbol': symbol,
+                    'tf': tf,
+                    'n_candles': n_candles
+                }
+                chart2_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars, 'mode': 'initial'}
+                return chart2_data, None, new_meta
+
+            log("DEBUG", f"[CB2] APPEND: {symbol} ({asset_type}) | {tf} | n={n_candles} | before={oldest_time}")
+
+            # Fetch older bars ending just before oldest_time
+            older_bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=oldest_time - 1)
+            log("DEBUG", f"[CB2] IB returned {len(older_bars)} older bars")
+
+            if not older_bars:
+                return dash.no_update, None, dash.no_update
+
+            # Update meta with new oldest time
+            new_meta = {
+                'load_count': meta.get('load_count', 0) + 1,
+                'oldest_time': older_bars[0]['time'],
+                'total_bars': meta.get('total_bars', 0) + len(older_bars),
+                'symbol': symbol,
+                'tf': tf,
+                'n_candles': n_candles
+            }
+
+            # Send older bars to append store
+            append_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': older_bars, 'mode': 'append'}
+
+            return dash.no_update, append_data, new_meta
 
     except Exception as e:
         log("INFO", f"[CB2] EXCEPTION: {e}")
-        return dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update
 
 
 @app.callback(
@@ -1476,159 +1568,160 @@ def close_all_positions(n, refresh_counter):
     prevent_initial_call='initial_duplicate'
 )
 def update_positions_table(n, _refresh, _btn):
-    if not ib_gateway.is_connected():
-        return html.Div('Not connected', style={'color': '#888'})
+    try:
+        if not ib_gateway.is_connected():
+            return html.Div('Not connected', style={'color': '#888'})
 
-    positions = ib_gateway.get_positions() or []
-    open_trades_list = trade_tracker.get_open_trades()
+        positions = ib_gateway.get_positions() or []
+        open_trades_list = trade_tracker.get_open_trades()
 
-    if not positions and not open_trades_list:
-        return html.Div('Žádné otevřené pozice', style={'color': '#888'})
+        if not positions and not open_trades_list:
+            return html.Div('Žádné otevřené pozice', style={'color': '#888'})
 
-    rows = []
-    
-    # Group trades by symbol to match with IB positions
-    trades_by_symbol = {}
-    for t in open_trades_list:
-        trades_by_symbol.setdefault(t['symbol'], []).append(t)
+        rows = []
         
-    # First, show all IB positions, matching them with TT trades if possible
-    processed_trade_ids = set()
-    for pos in positions:
-        pnl_c = '#26a69a' if pos['unrealized_pnl'] >= 0 else '#ef5350'
-        sym   = pos['symbol']
-        
-        # Find matching trades for this symbol
-        matching_trades = trades_by_symbol.get(sym, [])
-        
-        if matching_trades:
-            # If we have multiple trades for this position, we show them as separate rows
-            # but we need to divide the position size and PnL proportionally
-            total_qty = sum(t.get('qty', 0) for t in matching_trades)
+        # Group trades by symbol to match with IB positions
+        trades_by_symbol = {}
+        for t in open_trades_list:
+            trades_by_symbol.setdefault(t['symbol'], []).append(t)
             
-            for tt in matching_trades:
-                processed_trade_ids.add(tt['id'])
-                asset_type = pos.get('asset_type', tt.get('asset_type', 'STOCK'))
+        # First, show all IB positions, matching them with TT trades if possible
+        processed_trade_ids = set()
+        for pos in positions:
+            pnl_c = '#26a69a' if pos['unrealized_pnl'] >= 0 else '#ef5350'
+            sym   = pos['symbol']
+            
+            # Find matching trades for this symbol
+            matching_trades = trades_by_symbol.get(sym, [])
+            
+            if matching_trades:
+                # If we have multiple trades for this position, we show them as separate rows
+                # but we need to divide the position size and PnL proportionally
+                total_qty = sum(t.get('qty', 0) for t in matching_trades)
                 
-                msg = (f'[SYNC] ✅ Row enrich {sym}'
-                       f' | SL={tt.get("sl")} TP={tt.get("tp")}')
-                log("DEBUG", msg)
-                debug_lines.append(msg)
-
+                for tt in matching_trades:
+                    processed_trade_ids.add(tt['id'])
+                    asset_type = pos.get('asset_type', tt.get('asset_type', 'STOCK'))
+                    
+                    entry_t  = trade_tracker.fmt_time(tt.get('entry_time'))
+                    sl_txt   = fmt_price(tt['sl'], asset_type) if tt.get('sl') else '–'
+                    tp_txt   = fmt_price(tt['tp'], asset_type) if tt.get('tp') else '–'
+                    trade_id = str(tt.get('id', '')) or f'pending_{sym}_{tt.get("entry_time", "unknown")}'
+                    
+                    # Calculate proportional values if there are multiple trades
+                    trade_qty = tt.get('qty', 0)
+                    proportion = trade_qty / total_qty if total_qty > 0 else 1
+                    
+                    # Use trade's entry price for PnL calculation if available, otherwise proportional IB PnL
+                    if tt.get('entry_price'):
+                        mult = 1 if tt.get('side', 'BUY') == 'BUY' else -1
+                        current_price = pos['market_value'] / abs(pos['position']) if pos['position'] != 0 else 0
+                        trade_pnl = mult * (current_price - tt['entry_price']) * trade_qty
+                        trade_pnl_pct = (trade_pnl / (tt['entry_price'] * trade_qty)) * 100 if tt['entry_price'] > 0 else 0
+                    else:
+                        trade_pnl = pos['unrealized_pnl'] * proportion
+                        trade_pnl_pct = pos['unrealized_pnl_pct']
+                    
+                    trade_pnl_c = '#26a69a' if trade_pnl >= 0 else '#ef5350'
+                    
+                    rows.append(html.Tr([
+                        html.Td(f"{sym} ({asset_type})", style={'fontWeight': 'bold'}),
+                        html.Td(tt.get('side', 'LONG' if pos['position'] > 0 else 'SHORT'),
+                                style={'color': '#00d4ff'}),
+                        html.Td(trade_qty),
+                        html.Td(fmt_price(tt.get('entry_price', pos['avg_cost']), asset_type)),
+                        html.Td(fmt_price(pos['market_value'] * proportion, asset_type)),
+                        html.Td(f"${trade_pnl:.2f} ({trade_pnl_pct:.2f}%)",
+                                style={'color': trade_pnl_c, 'fontWeight': 'bold'}),
+                        html.Td(entry_t, style={'color': '#aaa', 'fontSize': '12px'}),
+                        html.Td(sl_txt,  style={'color': '#ef9a9a', 'fontSize': '12px'}),
+                        html.Td(tp_txt,  style={'color': '#a5d6a7', 'fontSize': '12px'}),
+                        html.Td(
+                            html.Span([
+                                html.Button('⟲ BE', id={'type': 'breakeven-btn', 'trade_id': trade_id},
+                                            n_clicks=0,
+                                            style={'padding': '4px 8px', 'background': '#f57c00',
+                                                   'border': 'none', 'borderRadius': '4px',
+                                                   'color': 'white', 'cursor': 'pointer',
+                                                   'fontSize': '12px', 'marginRight': '4px'}),
+                                html.Button('✖', id={'type': 'close-pos-btn', 'trade_id': trade_id},
+                                            n_clicks=0,
+                                            style={'padding': '4px 8px', 'background': '#b71c1c',
+                                                   'border': 'none', 'borderRadius': '4px',
+                                                   'color': 'white', 'cursor': 'pointer',
+                                                   'fontSize': '12px'})
+                            ])
+                        ),
+                    ]))
+            else:
+                # Position without TT metadata
+                _at = pos.get('asset_type', 'STOCK')
+                _pnl_c = '#26a69a' if pos['unrealized_pnl'] >= 0 else '#ef5350'
+                rows.append(html.Tr([
+                    html.Td(f"{sym} ({_at})", style={'fontWeight': 'bold'}),
+                    html.Td('LONG' if pos['position'] > 0 else 'SHORT',
+                            style={'color': '#00d4ff'}),
+                    html.Td(abs(pos['position'])),
+                    html.Td(fmt_price(pos['avg_cost'], _at)),
+                    html.Td(fmt_price(pos['market_value'], _at)),
+                    html.Td(f"${pos['unrealized_pnl']:.2f} ({pos['unrealized_pnl_pct']:.2f}%)",
+                            style={'color': _pnl_c, 'fontWeight': 'bold'}),
+                    html.Td('–', style={'color': '#aaa', 'fontSize': '12px'}),
+                    html.Td('–',  style={'color': '#ef9a9a', 'fontSize': '12px'}),
+                    html.Td('–',  style={'color': '#a5d6a7', 'fontSize': '12px'}),
+                    html.Td(html.Span('–', style={'color': '#555'})),
+                ]))
+                
+        # Add any TT trades that don't have matching IB positions (e.g. waiting for fill)
+        for tt in open_trades_list:
+            if tt['id'] not in processed_trade_ids:
+                sym = tt['symbol']
+                asset_type = tt.get('asset_type', 'STOCK')
                 entry_t  = trade_tracker.fmt_time(tt.get('entry_time'))
                 sl_txt   = fmt_price(tt['sl'], asset_type) if tt.get('sl') else '–'
                 tp_txt   = fmt_price(tt['tp'], asset_type) if tt.get('tp') else '–'
-                trade_id = tt.get('id', '')
-                
-                # Calculate proportional values if there are multiple trades
-                trade_qty = tt.get('qty', 0)
-                proportion = trade_qty / total_qty if total_qty > 0 else 1
-                
-                # Use trade's entry price for PnL calculation if available, otherwise proportional IB PnL
-                if tt.get('entry_price'):
-                    mult = 1 if tt.get('side', 'BUY') == 'BUY' else -1
-                    current_price = pos['market_value'] / abs(pos['position']) if pos['position'] != 0 else 0
-                    trade_pnl = mult * (current_price - tt['entry_price']) * trade_qty
-                    trade_pnl_pct = (trade_pnl / (tt['entry_price'] * trade_qty)) * 100 if tt['entry_price'] > 0 else 0
-                else:
-                    trade_pnl = pos['unrealized_pnl'] * proportion
-                    trade_pnl_pct = pos['unrealized_pnl_pct']
-                
-                trade_pnl_c = '#26a69a' if trade_pnl >= 0 else '#ef5350'
+                trade_id = str(tt.get('id', '')) or f'pending_{sym}_{tt.get("entry_time", "unknown")}'
                 
                 rows.append(html.Tr([
                     html.Td(f"{sym} ({asset_type})", style={'fontWeight': 'bold'}),
-                    html.Td(tt.get('side', 'LONG' if pos['position'] > 0 else 'SHORT'),
-                            style={'color': '#00d4ff'}),
-                    html.Td(trade_qty),
-                    html.Td(fmt_price(tt.get('entry_price', pos['avg_cost']), asset_type)),
-                    html.Td(fmt_price(pos['market_value'] * proportion, asset_type)),
-                    html.Td(f"${trade_pnl:.2f} ({trade_pnl_pct:.2f}%)",
-                            style={'color': trade_pnl_c, 'fontWeight': 'bold'}),
+                    html.Td(tt.get('side', 'LONG'), style={'color': '#00d4ff'}),
+                    html.Td(tt.get('qty', 0)),
+                    html.Td(fmt_price(tt.get('entry_price', 0), asset_type)),
+                    html.Td("Pending..."),
+                    html.Td("–", style={'color': '#888', 'fontWeight': 'bold'}),
                     html.Td(entry_t, style={'color': '#aaa', 'fontSize': '12px'}),
                     html.Td(sl_txt,  style={'color': '#ef9a9a', 'fontSize': '12px'}),
                     html.Td(tp_txt,  style={'color': '#a5d6a7', 'fontSize': '12px'}),
                     html.Td(
-                        html.Button('⟲ BE', id={'type': 'breakeven-btn', 'trade_id': trade_id},
-                                    n_clicks=0,
-                                    style={'padding': '4px 8px', 'background': '#f57c00',
-                                           'border': 'none', 'borderRadius': '4px',
-                                           'color': 'white', 'cursor': 'pointer',
-                                           'fontSize': '12px', 'marginRight': '4px'}),
-                        html.Button('✖', id={'type': 'close-pos-btn', 'trade_id': trade_id},
-                                    n_clicks=0,
-                                    style={'padding': '4px 8px', 'background': '#b71c1c',
-                                           'border': 'none', 'borderRadius': '4px',
-                                           'color': 'white', 'cursor': 'pointer',
-                                           'fontSize': '12px'})
+                        html.Span([
+                            html.Button('⟲ BE', id={'type': 'breakeven-btn', 'trade_id': trade_id},
+                                        n_clicks=0,
+                                        style={'padding': '4px 8px', 'background': '#f57c00',
+                                               'border': 'none', 'borderRadius': '4px',
+                                               'color': 'white', 'cursor': 'pointer',
+                                               'fontSize': '12px', 'marginRight': '4px'}),
+                            html.Button('✖', id={'type': 'close-pos-btn', 'trade_id': trade_id},
+                                        n_clicks=0,
+                                        style={'padding': '4px 8px', 'background': '#b71c1c',
+                                               'border': 'none', 'borderRadius': '4px',
+                                               'color': 'white', 'cursor': 'pointer',
+                                               'fontSize': '12px'})
+                        ])
                     ),
                 ]))
-        else:
-            # Position without TT metadata
-            msg = f'[SYNC] ℹ️ Row enrich {sym} | no TT metadata'
-            log("DEBUG", msg)
-            debug_lines.append(msg)
 
-            _at = pos.get('asset_type', 'STOCK')
-            rows.append(html.Tr([
-                html.Td(f"{sym} ({_at})", style={'fontWeight': 'bold'}),
-                html.Td('LONG' if pos['position'] > 0 else 'SHORT',
-                        style={'color': '#00d4ff'}),
-                html.Td(abs(pos['position'])),
-                html.Td(fmt_price(pos['avg_cost'], _at)),
-                html.Td(fmt_price(pos['market_value'], _at)),
-                html.Td(f"${pos['unrealized_pnl']:.2f} ({pos['unrealized_pnl_pct']:.2f}%)",
-                        style={'color': pnl_c, 'fontWeight': 'bold'}),
-                html.Td('–', style={'color': '#aaa', 'fontSize': '12px'}),
-                html.Td('–',  style={'color': '#ef9a9a', 'fontSize': '12px'}),
-                html.Td('–',  style={'color': '#a5d6a7', 'fontSize': '12px'}),
-                html.Td(html.Span('–', style={'color': '#555'})),
-            ]))
-            
-    # Add any TT trades that don't have matching IB positions (e.g. waiting for fill)
-    for tt in open_trades_list:
-        if tt['id'] not in processed_trade_ids:
-            sym = tt['symbol']
-            asset_type = tt.get('asset_type', 'STOCK')
-            entry_t  = trade_tracker.fmt_time(tt.get('entry_time'))
-            sl_txt   = fmt_price(tt['sl'], asset_type) if tt.get('sl') else '–'
-            tp_txt   = fmt_price(tt['tp'], asset_type) if tt.get('tp') else '–'
-            trade_id = tt.get('id', '')
-            
-            rows.append(html.Tr([
-                html.Td(f"{sym} ({asset_type})", style={'fontWeight': 'bold'}),
-                html.Td(tt.get('side', 'LONG'), style={'color': '#00d4ff'}),
-                html.Td(tt.get('qty', 0)),
-                html.Td(fmt_price(tt.get('entry_price', 0), asset_type)),
-                html.Td("Pending..."),
-                html.Td("–", style={'color': '#888', 'fontWeight': 'bold'}),
-                html.Td(entry_t, style={'color': '#aaa', 'fontSize': '12px'}),
-                html.Td(sl_txt,  style={'color': '#ef9a9a', 'fontSize': '12px'}),
-                html.Td(tp_txt,  style={'color': '#a5d6a7', 'fontSize': '12px'}),
-                html.Td(
-                    html.Button('⟲ BE', id={'type': 'breakeven-btn', 'trade_id': trade_id},
-                                n_clicks=0,
-                                style={'padding': '4px 8px', 'background': '#f57c00',
-                                       'border': 'none', 'borderRadius': '4px',
-                                       'color': 'white', 'cursor': 'pointer',
-                                       'fontSize': '12px', 'marginRight': '4px'}),
-                    html.Button('✖', id={'type': 'close-pos-btn', 'trade_id': trade_id},
-                                n_clicks=0,
-                                style={'padding': '4px 8px', 'background': '#b71c1c',
-                                       'border': 'none', 'borderRadius': '4px',
-                                       'color': 'white', 'cursor': 'pointer',
-                                       'fontSize': '12px'})
-                ),
-            ]))
-
-    return html.Table([
-        html.Thead(html.Tr([
-            html.Th('Symbol'), html.Th('Side'), html.Th('Qty'),
-            html.Th('Avg Cost'), html.Th('Market Value'), html.Th('P&L'),
-            html.Th('Vstup'), html.Th('SL'), html.Th('TP'), html.Th('')
-        ])),
-        html.Tbody(rows)
-    ], style={'width': '100%', 'borderCollapse': 'collapse'}), dbg
+        return html.Table([
+            html.Thead(html.Tr([
+                html.Th('Symbol'), html.Th('Side'), html.Th('Qty'),
+                html.Th('Avg Cost'), html.Th('Market Value'), html.Th('P&L'),
+                html.Th('Vstup'), html.Th('SL'), html.Th('TP'), html.Th('')
+            ])),
+            html.Tbody(rows)
+        ], style={'width': '100%', 'borderCollapse': 'collapse'})
+    except Exception as e:
+        import traceback
+        log("ERROR", f"positions-table callback error: {e}\n{traceback.format_exc()}")
+        return html.Div(f'Chyba: {str(e)[:200]}', style={'color': '#ef5350'})
 
 
 # ------------------------------------------------------------------
@@ -1848,6 +1941,12 @@ app.clientside_callback(
 app.clientside_callback(
     """function(n){if(n>0&&window.lwcDebug)window.lwcDebug('BTN','Load Chart n='+n+' - cekam na Python/IB...');return n;}""",
     Output('chart-trigger-store', 'data', allow_duplicate=True), Input('load-chart-btn', 'n_clicks'),
+    prevent_initial_call=True
+)
+
+app.clientside_callback(
+    """function(n){if(n>0&&window.lwcDebug)window.lwcDebug('BTN','Load Chart2 n='+n+' - cekam na Python/IB...');return n;}""",
+    Output('chart2-trigger-store', 'data', allow_duplicate=True), Input('load-chart2-btn', 'n_clicks'),
     prevent_initial_call=True
 )
 
@@ -2074,6 +2173,24 @@ app.clientside_callback(
     }
     """,
     Output('hidden-state', 'children', allow_duplicate=True), Input('chart-append-store', 'data'),
+    prevent_initial_call=True
+)
+
+# Phase 3: Chart 2 prepend/append callback - feeds chart2-append-store to lwcManager2.prependData()
+app.clientside_callback(
+    """
+    function(appendData){
+        var d=window.lwcDebug||function(){};
+        d('CB2-APPEND','=== Chart2 append callback ===');
+        if(!appendData){d('CB2-APPEND','appendData NULL -> no_update');return window.dash_clientside.no_update;}
+        if(!appendData.bars||appendData.bars.length===0){d('CB2-APPEND','append bars prazdne -> no_update');return window.dash_clientside.no_update;}
+        d('CB2-APPEND','symbol='+appendData.symbol+' tf='+appendData.timeframe+' baru='+appendData.bars.length);
+        if(window.lwcManager2){d('CB2-APPEND','volam lwcManager2.prependData()');window.lwcManager2.prependData(appendData);}
+        else{var a=0,r=setInterval(function(){a++;if(window.lwcManager2){window.lwcManager2.prependData(appendData);clearInterval(r);}else if(a>20){d('ERR','lwcManager2 nenalezen!');clearInterval(r);}},200);}
+        return appendData.symbol||'ok';
+    }
+    """,
+    Output('hidden-state', 'children', allow_duplicate=True), Input('chart2-append-store', 'data'),
     prevent_initial_call=True
 )
 

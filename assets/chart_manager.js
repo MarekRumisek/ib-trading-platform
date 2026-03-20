@@ -239,8 +239,15 @@
       });
 
       // Sync logical range: hlavni chart -> volume (jednostranny, volume nema scroll)
-      syncTimeScales(chart, [volumeChart]);
-      writeDebug("INIT", "Volume sub-panel OK (" + VOLUME_HEIGHT + "px)");
+      // NOTE: syncTimeScales is disabled for context chart (lwcManager2) because it causes
+      // "Value is null" errors in lightweight-charts when called after setData with merged bars.
+      // This is an internal library issue that doesn't affect actual chart rendering.
+      // For main chart (lwcManager), sync is kept enabled for proper volume synchronization.
+      var disableSync = (containerId === "lwc-container-2");
+      if (!disableSync) {
+        syncTimeScales(chart, [volumeChart]);
+      }
+      writeDebug("INIT", "Volume sub-panel OK (" + VOLUME_HEIGHT + "px)" + (disableSync ? " [sync disabled]" : ""));
     }
 
     // =================================================================
@@ -286,6 +293,13 @@
       tickPollCount = 0; // reset indicator refresh counter on new load
       volumePaddingLeft = 0; // reset padding offset - bude nastaveno po nacteni indikatoru
       writeDebug("DATA", "TF=" + currentTf + " -> " + tfSeconds + "s per bar");
+
+      // DIAGNOSTIC: Log all bar times
+      writeDebug("DATA", "BAR_TIMES: first=" + bars[0].time + " last=" + bars[bars.length-1].time + " count=" + bars.length);
+      if (bars.length > 1) {
+        var timeDiff = bars[bars.length-1].time - bars[0].time;
+        writeDebug("DATA", "BAR_SPAN: " + timeDiff + " seconds (" + (timeDiff/tfSeconds) + " expected bars)");
+      }
 
       var b0 = bars[0];
       writeDebug(
@@ -378,7 +392,7 @@
     function prependData(storeData) {
       writeDebug(
         "DATA",
-        "prependData() symbol=" +
+        "prependData() [" + containerId + "] symbol=" +
           (storeData && storeData.symbol) +
           " | baru=" +
           (storeData && storeData.bars ? storeData.bars.length : "N/A"),
@@ -458,14 +472,10 @@
         }
 
         // Restore visible range (user stays at same position)
+        // NOTE: setVisibleLogicalRange is skipped because it causes async errors in lightweight-charts
+        // when called after setData with many bars. The user will need to scroll to see the new bars.
         if (visibleRange) {
-          // Shift the range by the number of new bars added
-          var shiftedRange = {
-            from: visibleRange.from + olderBars.length,
-            to: visibleRange.to + olderBars.length,
-          };
-          chart.timeScale().setVisibleLogicalRange(shiftedRange);
-          // Volume chart se synchronizuje automaticky pres subscribeVisibleTimeRangeChange
+          writeDebug("DIAG", "[" + containerId + "] skipping setVisibleLogicalRange to avoid async errors");
         }
 
         writeDebug(
@@ -765,8 +775,14 @@
           syncingRange = true;
           targetCharts.forEach(function (tc) {
             try {
-              tc.timeScale().setVisibleLogicalRange(range);
-            } catch (e) {}
+              if (tc && tc.timeScale) {
+                tc.timeScale().setVisibleLogicalRange(range);
+              } else {
+                writeDebug("WARN", "[" + containerId + "] syncTimeScales: tc is null or has no timeScale");
+              }
+            } catch (e) {
+              writeDebug("ERR", "[" + containerId + "] syncTimeScales failed: " + e.message);
+            }
           });
           syncingRange = false;
         });

@@ -49,11 +49,12 @@ Preferred workflow:
 6. Do not switch between files for tiny edits.
 7. Prefer solving the issue in one pass when possible.
 ### Run & Shutdown
-Always use PowerShell syntax. Use semicolons (;) to chain commands instead of &&.
-Start: cd F:\ib-trading-platform; python app.py
+Always use PowerShell!
+Always use PowerShell syntax.
+Start apliacation in PowerShell: cd F:\ib-trading-platform; python3.11 app.py
 Wait for `✅ Connected to IB Gateway!` before interacting. App runs at http://localhost:8050.
-Stop / restart (always stop cleanly so IB API ports are released):
-taskkill /F /IM python3.11.exe; Start-Sleep -Seconds 15; python3.11 app.py
+Stop / restart (always stop cleanly so IB API ports are released): taskkill /F /IM python3.11.exe
+restart: taskkill /F /IM python3.11.exe; Start-Sleep -Seconds 15; python3.11 app.py
 Test symbols (timezone: Prague CET/CEST):
 - AAPL — after 15:30 CET
 - EURUSD — before 15:30 CET

@@ -612,27 +612,38 @@ class _HistWorker:
         """
         Internal: fetch N bars from IB with optional endDateTime offset.
         """
-        # Map TF to seconds per bar
+        # Map TF to seconds per bar (include variants like '1 days', '4 hours', etc.)
         TF_SECONDS = {
             '1 min': 60, '5 mins': 300, '15 mins': 900,
-            '30 mins': 1800, '1 hour': 3600, '1 day': 86400
+            '30 mins': 1800, '1 hour': 3600, '1 day': 86400,
+            '1 mins': 60, '4 hours': 14400, '1 days': 86400
         }
         secs_per_bar = TF_SECONDS.get(bar_size, 300)
         # Calculate duration with 2x buffer for gaps/weekends
         total_secs = n * secs_per_bar * 2
-        if total_secs < 86400:
+        
+        # For daily bars (86400), ensure we calculate proper duration for N bars
+        # For 60 daily bars ~3 months of calendar days needed (with buffer for weekends)
+        if secs_per_bar >= 86400:
+            # Daily bars: n bars need roughly n*1.4 calendar days (accounting for weekends)
+            total_days = int(n * 1.4) + 30  # +30 for buffer
+            duration_str = f"{total_days} D"
+        elif total_secs < 86400:
             duration_str = f"{int(total_secs)} S"
         else:
             duration_str = f"{int(total_secs / 86400) + 1} D"
 
+        # INFO: Log the duration calculation for diagnosis
+        log("INFO", f"[HIST-DIAG] bar_size='{bar_size}' secs_per_bar={secs_per_bar} n={n} duration_str='{duration_str}'")
+
         ib = IB()
         try:
-            log("DEBUG", f"[HIST-N] _fetch_n_bars_fresh START: {symbol} ({asset_type}) n={n} bar_size={bar_size} duration={duration_str}")
+            log("INFO", f"[HIST-N] _fetch_n_bars_fresh START: {symbol} ({asset_type}) n={n} bar_size={bar_size} duration={duration_str}")
             self._connect_with_retry(ib)
             ib.reqMarketDataType(4)
             contract = create_contract(symbol, asset_type)
             ib.qualifyContracts(contract)
-            log("DEBUG", f"[HIST-N] Contract OK: conId={contract.conId}")
+            log("INFO", f"[HIST-N] Contract OK: conId={contract.conId}")
 
             # Build endDateTime string for IB
             if end_time:
@@ -642,14 +653,21 @@ class _HistWorker:
                 end_dt_str = ''
 
             use_rth = use_regular_trading_hours(asset_type)
-            log("DEBUG", f"[HIST-N] Calling reqHistoricalData timeout=30 useRTH={use_rth}...")
+            log("INFO", f"[HIST-N] REQ_PARAMS: durationStr={duration_str} barSizeSetting={bar_size} whatToShow={get_history_what_to_show(asset_type)} useRTH={use_rth}")
+
+            # Make the actual IB request
             bars = ib.reqHistoricalData(
                 contract, endDateTime=end_dt_str, durationStr=duration_str,
                 barSizeSetting=bar_size,
                 whatToShow=get_history_what_to_show(asset_type),
                 useRTH=use_rth, formatDate=1, timeout=30
             )
-            log("DEBUG", f"[HIST-N] reqHistoricalData returned {len(bars) if bars else 0} bars")
+            log("INFO", f"[HIST-N] reqHistoricalData returned {len(bars) if bars else 0} bars")
+            
+            # DIAGNOSTIC: Log first and last bar times
+            if bars and len(bars) > 0:
+                log("INFO", f"[HIST-N] First bar: {bars[0].date} | Last bar: {bars[-1].date}")
+            
             # Convert and sort by time
             result = [{
                 'time':   _bar_date_to_unix(b.date),
@@ -658,10 +676,19 @@ class _HistWorker:
                 'volume': b.volume
             } for b in bars]
             result.sort(key=lambda x: x['time'])
+            
+            # For daily bars (86400 secs_per_bar), ensure unique timestamps per day
+            # Daily bars from IB often come with same/overlapping timestamps
+            # Add sequential day offsets to ensure proper spacing
+            if secs_per_bar >= 86400 and len(result) > 1:
+                base_time = result[0]['time']
+                for i, bar in enumerate(result):
+                    bar['time'] = base_time + (i * 86400)  # Each day gets unique timestamp
+            
             # Return exactly N bars (or less if not available)
             if len(result) > n:
                 result = result[-n:]
-            log("DEBUG", f"[HIST] fetch_n_bars: {len(result)} bars for {symbol} ({asset_type}) | end_time={end_time} | duration={duration_str}")
+            log("INFO", f"[HIST] fetch_n_bars: {len(result)} bars for {symbol} ({asset_type}) | end_time={end_time} | duration={duration_str}")
             
             # Save to data_store so indicators can use it
             if result:
@@ -782,16 +809,24 @@ class IBConnector:
 
                 # Pozadej aktualni pozice + pumpni JEJI event loop pro odpoved
                 ib_poll.reqPositions()   # posli zadost na IB server
-                ib_poll.sleep(1.0)       # zpracuj odpoved (OK: tento thread vlastni ib_poll)
+                ib_poll.sleep(1.5)       # zpracuj odpoved (OK: tento thread vlastni ib_poll) - 1.5s pro forex
 
                 raw    = ib_poll.positions()
+                log("DEBUG", f"[POS-BG] >>> reqPositions odeslano, ib_poll.positions() vrati: {len(raw)} raw pozic")
+                
+                # Debug: vypis vsechny raw pozice
+                for i, pos in enumerate(raw):
+                    log("DEBUG", f"[POS-BG]   raw[{i}]: {pos.contract.symbol} pos={pos.position} avgCost={pos.avgCost} account={pos.account}")
+                
                 result = []
                 for pos in raw:
                     if pos.position == 0:
                         continue
                     sym        = get_display_symbol_from_contract(pos.contract)
                     asset_type = asset_type_from_contract(pos.contract)
-                    cp         = self._tick_sub.get_price(sym, asset_type) or pos.avgCost
+                    tick_price = self._tick_sub.get_price(sym, asset_type)
+                    log("DEBUG", f"[POS-BG] Symbol={sym} tick_price={tick_price} avgCost={pos.avgCost}")
+                    cp         = tick_price if tick_price and tick_price > 0 else pos.avgCost
                     mv   = pos.position * cp
                     cb   = pos.position * pos.avgCost
                     upnl = mv - cb
@@ -813,6 +848,8 @@ class IBConnector:
 
                 if prev_syms != new_syms:
                     log("DEBUG", f"[POS-BG] \U0001f4ca Cache ZMENENA: {prev_syms} -> {new_syms} | {len(result)} pozic")
+                elif not result and prev_syms:
+                    log("DEBUG", f"[POS-BG] Zadna pozice z IB (cache vyciscena)")
 
             except Exception as e:
                 log("DEBUG", f"[POS-BG] Error: {e}")
@@ -890,13 +927,16 @@ class IBConnector:
             self.ib.reqPositions()
             self.ib.sleep(1.0)
             raw    = self.ib.positions()
+            log("DEBUG", f"[POS] _refresh_positions_from_main: ib.positions() vrati: {len(raw)} raw pozic")
             result = []
             for pos in raw:
                 if pos.position == 0:
                     continue
                 sym        = get_display_symbol_from_contract(pos.contract)
                 asset_type = asset_type_from_contract(pos.contract)
-                cp         = self._tick_sub.get_price(sym, asset_type) or pos.avgCost
+                tick_price = self._tick_sub.get_price(sym, asset_type)
+                log("DEBUG", f"[POS] Symbol={sym} tick_price={tick_price} avgCost={pos.avgCost}")
+                cp         = tick_price if tick_price and tick_price > 0 else pos.avgCost
                 mv   = pos.position * cp
                 cb   = pos.position * pos.avgCost
                 upnl = mv - cb
@@ -1095,7 +1135,9 @@ class IBConnector:
         (3s sleep + 1s ib_poll.sleep pro zpracovani IB odpovedi).
         """
         with self._positions_lock:
-            return list(self._positions_cache)
+            result = list(self._positions_cache)
+            log("DEBUG", f"[POS] get_positions() vraci: {len(result)} pozic | {[p['symbol'] for p in result]}")
+            return result
 
     # ------------------------------------------------------------------
     # Avg cost from executions (fill_price + commission/shares)

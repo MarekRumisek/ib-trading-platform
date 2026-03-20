@@ -89,9 +89,28 @@
     "sl": null,
     "tp": null,
     "note": "",
-    "exit_price": null,
-    "exit_time": null,
-    "pnl": null,
-    "status": "open"
+    "exit_price": 1.160335,
+    "exit_time": 1774031251,
+    "pnl": 0.0,
+    "status": "closed"
+  },
+  {
+    "id": "AAPL_1774032557475",
+    "symbol": "AAPL",
+    "side": "BUY",
+    "qty": 1.0,
+    "order_type": "MARKET",
+    "asset_type": "STOCK",
+    "entry_price": 248.02,
+    "avg_cost": null,
+    "commission": null,
+    "entry_time": 1774032557,
+    "sl": 245.54,
+    "tp": 250.5,
+    "note": "",
+    "exit_price": 248.11,
+    "exit_time": 1774032610,
+    "pnl": 0.09,
+    "status": "closed"
   }
 ]
