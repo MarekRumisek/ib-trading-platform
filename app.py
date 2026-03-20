@@ -1059,7 +1059,6 @@ def load_settings(n_intervals):
 @app.callback(
     [Output('settings-save-feedback', 'children'),
      Output('symbol-input', 'value'),
-     Output('qty-custom', 'value'),
      Output('asset-type-select', 'value'),
      Output('exchange-select', 'value')],
     Input('settings-save-btn', 'n_clicks'),
@@ -1233,8 +1232,8 @@ def update_rr_and_risk(sl_price, sl_pct, tp_price, tp_pct, quantity, symbol, pri
 # ------------------------------------------------------------------
 @app.callback(
     [Output('order-feedback', 'children'),
-     Output('trade-refresh-store', 'data'),
-     Output('trade-debug-store', 'data')],
+     Output('trade-refresh-store', 'data', allow_duplicate=True),
+     Output('trade-debug-store', 'data', allow_duplicate=True)],
     [Input('buy-btn', 'n_clicks'), Input('sell-btn', 'n_clicks')],
     [State('symbol-input',    'value'),
      State('asset-type-select','value'),
@@ -1246,7 +1245,8 @@ def update_rr_and_risk(sl_price, sl_pct, tp_price, tp_pct, quantity, symbol, pri
      State('order-note-input','value'),
      State('order-type-select','value'),
      State('limit-price-input','value'),
-     State('trade-refresh-store', 'data')]
+     State('trade-refresh-store', 'data')],
+    prevent_initial_call=True
 )
 def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
                 sl_price, sl_pct, tp_price, tp_pct, note, order_type, limit_price, refresh_counter):
@@ -1469,8 +1469,7 @@ def close_all_positions(n, refresh_counter):
 # OPEN POSITIONS TABLE + orphan sync s GRACE PERIOD
 # ------------------------------------------------------------------
 @app.callback(
-    [Output('positions-table', 'children'),
-     Output('trade-debug-store', 'data', allow_duplicate=True)],
+    Output('positions-table', 'children'),
     [Input('positions-update-interval', 'n_intervals'),
      Input('trade-refresh-store', 'data'),
      Input('refresh-positions-btn', 'n_clicks')],
@@ -1478,49 +1477,13 @@ def close_all_positions(n, refresh_counter):
 )
 def update_positions_table(n, _refresh, _btn):
     if not ib_gateway.is_connected():
-        return html.Div('Not connected', style={'color': '#888'}), dash.no_update
+        return html.Div('Not connected', style={'color': '#888'})
 
     positions = ib_gateway.get_positions() or []
     open_trades_list = trade_tracker.get_open_trades()
-    now = int(time.time())
-    ib_symbols = {p['symbol'] for p in positions}
-    debug_lines = []
-
-    # Vždy loguj stav do konzole
-    ib_pos_str = str([(p['symbol'], p['position']) for p in positions])
-    tt_str     = str([(t['symbol'], f"age={(now - t.get('entry_time', now))}s",
-                       f"SL={t.get('sl')} TP={t.get('tp')}")
-                      for t in open_trades_list])
-    log("DEBUG", f"[SYNC] n={n} | IB={ib_pos_str} | TT={tt_str}")
-
-    # Do debug panelu pošli stav jen pokud jsou otevřené trady nebo IB pozice
-    if open_trades_list or positions:
-        debug_lines.append(f'[SYNC] ── tick n={n} ──────────────')
-        debug_lines.append(f'[SYNC] IB pozice : {ib_pos_str}')
-        debug_lines.append(f'[SYNC] TT open   : {tt_str}')
-
-    for tt in open_trades_list:
-        sym = tt['symbol']
-        if sym in ib_symbols:
-            ib_pos = next((p['position'] for p in positions if p['symbol'] == sym), '?')
-            age = now - tt.get('entry_time', now)
-            msg = (f'[SYNC] ✅ {sym} OK'
-                   f' | age={age}s | IB pos={ib_pos}'
-                   f' | SL={tt.get("sl")} TP={tt.get("tp")}')
-        else:
-            age = now - tt.get('entry_time', now)
-            msg = (f'[SYNC] ℹ️ {sym} metadata only in TT'
-                   f' | age={age}s | waiting for IB position')
-
-        log("DEBUG", msg)
-        debug_lines.append(msg)
-
-    dbg = dash.no_update
-    if debug_lines:
-        dbg = {'msg': '\n'.join(debug_lines), 'ts': time.time(), 'multi': True}
 
     if not positions and not open_trades_list:
-        return html.Div('Žádné otevřené pozice', style={'color': '#888'}), dbg
+        return html.Div('Žádné otevřené pozice', style={'color': '#888'})
 
     rows = []
     
