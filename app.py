@@ -47,13 +47,14 @@ def fmt_price(price, asset_type=None):
     return f"${price:.2f}"
 
 
-def submit_market_order(symbol, action, quantity, asset_type='STOCK'):
-    """Submit a market order via ib_gateway."""
+def submit_order(symbol, action, quantity, order_type, limit_price, asset_type='STOCK'):
+    """Submit an order via ib_gateway (supports MARKET and LIMIT)."""
     return ib_gateway.place_order(
         symbol=(symbol or '').upper(),
         action=action,
         quantity=quantity,
-        order_type='MARKET',
+        order_type=order_type,
+        limit_price=limit_price,
         asset_type=normalize_asset_type(asset_type)
     )
 
@@ -412,6 +413,34 @@ app.layout = html.Div([
                              'background': '#1e1e2e', 'color': 'white'})
         ], style={'marginBottom': '14px'}),
 
+        # Order type + Limit price row
+        html.Div([
+            html.Div([
+                html.Span('Typ příkazu:', style={'fontSize': '13px', 'color': '#aaa', 'marginRight': '8px'}),
+                dcc.RadioItems(
+                    id='order-type-select',
+                    options=[
+                        {'label': ' Market ', 'value': 'MARKET'},
+                        {'label': ' Limit ', 'value': 'LIMIT'},
+                    ],
+                    value='MARKET',
+                    style={'display': 'inline-block', 'color': '#ccc'},
+                    inputStyle={'marginRight': '4px', 'marginLeft': '8px'}
+                ),
+            ], style={'display': 'inline-block', 'marginRight': '25px'}),
+
+            html.Div([
+                html.Span('Limit Price:', style={'fontSize': '13px', 'color': '#ffd54f', 'marginRight': '8px'}),
+                dcc.Input(id='limit-price-input', type='number', placeholder='Cena $',
+                          min=0, step=0.01,
+                          style={'width': '90px', 'padding': '6px',
+                                 'borderRadius': '5px', 'border': '2px solid #ffd54f',
+                                 'background': '#1e1e2e', 'color': 'white', 'fontSize': '13px'}),
+            ], id='limit-price-row', style={'display': 'none'}),
+        ], style={'marginBottom': '12px', 'padding': '12px',
+                  'background': '#1a1a2e', 'borderRadius': '8px',
+                  'border': '1px solid #3d3d4a'}),
+
         html.Div([
             html.Div([
                 html.Span('🛡️ Stop-Loss:',
@@ -458,19 +487,28 @@ app.layout = html.Div([
                   'border': '1px solid #3d3d4a'}),
 
         html.Div(id='order-preview',
-                 style={'marginBottom': '14px', 'padding': '8px 14px',
+                 style={'marginBottom': '8px', 'padding': '8px 14px',
                         'background': '#0d1a2e', 'borderRadius': '6px',
                         'fontSize': '13px', 'color': '#90caf9',
                         'fontFamily': 'monospace', 'minHeight': '28px'}),
 
+        # R/R ratio and Risk display
         html.Div([
-            html.Button('🟢 BUY MARKET', id='buy-btn', n_clicks=0,
+            html.Span(id='rr-display', children='R/R: –',
+                      style={'fontSize': '14px', 'color': '#ffd54f', 'fontWeight': 'bold',
+                             'marginRight': '25px'}),
+            html.Span(id='risk-display', children='Risk: –',
+                      style={'fontSize': '14px', 'color': '#ef9a9a', 'fontWeight': 'bold'}),
+        ], style={'marginBottom': '14px'}),
+
+        html.Div([
+            html.Button('🟢 BUY', id='buy-btn', n_clicks=0,
                         style={'padding': '15px 40px',
                                'background': 'linear-gradient(135deg, #26a69a 0%, #1a7f6f 100%)',
                                'border': 'none', 'borderRadius': '8px', 'color': 'white',
                                'fontSize': '18px', 'fontWeight': 'bold',
                                'cursor': 'pointer', 'marginRight': '15px'}),
-            html.Button('🔴 SELL MARKET', id='sell-btn', n_clicks=0,
+            html.Button('🔴 SELL', id='sell-btn', n_clicks=0,
                         style={'padding': '15px 40px',
                                'background': 'linear-gradient(135deg, #ef5350 0%, #c62828 100%)',
                                'border': 'none', 'borderRadius': '8px', 'color': 'white',
@@ -753,7 +791,7 @@ def update_exchange(exchange):
 # ------------------------------------------------------------------
 app.clientside_callback(
     """
-    function(qty, slPrice, slPct, tpPrice, tpPct, symbol, priceTxt) {
+    function(qty, slPrice, slPct, tpPrice, tpPct, symbol, priceTxt, orderType, limitPrice) {
         var sym  = (symbol || 'AAPL').toUpperCase();
         var q    = qty || 1;
         var cur  = 0;
@@ -770,13 +808,12 @@ app.clientside_callback(
         if (!tp && tpPct && cur > 0)
             tp = Math.round(cur * (1 + tpPct / 100) * 100) / 100;
 
-        var parts = ['📋 ' + q + '× ' + sym + ' @ Market'];
+        var orderTypeLabel = (orderType === 'LIMIT' && limitPrice)
+            ? 'Limit @ $' + parseFloat(limitPrice).toFixed(2)
+            : 'Market';
+        var parts = ['📋 ' + q + '× ' + sym + ' @ ' + orderTypeLabel];
         if (sl) parts.push('🛡️ SL $' + sl.toFixed(2));
         if (tp) parts.push('🎯 TP $' + tp.toFixed(2));
-        if (cur > 0 && sl) {
-            var risk = Math.round(Math.abs(cur - sl) * q * 100) / 100;
-            parts.push('Risk: $' + risk);
-        }
         return parts.join('  |  ');
     }
     """,
@@ -787,8 +824,84 @@ app.clientside_callback(
      Input('tp-price-input', 'value'),
      Input('tp-pct-input', 'value'),
      Input('symbol-input', 'value'),
-     Input('price-display', 'children')]
+     Input('price-display', 'children'),
+     Input('order-type-select', 'value'),
+     Input('limit-price-input', 'value')]
 )
+
+
+# ------------------------------------------------------------------
+# TOGGLE LIMIT PRICE VISIBILITY based on order type
+# ------------------------------------------------------------------
+@app.callback(
+    Output('limit-price-row', 'style'),
+    Input('order-type-select', 'value')
+)
+def toggle_limit_price(order_type):
+    if order_type == 'LIMIT':
+        return {'display': 'inline-block'}
+    return {'display': 'none'}
+
+
+# ------------------------------------------------------------------
+# R/R RATIO AND RISK DISPLAY
+# ------------------------------------------------------------------
+@app.callback(
+    [Output('rr-display', 'children'),
+     Output('risk-display', 'children')],
+    [Input('sl-price-input', 'value'),
+     Input('sl-pct-input', 'value'),
+     Input('tp-price-input', 'value'),
+     Input('tp-pct-input', 'value'),
+     Input('qty-custom', 'value'),
+     Input('symbol-input', 'value'),
+     Input('price-display', 'children'),
+     Input('order-type-select', 'value')]
+)
+def update_rr_and_risk(sl_price, sl_pct, tp_price, tp_pct, quantity, symbol, price_txt, order_type):
+    try:
+        # Get current price
+        cur = 0
+        if price_txt:
+            import re
+            m = re.search(r'\$([\d.]+)', str(price_txt))
+            if m:
+                cur = float(m.group(1))
+
+        # Calculate SL
+        sl = None
+        if sl_price:
+            sl = float(sl_price)
+        elif sl_pct and cur > 0:
+            sl = round(cur * (1 - float(sl_pct) / 100), 4 if order_type == 'FOREX' else 2)
+
+        # Calculate TP
+        tp = None
+        if tp_price:
+            tp = float(tp_price)
+        elif tp_pct and cur > 0:
+            tp = round(cur * (1 + float(tp_pct) / 100), 4 if order_type == 'FOREX' else 2)
+
+        qty = quantity or 1
+
+        # Calculate R/R ratio
+        rr_txt = 'R/R: –'
+        if sl and tp and cur > 0:
+            risk = abs(cur - sl)
+            reward = abs(tp - cur)
+            if risk > 0:
+                rr = reward / risk
+                rr_txt = f'R/R: 1:{rr:.1f}'
+
+        # Calculate dollar risk
+        risk_txt = 'Risk: –'
+        if sl and cur > 0:
+            dollar_risk = abs(cur - sl) * qty
+            risk_txt = f'Risk: ${dollar_risk:.2f}'
+
+        return rr_txt, risk_txt
+    except Exception:
+        return 'R/R: –', 'Risk: –'
 
 
 # ------------------------------------------------------------------
@@ -807,10 +920,12 @@ app.clientside_callback(
      State('tp-price-input',  'value'),
      State('tp-pct-input',    'value'),
      State('order-note-input','value'),
+     State('order-type-select','value'),
+     State('limit-price-input','value'),
      State('trade-refresh-store', 'data')]
 )
 def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
-                sl_price, sl_pct, tp_price, tp_pct, note, refresh_counter):
+                sl_price, sl_pct, tp_price, tp_pct, note, order_type, limit_price, refresh_counter):
     ctx = dash.callback_context
     if not ctx.triggered:
         return '', dash.no_update, dash.no_update
@@ -860,7 +975,7 @@ def place_order(buy_clicks, sell_clicks, symbol, asset_type, quantity,
         _prec = 4 if asset_type == 'FOREX' else 2
         tp   = round(cur_price * mult, _prec)
 
-    result = submit_market_order(symbol, action, quantity, asset_type)
+    result = submit_order(symbol, action, quantity, order_type, limit_price, asset_type)
     if not result['success']:
         err_msg = result.get('message') or result.get('error') or 'Unknown error'
         dbg = {'msg': f'[TRADE][ERR] {action} {quantity} {symbol} ({asset_type}) — {err_msg}', 'ts': time.time()}
@@ -998,7 +1113,7 @@ def close_all_positions(n, refresh_counter):
         if qty <= 0:
             continue
         action = 'SELL' if pos['position'] > 0 else 'BUY'
-        res = submit_market_order(sym, action, qty, asset_type)
+        res = submit_order(sym, action, qty, 'MARKET', None, asset_type)
         if res['success']:
             closed += 1
             closed_symbols.add(sym)
@@ -1147,9 +1262,15 @@ def update_positions_table(n, _refresh, _btn):
                     html.Td(sl_txt,  style={'color': '#ef9a9a', 'fontSize': '12px'}),
                     html.Td(tp_txt,  style={'color': '#a5d6a7', 'fontSize': '12px'}),
                     html.Td(
-                        html.Button('✖ Close', id={'type': 'close-pos-btn', 'trade_id': trade_id},
+                        html.Button('⟲ BE', id={'type': 'breakeven-btn', 'trade_id': trade_id},
                                     n_clicks=0,
-                                    style={'padding': '4px 10px', 'background': '#b71c1c',
+                                    style={'padding': '4px 8px', 'background': '#f57c00',
+                                           'border': 'none', 'borderRadius': '4px',
+                                           'color': 'white', 'cursor': 'pointer',
+                                           'fontSize': '12px', 'marginRight': '4px'}),
+                        html.Button('✖', id={'type': 'close-pos-btn', 'trade_id': trade_id},
+                                    n_clicks=0,
+                                    style={'padding': '4px 8px', 'background': '#b71c1c',
                                            'border': 'none', 'borderRadius': '4px',
                                            'color': 'white', 'cursor': 'pointer',
                                            'fontSize': '12px'})
@@ -1198,9 +1319,15 @@ def update_positions_table(n, _refresh, _btn):
                 html.Td(sl_txt,  style={'color': '#ef9a9a', 'fontSize': '12px'}),
                 html.Td(tp_txt,  style={'color': '#a5d6a7', 'fontSize': '12px'}),
                 html.Td(
-                    html.Button('✖ Cancel', id={'type': 'close-pos-btn', 'trade_id': trade_id},
+                    html.Button('⟲ BE', id={'type': 'breakeven-btn', 'trade_id': trade_id},
                                 n_clicks=0,
-                                style={'padding': '4px 10px', 'background': '#b71c1c',
+                                style={'padding': '4px 8px', 'background': '#f57c00',
+                                       'border': 'none', 'borderRadius': '4px',
+                                       'color': 'white', 'cursor': 'pointer',
+                                       'fontSize': '12px', 'marginRight': '4px'}),
+                    html.Button('✖', id={'type': 'close-pos-btn', 'trade_id': trade_id},
+                                n_clicks=0,
+                                style={'padding': '4px 8px', 'background': '#b71c1c',
                                        'border': 'none', 'borderRadius': '4px',
                                        'color': 'white', 'cursor': 'pointer',
                                        'fontSize': '12px'})
@@ -1264,7 +1391,7 @@ def close_single_position(n_clicks_list, refresh_counter):
     qty = trade['qty']
     act = 'SELL' if ((ib_pos and ib_pos['position'] > 0) or (not ib_pos and trade['side'] == 'BUY')) else 'BUY'
 
-    res = submit_market_order(sym, act, qty, asset_type)
+    res = submit_order(sym, act, qty, 'MARKET', None, asset_type)
     if not res['success']:
         dbg = {'msg': f'[TRADE][ERR] CLOSE {sym} {qty}x — {res.get("error")}', 'ts': time.time()}
         return html.Div(f'❌ {res.get("error")}', style={'color': '#ef5350', 'fontWeight': 'bold'}), dbg, dash.no_update
@@ -1292,6 +1419,59 @@ def close_single_position(n_clicks_list, refresh_counter):
     dbg = {'msg': dbg_msg, 'ts': time.time()}
 
     return html.Div(msg_ui, style={'color': color, 'fontWeight': 'bold'}), dbg, (refresh_counter or 0) + 1
+
+
+# ------------------------------------------------------------------
+# BREAKEVEN BUTTON
+# ------------------------------------------------------------------
+@app.callback(
+    [Output('order-feedback', 'children', allow_duplicate=True),
+     Output('trade-debug-store', 'data', allow_duplicate=True),
+     Output('trade-refresh-store', 'data', allow_duplicate=True)],
+    Input({'type': 'breakeven-btn', 'trade_id': dash.ALL}, 'n_clicks'),
+    State('trade-refresh-store', 'data'),
+    prevent_initial_call=True
+)
+def set_breakeven(n_clicks_list, refresh_counter):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return dash.no_update, dash.no_update, dash.no_update
+    triggered = ctx.triggered[0]
+    if not triggered['value']:
+        return dash.no_update, dash.no_update, dash.no_update
+
+    import json as _json
+    prop_id  = triggered['prop_id']
+    id_part  = prop_id.split('.')[0]
+    trade_id = _json.loads(id_part).get('trade_id', '')
+    if not trade_id:
+        return dash.no_update, dash.no_update, dash.no_update
+
+    trade = trade_tracker.get_trade(trade_id)
+    if not trade:
+        dbg = {'msg': f'[TRADE][ERR] Breakeven — trade {trade_id} not found', 'ts': time.time()}
+        return html.Div('❌ Trade not found', style={'color': '#ef5350'}), dbg, dash.no_update
+
+    sym = trade['symbol']
+    asset_type = trade.get('asset_type', 'STOCK')
+
+    # Use avg_cost if available, otherwise entry_price
+    entry_price = trade.get('avg_cost') or trade.get('entry_price')
+    if not entry_price:
+        dbg = {'msg': f'[TRADE][ERR] Breakeven {sym} — no entry price', 'ts': time.time()}
+        return html.Div('❌ No entry price for breakeven', style={'color': '#ef5350'}), dbg, dash.no_update
+
+    # Update SL to entry price
+    success = trade_tracker.patch_trade(trade_id, {'sl': entry_price})
+    if success:
+        dbg_msg = f'[TRADE] BE {sym} → SL set to {fmt_price(entry_price, asset_type)}'
+        log('INFO', dbg_msg)
+        dbg = {'msg': dbg_msg, 'ts': time.time()}
+        return html.Div(f'⟲ Breakeven set: SL = {fmt_price(entry_price, asset_type)}',
+                        style={'color': '#f57c00', 'fontWeight': 'bold'}), dbg, (refresh_counter or 0) + 1
+    else:
+        dbg = {'msg': f'[TRADE][ERR] Breakeven {sym} — patch failed', 'ts': time.time()}
+        return html.Div('❌ Failed to set breakeven', style={'color': '#ef5350'}), dbg, dash.no_update
 
 
 # ------------------------------------------------------------------

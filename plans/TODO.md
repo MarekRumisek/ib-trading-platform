@@ -95,8 +95,6 @@
 - On click: retrieve the position's entry price, then modify the SL to equal the entry price. This requires: (a) knowing the entry price for each position, (b) a mechanism to update the SL. 
 - **Decision needed from developer:** How are SL/TP currently tracked for open positions? If they are only stored in `trades.json` via `trade_tracker`, the callback should update the trade record's `sl` field to the entry price. If bracket orders are used at IB level, modifying the attached stop order is needed instead.
 
----
-
 ## Phase 3 — Dual Chart
 
 ### 3.1 Refactor chart_manager.js for Multiple Chart Instances

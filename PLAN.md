@@ -48,8 +48,24 @@ These are prerequisites for everything else and should be done first.
 - Auto-recalculate SL/TP when quantity changes
 - Display Risk/Reward ratio directly in the Order Entry panel
 - Breakeven button on open position (moves SL to entry price)
+### Phase 2 — Implementation Notes
 
+**Limit order**
+- Add order type toggle (MARKET / LIMIT) to Order Entry UI; when LIMIT is selected, show a Limit Price input field
+- Pass `order_type` and `limit_price` to `ib_gateway.place_order()` — verify the function accepts `limit_price` as optional kwarg, add it if missing
+- Update `order-preview` clientside callback to reflect order type
+
+**R/R ratio**
+- Formula: `R/R = (TP − entry) / (entry − SL)` for BUY, reversed for SELL; entry = current last price
+- Display as a separate UI element below order-preview, not inside it
+- If SL or TP is missing, show `R/R: –`
+
+**Breakeven button**
+- Adds a BE button per row in Open Positions table
+- On click: sets SL = `avg_cost` if available, otherwise `entry_price` — local JSON only, does NOT send any order to IB
+- Use `trade_tracker.patch_trade()` for the update (already exists in codebase)
 ---
+
 
 ## Phase 3 — Dual Chart
 
