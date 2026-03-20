@@ -48,6 +48,39 @@ Preferred workflow:
 5. Avoid repeatedly reopening the same files unless necessary.
 6. Do not switch between files for tiny edits.
 7. Prefer solving the issue in one pass when possible.
+### IB API Verification Protocol — Mandatory Before Any UI/Chart Work
+Before debugging or implementing anything in the frontend (charts, UI components,
+Dash callbacks, chart_manager.js), the agent MUST first verify the IB API layer
+independently using the CLI tester tool.
+**The rule is simple:**
+> If you don't know whether the data coming from IB API is correct,
+> you have no business touching the frontend.
+#### Workflow (always in this order):
+1. Identify what data the frontend is supposed to display (bars, tick, orders, etc.)
+2. Open or modify `tools/ib_api_tester.py` to write a targeted test for exactly that data
+3. Run the test in PowerShell and inspect raw terminal output:
+   `python3.11 tools/ib_api_tester.py`
+4. Only if data is confirmed correct → proceed to frontend/chart debugging
+5. If data is wrong or missing → fix the API/backend layer first, re-test, then frontend
+#### ib_api_tester.py is a living tool — always modify it:
+- The file is a template/starting point, NOT a fixed utility
+- For each new task or bug, the agent should **rewrite or extend** the relevant
+  test command to match the exact scenario being investigated
+- Examples of what to test:
+  - Wrong chart candles? → fetch exact bars with same symbol/TF/range as the UI uses
+  - Chart not updating? → test live tick subscription and confirm data arrives
+  - Order not showing? → query open orders and confirm IB returns them
+  - PnL incorrect? → pull portfolio/account summary and compare raw values
+  - New feature needs contract data? → resolve contract first and verify fields
+- The test must mirror the exact parameters the app would use (same symbol,
+  same timeframe, same whatToShow, same RTH setting, etc.)
+- Print raw output clearly so the issue is obvious without any browser needed
+#### Key principle:
+Terminal output from `ib_api_tester.py` is the ground truth —
+**but always cross-reference with IB Paper Trading Notes above.**
+Missing or delayed tick/real-time data on paper account is NOT a bug.
+Only treat terminal output as a confirmed bug if the issue falls outside
+expected paper account limitations.
 ### Run & Shutdown
 Always use PowerShell!
 Always use PowerShell syntax.
@@ -61,8 +94,9 @@ Test symbols (timezone: Prague CET/CEST):
 - ASML — morning tests once European exchanges are implemented
 ### Available MCP Tools
 - **Playwright MCP** — browser automation, DOM inspection, screenshots (http://localhost:8050)
+  ⚠️ Use Playwright only AFTER API layer is verified via `ib_api_tester.py`.
+  Playwright is for confirming UI rendering, NOT for diagnosing data issues.
 - **Fetch MCP** — external documentation and web data
-Prefer MCP tools over assumptions. Verify fixes before marking a task as complete.
 IMPORTANT: On this system the Python executable is named `python3.11.exe`,
 NOT `python.exe`. Using `python.exe` or `taskkill /F /IM python.exe` will fail
 with "process not found". Always use `python3.11` to run scripts and
