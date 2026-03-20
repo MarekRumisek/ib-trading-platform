@@ -95,25 +95,108 @@
 - On click: retrieve the position's entry price, then modify the SL to equal the entry price. This requires: (a) knowing the entry price for each position, (b) a mechanism to update the SL. 
 - **Decision needed from developer:** How are SL/TP currently tracked for open positions? If they are only stored in `trades.json` via `trade_tracker`, the callback should update the trade record's `sl` field to the entry price. If bracket orders are used at IB level, modifying the attached stop order is needed instead.
 
-## Phase 3 — Dual Chart
+# Phase 3 — Dual Chart ✅ DONE
 
-### 3.1 Refactor chart_manager.js for Multiple Chart Instances
-- **Files:** `assets/chart_manager.js`
-- Currently `chart_manager.js` manages a single chart. Refactor it to support two independent chart instances. Each instance should have its own: chart object, candlestick series, indicator series, timeframe.
-- Approach: wrap the chart logic in a class or factory function (e.g., `createChartInstance(containerId, options)`). Current global state must become instance-scoped.
-- **This is a large refactor.** The agent should read the entire `chart_manager.js` first and understand all global variables before starting.
+**Context:**
+Branch: `feature/trade-management-collab-v3`. Read `PLAN.md` and `AGENTS.md` before starting. Phase 2 is complete. Study the full contents of `assets/chart_manager.js` and `app.py` before writing any code.
 
-### 3.2 Add Second Chart Container to Layout
-- **Files:** `app.py`
-- **Requires:** task 3.1 completed.
-- Add a second `html.Div` container for the secondary chart in the Dash layout, with its own timeframe dropdown.
-- Add the necessary `dcc.Store` or hidden divs for the second chart's state.
+**Implementation notes:**
+- Factory pattern: `createChartInstance(containerId)` returns public API object
+- Instance-local state: `chart`, `candleSeries`, `volumeChart`, `volumeSeries`, `tickTimer`, `tickEnabled`, `currentSymbol`, `currentAssetType`, `currentTf`, `tfSeconds`, `lastBarTime`, `lastBarOpen`, `lastBarHigh`, `lastBarLow`, `lastBarClose`, `allBars`, `indicatorSeries`, `subCharts`, `container`, `initAttempts`, `syncingRange`, `volumePaddingLeft`, `tickPollCount`, `activeIndicatorSettings`
+- Shared constants (module-level): `VERSION`, `TICK_POLL_MS`, `CHART_BG`, `GRID_COLOR`, `TEXT_COLOR`, `UP_COLOR`, `DOWN_COLOR`, `CHART_HEIGHT`, `VOLUME_HEIGHT`, `RSI_HEIGHT`, `MACD_HEIGHT`, `TF_TO_SECONDS`
+- `window.lwcDebug` stays global (shared logger)
+- `lwcManager2` does NOT get tick polling, trade lines, or indicators per Phase 3 constraints
+- Sub-chart container IDs are unique per instance (prefixed with `containerId`)
 
-### 3.3 Wire Second Chart Data Pipeline
-- **Files:** `app.py`, `assets/chart_manager.js`
-- **Requires:** tasks 3.1 and 3.2 completed.
-- Add Flask API routes or Dash callbacks to fetch OHLCV data for the secondary chart's timeframe (same symbol as main chart, different timeframe).
-- In `chart_manager.js`: initialize the second chart instance and feed it data from the new endpoint/callback.
+---
+
+## Task 3.1 — Refactor `chart_manager.js` for Two Independent Instances ✅ DONE
+
+**File:** `assets/chart_manager.js`
+
+The current file wraps all logic in a single IIFE with global variables (`chart`, `candleSeries`, `volumeChart`, `allBars`, `tickEnabled`, `currentSymbol`, `currentTf`, etc.). Refactor it so that the same logic can run as two independent instances.
+
+**Required approach:**
+- Extract the chart logic into a factory function: `function createChartInstance(containerId)` that returns a public API object identical to the current `window.lwcManager` API
+- All variables that are currently module-level must become **local to each factory call**: `chart`, `candleSeries`, `volumeChart`, `allBars`, `tickEnabled`, `currentSymbol`, `currentTf`, `tfSeconds`, `lastBarTime`, `lastBarOpen`, `lastBarHigh`, `lastBarLow`, `lastBarClose`, `indicatorSeries`, `subCharts`, `container`, `initAttempts`, `syncingRange`, `volumePaddingLeft`, `tickPollCount`, `activeIndicatorSettings`
+- Constants that are truly shared stay at module level: `VERSION`, `TICK_POLL_MS`, `CHART_BG`, `GRID_COLOR`, `TEXT_COLOR`, `UP_COLOR`, `DOWN_COLOR`, `CHART_HEIGHT`, `VOLUME_HEIGHT`, `RSI_HEIGHT`, `MACD_HEIGHT`, `TF_TO_SECONDS`
+- `window.lwcDebug` stays global (shared logger)
+- After refactor, create two instances at the bottom of the file:
+
+```js
+window.lwcManager  = createChartInstance('lwc-container');
+window.lwcManager2 = createChartInstance('lwc-container-2');
+```
+
+- `window.lwcManager` must behave **exactly as before** — no regressions
+- `window.lwcManager2` does **not** get tick polling, trade lines, or indicators in this phase — plain candlestick + volume only
+- `setTradeLines` (injected in `app.index_string`) attaches only to `window.lwcManager` — do not change that inline script
+
+---
+
+## Task 3.2 — Add Second Chart Container to Layout ✅ DONE
+
+**File:** `app.py`
+
+**Requires:** Task 3.1 complete.
+
+Add the second chart panel inside the existing chart section, immediately after the `lwc-container` div block.
+
+**Layout:**
+- Wrap both charts in a flex row: `display: flex; gap: 12px`
+- Each chart: `width: 49%`
+- Second chart container: `id='lwc-container-2'`, height `500px`
+
+**Second chart timeframe buttons:**
+- IDs: `tf2-1m`, `tf2-5m`, `tf2-15m`, `tf2-30m`, `tf2-1h`, `tf2-1d`
+- Default active: `tf2-1d`
+- Label: `"📊 Context Chart"`
+
+**New Dash Stores added:**
+
+```python
+dcc.Store(id='chart2-data-store'),
+dcc.Store(id='chart2-meta-store', data={'load_count': 0, 'oldest_time': None, 'total_bars': 0, 'symbol': None, 'tf': None}),
+dcc.Store(id='active-tf2-store', data='tf2-1d'),
+dcc.Store(id='chart2-trigger-store'),
+```
+
+---
+
+## Task 3.3 — Wire Second Chart Data Pipeline ✅ DONE
+
+**Files:** `app.py`, `assets/chart_manager.js`
+
+**Requires:** Tasks 3.1 and 3.2 complete.
+
+**Python side (`app.py`):**
+- Added callback `load_chart2_data` mirroring `load_chart_data` logic — uses `tf2-*` button inputs, outputs to `chart2-data-store` and `chart2-meta-store`
+- Symbol always comes from shared `symbol-input` State
+- Added `Input('load-chart-btn', 'n_clicks')` to also reload chart 2 when main symbol loads
+- Data source: same `ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type)` call
+- No tick, deep-load, or indicator callbacks for chart 2 in this phase
+
+**JavaScript side (`app.py` clientside callback):**
+- Added clientside callback feeding `chart2-data-store` → `window.lwcManager2.loadData()`, following the exact same pattern as the existing `chart-data-store` → `lwcManager.loadData()` callback
+- Output: `chart2-trigger-store`
+
+---
+
+## Constraints ✅ VERIFIED
+
+- Do NOT modify any existing callback, Store ID, or JS function
+- Do NOT add indicators, tick polling, or trade lines to chart 2
+- If anything is ambiguous, make the conservative choice and document it in a code comment and in your final summary
+- After finishing, list every file changed and every function/callback added
+
+## Verify Before Finishing ✅ DONE
+
+- Both charts render at `http://localhost:8050`
+- Changing TF on chart 2 does not affect chart 1 and vice versa
+- Changing symbol (Load Chart) reloads both charts
+- No JS console errors related to `lwcManager` or `lwcManager2`
+- Existing tick, indicators, and trade lines on chart 1 still work
+
 
 ---
 

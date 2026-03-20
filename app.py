@@ -371,9 +371,34 @@ app.layout = html.Div([
         ], style={'marginBottom': '10px', 'paddingTop': '10px',
                   'borderTop': '1px solid #3d3d4a'}),
 
-        html.Div(id='lwc-container',
-                 style={'width': '100%', 'height': '500px', 'position': 'relative',
-                        'background': '#1e1e2e'}),
+        # Flex row for dual charts
+        html.Div([
+            # Main chart (left)
+            html.Div([
+                html.Div(id='lwc-container',
+                         style={'width': '100%', 'height': '500px', 'position': 'relative',
+                                'background': '#1e1e2e'}),
+            ], style={'width': '49%', 'display': 'inline-block'}),
+
+            # Context chart (right) - Phase 3
+            html.Div([
+                # Context chart header with TF buttons
+                html.Div([
+                    html.Span('📊 Context Chart', style={'marginRight': '15px', 'fontWeight': 'bold',
+                                                        'fontSize': '14px', 'color': '#aaa'}),
+                    html.Button('1m',  id='tf2-1m',  n_clicks=0, className='tf-btn'),
+                    html.Button('5m',  id='tf2-5m',  n_clicks=0, className='tf-btn'),
+                    html.Button('15m', id='tf2-15m', n_clicks=0, className='tf-btn'),
+                    html.Button('30m', id='tf2-30m', n_clicks=0, className='tf-btn'),
+                    html.Button('1h',  id='tf2-1h',  n_clicks=0, className='tf-btn'),
+                    html.Button('1D',  id='tf2-1d',  n_clicks=0, className='tf-btn tf-active'),
+                ], style={'marginBottom': '10px', 'overflow': 'hidden', 'padding': '5px 0'}),
+
+                html.Div(id='lwc-container-2',
+                         style={'width': '100%', 'height': '500px', 'position': 'relative',
+                                'background': '#1e1e2e'}),
+            ], style={'width': '49%', 'display': 'inline-block', 'verticalAlign': 'top'}),
+        ], style={'display': 'flex', 'gap': '12px'}),
 
         dcc.Store(id='chart-data-store'),
         dcc.Store(id='chart-trigger-store'),
@@ -388,6 +413,11 @@ app.layout = html.Div([
         dcc.Store(id='indicators-data-store'),
         dcc.Store(id='trade-refresh-store', data=0),
         dcc.Store(id='trade-debug-store', data=None),
+        # Phase 3: Chart 2 stores
+        dcc.Store(id='chart2-data-store'),
+        dcc.Store(id='chart2-trigger-store'),
+        dcc.Store(id='chart2-meta-store', data={'load_count': 0, 'oldest_time': None, 'total_bars': 0, 'symbol': None, 'tf': None}),
+        dcc.Store(id='active-tf2-store', data='tf2-1d'),
 
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
@@ -740,6 +770,69 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
     except Exception as e:
         log("INFO", f"[CB] EXCEPTION: {e}")
         return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, f'❌ {e}'
+
+
+# ------------------------------------------------------------------
+# CHART 2 (Context Chart) - Phase 3
+# ------------------------------------------------------------------
+@app.callback(
+    [Output('chart2-data-store', 'data'),
+     Output('chart2-meta-store', 'data')],
+    [Input('load-chart-btn', 'n_clicks'),
+     Input('tf2-1m', 'n_clicks'), Input('tf2-5m', 'n_clicks'),
+     Input('tf2-15m', 'n_clicks'), Input('tf2-30m', 'n_clicks'),
+     Input('tf2-1h', 'n_clicks'), Input('tf2-1d', 'n_clicks')],
+    [State('symbol-input', 'value'),
+     State('asset-type-select', 'value'),
+     State('candles-count-input', 'value'),
+     State('chart2-meta-store', 'data')],
+    prevent_initial_call=True
+)
+def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
+                     symbol, asset_type, n_candles, meta):
+    """Load data for the context chart (chart 2). Simpler than main chart - no tick, no deep-load."""
+    try:
+        ctx = dash.callback_context
+        btn = (ctx.triggered[0]['prop_id'].split('.')[0]
+               if ctx.triggered else 'load-chart-btn')
+        tf_map = {'tf2-1m': '1 min', 'tf2-5m': '5 mins',
+                  'tf2-15m': '15 mins', 'tf2-30m': '30 mins',
+                  'tf2-1h': '1 hour', 'tf2-1d': '1 day'}
+
+        symbol     = (symbol or 'AAPL').upper()
+        asset_type = normalize_asset_type(asset_type)
+        n_candles  = max(10, min(500, int(n_candles or 60)))
+
+        # Determine TF from button click
+        if btn in tf_map:
+            tf = tf_map[btn]
+        else:
+            # Default to 1 day for context chart if not specified
+            tf = '1 day'
+
+        # Always do a full load (no append) for chart 2 per Phase 3 requirements
+        log("DEBUG", f"[CB2] LOAD: {symbol} ({asset_type}) | {tf} | n={n_candles} | Trigger={btn}")
+        bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=None)
+        log("DEBUG", f"[CB2] IB returned {len(bars)} bars")
+
+        if not bars:
+            return dash.no_update, dash.no_update
+
+        new_meta = {
+            'load_count': 1,
+            'oldest_time': bars[0]['time'] if bars else None,
+            'total_bars': len(bars),
+            'symbol': symbol,
+            'tf': tf,
+            'n_candles': n_candles
+        }
+
+        chart2_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars, 'mode': 'initial'}
+        return chart2_data, new_meta
+
+    except Exception as e:
+        log("INFO", f"[CB2] EXCEPTION: {e}")
+        return dash.no_update, dash.no_update
 
 
 @app.callback(
@@ -1711,6 +1804,34 @@ app.clientside_callback(
     Input('active-tf-store','data')
 )
 
+# Phase 3: Chart 2 - update active-tf2-store when tf2 buttons clicked
+app.clientside_callback(
+    """
+    function(tf2_1m,tf2_5m,tf2_15m,tf2_30m,tf2_1h,tf2_1d){
+        var ctx=dash_clientside.callback_context;
+        if(!ctx.triggered||ctx.triggered.length===0)return window.dash_clientside.no_update;
+        var tid=ctx.triggered_id||ctx.triggered[0].prop_id.split('.')[0];
+        return tid;
+    }
+    """,
+    Output('active-tf2-store', 'data'),
+    [Input('tf2-1m','n_clicks'),Input('tf2-5m','n_clicks'),Input('tf2-15m','n_clicks'),
+     Input('tf2-30m','n_clicks'),Input('tf2-1h','n_clicks'),Input('tf2-1d','n_clicks')]
+)
+
+# Phase 3: Chart 2 - update tf2 button classNames based on active-tf2-store
+app.clientside_callback(
+    """
+    function(activeTf2){
+        var ids=['tf2-1m','tf2-5m','tf2-15m','tf2-30m','tf2-1h','tf2-1d'];
+        return ids.map(function(id){return id===activeTf2?'tf-btn tf-active':'tf-btn';});
+    }
+    """,
+    [Output('tf2-1m','className'),Output('tf2-5m','className'),Output('tf2-15m','className'),
+     Output('tf2-30m','className'),Output('tf2-1h','className'),Output('tf2-1d','className')],
+    Input('active-tf2-store','data')
+)
+
 app.clientside_callback(
     """
     function(storeData){
@@ -1727,6 +1848,23 @@ app.clientside_callback(
     }
     """,
     Output('chart-trigger-store', 'data'), Input('chart-data-store', 'data')
+)
+
+# Phase 3: Chart 2 clientside callback - feeds chart2-data-store to lwcManager2.loadData()
+app.clientside_callback(
+    """
+    function(storeData){
+        var d=window.lwcDebug||function(){};
+        d('CB2','=== Chart2 clientside callback ===');
+        if(!storeData){d('CB2','storeData NULL -> no_update');return window.dash_clientside.no_update;}
+        if(!storeData.bars||storeData.bars.length===0){d('CB2','bars prazdne -> no_update');return window.dash_clientside.no_update;}
+        d('CB2','symbol='+storeData.symbol+' tf='+storeData.timeframe+' baru='+storeData.bars.length);
+        if(window.lwcManager2){d('CB2','volam lwcManager2.loadData()');window.lwcManager2.loadData(storeData);}
+        else{var a=0,r=setInterval(function(){a++;if(window.lwcManager2){window.lwcManager2.loadData(storeData);clearInterval(r);}else if(a>20){d('ERR','lwcManager2 nenalezen!');clearInterval(r);}},200);}
+        return storeData.symbol||'ok';
+    }
+    """,
+    Output('chart2-trigger-store', 'data'), Input('chart2-data-store', 'data')
 )
 
 app.clientside_callback(
@@ -1836,6 +1974,7 @@ app.index_string = '''
         <style>
             body { margin: 0; padding: 0; background: #1e1e2e; }
             #lwc-container { display: block; width: 100%; height: 500px; }
+            #lwc-container-2 { display: block; width: 100%; height: 500px; }
             .tf-btn, .qty-btn {
                 padding: 8px 15px; margin: 0 5px;
                 background: #2d2d3a; border: 2px solid #667eea;
