@@ -124,17 +124,22 @@
     // =================================================================
     function initChart() {
       initAttempts++;
+      writeDebug("INIT", "[" + containerId + "] initChart() attempt #" + initAttempts);
       container = document.getElementById(containerId);
       if (!container) {
+        writeDebug("ERR", "[" + containerId + "] Container NOT FOUND! Retrying in 200ms");
         setTimeout(initChart, 200);
         return;
       }
+      writeDebug("INIT", "[" + containerId + "] Container found, offsetWidth=" + container.offsetWidth);
       var w = container.offsetWidth;
       if (w === 0) {
+        writeDebug("WARN", "[" + containerId + "] Container width=0, retrying in 200ms (#" + initAttempts + ")");
         showPlaceholder("Cekam na vykreslovani... (" + initAttempts + ")");
         setTimeout(initChart, 200);
         return;
       }
+      writeDebug("INIT", "[" + containerId + "] Container width=" + w + "px, creating chart...");
       if (typeof LightweightCharts === "undefined") {
         writeDebug("ERR", "LightweightCharts NENI NACTENA!");
         showPlaceholder("CHYBA: CDN se nenactlo!");
@@ -244,18 +249,20 @@
     function loadData(storeData) {
       writeDebug(
         "DATA",
-        "loadData() symbol=" +
+        "[" + containerId + "] loadData() symbol=" +
           (storeData && storeData.symbol) +
           " | baru=" +
           (storeData && storeData.bars ? storeData.bars.length : "N/A"),
       );
 
       if (!chart || !candleSeries) {
+        writeDebug("WARN", "[" + containerId + "] chart/candleSeries not ready, retrying in 300ms");
         setTimeout(function () {
           loadData(storeData);
         }, 300);
         return;
       }
+      writeDebug("DATA", "[" + containerId + "] chart ready, processing " + (storeData.bars ? storeData.bars.length : 0) + " bars");
 
       var bars = storeData.bars || [];
       var symbol = storeData.symbol || "?";
@@ -1197,6 +1204,7 @@
     // Public API for this instance
     // =================================================================
     return {
+      initChart: initChart,
       loadData: loadData,
       prependData: prependData,
       testChart: testChart,
@@ -1231,8 +1239,13 @@
   // Auto-init main chart after DOM is ready
   setTimeout(function () {
     if (window.lwcManager && window.lwcManager.loadData) {
-      // Trigger the init via the manager
-      writeDebug("INIT", "lwcManager auto-init scheduled");
+      writeDebug("INIT", "lwcManager auto-init starting");
+      if (window.lwcManager.initChart) {
+        window.lwcManager.initChart();
+      }
+      if (window.lwcManager2 && window.lwcManager2.initChart) {
+        window.lwcManager2.initChart();
+      }
     }
   }, 300);
 })();

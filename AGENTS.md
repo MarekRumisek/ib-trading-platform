@@ -53,7 +53,7 @@ Always use PowerShell syntax. Use semicolons (;) to chain commands instead of &&
 Start: cd F:\ib-trading-platform; python app.py
 Wait for `✅ Connected to IB Gateway!` before interacting. App runs at http://localhost:8050.
 Stop / restart (always stop cleanly so IB API ports are released):
-taskkill /F /IM python.exe; Start-Sleep -Seconds 5; python app.py
+taskkill /F /IM python3.11.exe; Start-Sleep -Seconds 15; python3.11 app.py
 Test symbols (timezone: Prague CET/CEST):
 - AAPL — after 15:30 CET
 - EURUSD — before 15:30 CET
@@ -62,3 +62,7 @@ Test symbols (timezone: Prague CET/CEST):
 - **Playwright MCP** — browser automation, DOM inspection, screenshots (http://localhost:8050)
 - **Fetch MCP** — external documentation and web data
 Prefer MCP tools over assumptions. Verify fixes before marking a task as complete.
+IMPORTANT: On this system the Python executable is named `python3.11.exe`,
+NOT `python.exe`. Using `python.exe` or `taskkill /F /IM python.exe` will fail
+with "process not found". Always use `python3.11` to run scripts and
+`taskkill /F /IM python3.11.exe` to stop them.

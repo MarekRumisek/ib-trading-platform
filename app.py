@@ -371,16 +371,16 @@ app.layout = html.Div([
         ], style={'marginBottom': '10px', 'paddingTop': '10px',
                   'borderTop': '1px solid #3d3d4a'}),
 
-        # Flex row for dual charts
+        # Vertical stack for dual charts (one above the other)
         html.Div([
-            # Main chart (left)
+            # Main chart (top)
             html.Div([
                 html.Div(id='lwc-container',
                          style={'width': '100%', 'height': '500px', 'position': 'relative',
                                 'background': '#1e1e2e'}),
-            ], style={'width': '49%', 'display': 'inline-block'}),
+            ], style={'width': '100%', 'display': 'block', 'marginBottom': '12px'}),
 
-            # Context chart (right) - Phase 3
+            # Context chart (bottom) - Phase 3
             html.Div([
                 # Context chart header with TF buttons
                 html.Div([
@@ -395,10 +395,10 @@ app.layout = html.Div([
                 ], style={'marginBottom': '10px', 'overflow': 'hidden', 'padding': '5px 0'}),
 
                 html.Div(id='lwc-container-2',
-                         style={'width': '100%', 'height': '500px', 'position': 'relative',
+                         style={'width': '100%', 'height': '400px', 'position': 'relative',
                                 'background': '#1e1e2e'}),
-            ], style={'width': '49%', 'display': 'inline-block', 'verticalAlign': 'top'}),
-        ], style={'display': 'flex', 'gap': '12px'}),
+            ], style={'width': '100%', 'display': 'block'}),
+        ], style={'display': 'block'}),
 
         dcc.Store(id='chart-data-store'),
         dcc.Store(id='chart-trigger-store'),
