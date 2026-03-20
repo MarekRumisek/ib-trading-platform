@@ -200,140 +200,514 @@ dcc.Store(id='chart2-trigger-store'),
 
 ---
 
-## Phase 4 — Settings Section
+# Phase 4 — Settings Section ✅ DONE
 
-### 4.1 Settings UI Layout
-- **Files:** `app.py`
-- **Requires:** task 1.5 (ConfigStore) completed. ✅ Ready — `config_store` singleton available.
-- **Implementation hint:** Import `from modules.config_store import config_store`. Use `config_store.get(key)` to pre-fill fields, `config_store.set(key, value)` to save. Available config keys: `default_symbol`, `default_quantity`, `default_timeframe`, `default_asset_type`, `default_exchange`, `favorite_symbols`, `openrouter_api_key`, `llm_model`, `strategy_text`, `mm_rules_text`.
-- Add a new section/tab in the Dash layout for Settings. Include input fields for:
-  - OpenRouter API key (password-type input)
-  - LLM model selector (text input or dropdown — start with text input)
-  - Strategy / rules (large `dcc.Textarea`)
-  - Money management rules (large `dcc.Textarea`)
-  - Favorite symbols (comma-separated text input)
-  - Default quantity (number input)
-  - Default timeframe (dropdown matching existing timeframe options)
+**Context:**
+Branch: `feature/trade-management-collab-v3`. Read `PLAN.md` and `AGENTS.md` before starting.
+`config_store` singleton is already available — import via `from modules.config_store import config_store`.
+Use `config_store.get(key)` to pre-fill fields, `config_store.set(key, value)` to save.
+`config_store.get_all()` returns all keys merged with defaults.
 
-### 4.2 Settings Save/Load Callbacks
-- **Files:** `app.py`, `modules/config_store.py`
-- **Requires:** tasks 1.5 and 4.1 completed.
-- Add a "Save Settings" button. On click, read all settings fields and write them to `ConfigStore`.
-- On page load, populate all settings fields from `ConfigStore`.
+**Scope of this phase:** Trading preferences and app defaults only.
+Fields `openrouter_api_key`, `llm_model`, `strategy_text`, `mm_rules_text` are stored in
+`config_store` but are **NOT wired to any logic in this phase** — add them to the UI
+as plain inputs so they persist, but do not validate or use them. They will be activated in Phase 5.
 
----
-
-## Phase 5 — AI Integration: Suggest Entry
-
-> **⚠️ CRITICAL: Tasks 5.1–5.3 must be completed and tested before any other Phase 5 task proceeds. The JSON schema and parsing logic are the foundation of the entire AI integration.**
-
-### 5.1 Design AI Response JSON Schema
-- **Files:** new file `modules/ai_schema.py`
-- Define two Pydantic models (or plain Python dataclasses if Pydantic is not desired):
-  1. `EntryResponse` — for Phase 5 (Suggest Entry):
-     ```
-     recommendation: "BUY" | "SELL" | "NO_TRADE"
-     reason: str
-     order_type: "MARKET" | "LIMIT"
-     entry_price: float | null
-     sl: float
-     tp: float
-     quantity: int
-     rr_ratio: float
-     annotations: list[Annotation]
-     ```
-  2. `Annotation`:
-     ```
-     type: "horizontal_line" | "zone"
-     label: str
-     price: float  (for line)
-     price_from: float | null  (for zone)
-     price_to: float | null  (for zone)
-     color: str
-     ```
-  3. `PositionCheckResponse` — for Phase 6:
-     ```
-     action: "HOLD" | "CLOSE" | "MOVE_SL" | "MOVE_TP"
-     new_sl: float | null
-     new_tp: float | null
-     reason: str
-     ```
-- Add a `parse_entry_response(raw_json_str) -> EntryResponse` function that extracts JSON from LLM output (handle markdown code fences), validates it, and returns the typed object. Raise a clear error on parse failure.
-- Add a `parse_position_check_response(raw_json_str) -> PositionCheckResponse` similarly.
-- **Add `pydantic` to `requirements.txt`** if using Pydantic.
-
-### 5.2 Build System Prompt Templates
-- **Files:** new file `modules/ai_prompts.py`
-- Create function `build_entry_system_prompt()` that returns the system prompt string for Suggest Entry. The prompt must:
-  - Instruct the LLM to respond ONLY with a JSON object matching the `EntryResponse` schema (include the schema in the prompt).
-  - Forbid any text outside the JSON.
-  - Include placeholders for: strategy text, MM rules, balance, buying power.
-- Create function `build_entry_user_message(strategy, mm_rules, balance, buying_power, ohlcv_main, ohlcv_secondary, indicators)` that assembles the full user message with real data.
-- OHLCV data format: use compact CSV-like text, e.g., `"time,o,h,l,c,v\n1234567890,150.1,151.2,149.8,150.5,10000"` — this is the most token-efficient format.
-
-### 5.3 OpenRouter API Client
-- **Files:** new file `modules/ai_client.py`, `requirements.txt`
-- Create a function `call_openrouter(api_key, model, system_prompt, user_message) -> str` that:
-  - Sends a POST request to `https://openrouter.ai/api/v1/chat/completions`
-  - Headers: `Authorization: Bearer {api_key}`, `Content-Type: application/json`
-  - Body: `{ "model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}] }`
-  - Returns the response content string.
-  - Uses `requests` library (already in `requirements.txt`).
-  - Handles errors: timeout (30s), HTTP errors, missing API key.
-- **No conversation history** — each call is independent.
-
-### 5.4 AI Panel UI
-- **Files:** `app.py`
-- **Requires:** tasks 5.1, 5.2, 5.3 completed.
-- Add an AI panel section to the Dash layout with:
-  - "Evaluate" button
-  - Response display area (markdown or formatted text showing recommendation, reason, entry, SL, TP, qty, R/R)
-  - "Accept" and "Reject" buttons (initially hidden, shown after response)
-  - Loading spinner while waiting for LLM response
-
-### 5.5 Evaluate Button Callback
-- **Files:** `app.py`
-- **Requires:** tasks 5.1–5.4 completed, tasks 1.5 and 4.2 (settings) completed, task 3.3 (dual chart data) completed.
-- On "Evaluate" click:
-  1. Read settings from `ConfigStore` (API key, model, strategy, MM rules)
-  2. Get balance and buying power from `ib_gateway.get_account_info()`
-  3. Get OHLCV data from both charts (main + secondary timeframe) via `data_store`
-  4. Get current indicator values
-  5. Call `build_entry_user_message()` and `build_entry_system_prompt()`
-  6. Call `call_openrouter()`
-  7. Parse response with `parse_entry_response()`
-  8. Display result in AI panel
-  9. Show Accept/Reject buttons
-- Handle errors gracefully: show error message in AI panel if parsing fails or API errors.
-
-### 5.6 Accept Button — Auto-Fill and Submit
-- **Files:** `app.py`
-- **Requires:** task 5.5 completed.
-- On "Accept" click: read the parsed `EntryResponse` from a `dcc.Store`, fill the Order Entry fields (side, quantity, SL, TP, order type, limit price if applicable), and trigger order submission.
-
-### 5.7 Chart Annotations from AI Response
-- **Files:** `assets/chart_manager.js`, `app.py`
-- **Requires:** task 5.5 completed, task 3.1 (chart refactor) completed.
-- In `chart_manager.js`: add functions to render horizontal price lines and zones (colored rectangles) on the chart. The function should accept a list of annotation objects.
-- In `app.py`: after a successful Evaluate response, pass the `annotations` list to the frontend via a `dcc.Store` or clientside callback.
-- Add logic to clear previous AI annotations when a new Evaluate is triggered or when Reject is clicked.
+**Implementation notes:**
+- Settings section added at bottom of layout (after Trade History)
+- Toggle button shows/hides settings-content div (default: hidden)
+- Settings load uses `dcc.Interval` with `max_intervals=1` to fire once on page load
+- Save callback syncs to app_state and UI components immediately
+- AI section visible but clearly marked as Phase 5
 
 ---
 
-## Phase 6 — AI Integration: Check Open Position
+## Task 4.1 — Settings UI Layout ✅ DONE
 
-### 6.1 Position Check Prompt Builder
-- **Files:** `modules/ai_prompts.py`
-- **Requires:** task 5.2 completed.
-- Create function `build_position_check_system_prompt()` — similar to entry prompt but focused on reviewing a running trade. Include the `PositionCheckResponse` JSON schema in the prompt.
-- Create function `build_position_check_user_message(strategy, ohlcv_main, ohlcv_secondary, indicators, entry_price, current_sl, current_tp, current_pnl)`.
+**File:** `app.py`
 
-### 6.2 Check Position Button and Callback
-- **Files:** `app.py`
-- **Requires:** tasks 6.1, 5.3, 5.1 completed.
-- Add a "Check Position" button to each row in the Open Positions table.
-- On click: assemble context (no MM rules for this query), call OpenRouter, parse with `parse_position_check_response()`, display result in AI panel.
-- Show action button: if action is `CLOSE`, show "Close Position" button. If `MOVE_SL` or `MOVE_TP`, show "Apply" button that updates the trade's SL/TP.
+**Layout structure (lines 585-711):**
+- Outer `html.Div` with toggle button `settings-toggle-btn`
+- Inner `html.Div` (id=`settings-content`, style=`display:none`) with all settings fields
+- Hidden `dcc.Interval` (id=`settings-load-trigger`) for page-load population
+
+**Section A — App Defaults:**
+- **Favorite symbols** — `dcc.Input(type='text')`, id=`settings-favorites`,
+  placeholder: `"AAPL, EURUSD, TSLA"` (comma-separated)
+- **Default quantity** — `dcc.Input(type='number')`, id=`settings-default-qty`, min=1
+- **Default timeframe** — `dcc.Dropdown` with same options as main TF selector (`1 min` / `5 mins` / `15 mins` / `30 mins` / `1 hour` / `1 day`), id=`settings-default-tf`
+- **Default asset type** — `dcc.Dropdown` (STOCK / FOREX / CRYPTO), id=`settings-default-asset`
+- **Default exchange** — `dcc.Dropdown` (SMART / IBIS / AEB / SBF), id=`settings-default-exchange`
+
+**Section B — AI Configuration (inactive, Phase 5):**
+Show a clearly visible note: `"⚠️ AI settings — will be activated in Phase 5"`
+- **OpenRouter API key** — `dcc.Input(type='password')`, id=`settings-api-key`
+- **LLM model** — `dcc.Input(type='text')`, id=`settings-llm-model`,
+  placeholder: `"e.g. anthropic/claude-3.5-haiku"`
+- **Strategy / rules** — `dcc.Textarea`, id=`settings-strategy`, rows=6,
+  placeholder: `"Describe your trading strategy and entry rules..."`
+- **Money management rules** — `dcc.Textarea`, id=`settings-mm-rules`, rows=4,
+  placeholder: `"e.g. max 2% risk per trade, max 3 open positions..."`
+
+**Buttons:**
+- `"💾 Save Settings"` — id=`settings-save-btn`
+- Feedback span — id=`settings-save-feedback`
+**Section A — App Defaults:**
+- **Favorite symbols** — `dcc.Input(type='text')`, id=`settings-favorites`,
+  placeholder: `"AAPL, EURUSD, TSLA"` (comma-separated)
+- **Default quantity** — `dcc.Input(type='number')`, id=`settings-default-qty`, min=1
+- **Default timeframe** — `dcc.Dropdown` with same options as main TF selector (`1 min` / `5 mins` / `15 mins` / `30 mins` / `1 hour` / `1 day`), id=`settings-default-tf`
+- **Default asset type** — `dcc.Dropdown` (STOCK / FOREX / CRYPTO), id=`settings-default-asset`
+- **Default exchange** — `dcc.Dropdown` (SMART / IBIS / AEB / SBF), id=`settings-default-exchange`
+
+**Section B — AI Configuration (inactive, Phase 5):**
+Show a clearly visible note: `"⚠️ AI settings — will be activated in Phase 5"`
+- **OpenRouter API key** — `dcc.Input(type='password')`, id=`settings-api-key`
+- **LLM model** — `dcc.Input(type='text')`, id=`settings-llm-model`,
+  placeholder: `"e.g. anthropic/claude-3.5-haiku"`
+- **Strategy / rules** — `dcc.Textarea`, id=`settings-strategy`, rows=6,
+  placeholder: `"Describe your trading strategy and entry rules..."`
+- **Money management rules** — `dcc.Textarea`, id=`settings-mm-rules`, rows=4,
+  placeholder: `"e.g. max 2% risk per trade, max 3 open positions..."`
+
+**Buttons:**
+- `"💾 Save Settings"` — id=`settings-save-btn`
+- Feedback span — id=`settings-save-feedback`
+
+---
+
+## Task 4.2 — Settings Save / Load Callbacks ✅ DONE
+
+**File:** `app.py`
+
+**Callbacks added (lines 1010-1110):**
+
+1. `toggle_settings(n_clicks)` — lines 1013-1019
+   - Output: `settings-content.style`
+   - Input: `settings-toggle-btn.n_clicks`
+   - Toggles between `{'display': 'block'}` and `{'display': 'none'}`
+
+2. `load_settings(n_intervals)` — lines 1025-1053
+   - Outputs: all 9 settings field values
+   - Input: `settings-load-trigger.n_intervals` (fires once via `max_intervals=1`)
+   - Reads from `config_store.get_all()`, converts `favorite_symbols` list to comma-separated string
+
+3. `save_settings(n_clicks, ...)` — lines 1059-1110
+   - Outputs: `settings-save-feedback.children`, `symbol-input.value`, `qty-custom.value`, `asset-type-select.value`, `exchange-select.value`
+   - Input: `settings-save-btn.n_clicks`
+   - States: all 9 settings field values
+   - Parses `favorite_symbols` from comma-separated string to list
+   - Saves all values to `config_store`
+   - Syncs `app_state` and UI components
+
+---
+
+## Task 4.3 — Sync Defaults Back to App State ✅ DONE
+
+**File:** `app.py`
+
+After saving, the `save_settings` callback immediately updates:
+- `app_state['current_timeframe']` = saved default_timeframe
+- `app_state['current_asset_type']` = saved default_asset_type
+- `app_state['current_exchange']` = saved default_exchange
+- `set_default_exchange()` called to sync with contract_utils
+- `symbol-input.value` = first favorite symbol (or 'AAPL' if none)
+- `qty-custom.value` = saved default_quantity
+- `asset-type-select.value` = saved default_asset_type
+- `exchange-select.value` = saved default_exchange
+
+---
+
+## Constraints ✅ VERIFIED
+
+- ✅ Do NOT wire up any AI fields to callbacks — save/load only
+- ✅ Do NOT touch any existing callback or layout outside the Settings section
+- ✅ Do NOT log the API key value anywhere
+- If anything is ambiguous, make the conservative choice, document it in a code comment
+  and in your final summary
+- After finishing, list every file changed and every callback added
+
+## Files Changed
+
+- `app.py` — Added Settings UI layout (lines 585-711) and 3 callbacks (lines 1010-1110)
+
+## Callbacks Added
+
+1. `toggle_settings` — show/hide settings section
+2. `load_settings` — populate fields from config_store on page load
+3. `save_settings` — save settings to config_store and sync to app_state/UI
+
+## Verify Before Finishing ✅ VERIFIED
+
+- ✅ Settings section toggles open/closed (toggle button works)
+- ✅ All fields pre-fill from `config_store` on page load (via `settings-load-trigger`)
+- ✅ Save writes to `data/config.json` (via `config_store.set()`)
+- ✅ After save, `symbol-input`, `qty-custom` and other defaults reflect new values immediately
+- ✅ AI section visible but marked as inactive (with warning note)
+
+---
+
+# Phase 5 — AI Integration: Suggest Entry
+
+> **⚠️ Tasks 5.1–5.3 are pure backend modules with no UI dependency.
+> They must be completed and manually tested before tasks 5.4–5.7.**
+
+**Context:**
+This phase adds AI-assisted trade evaluation. The user clicks "Evaluate", the app assembles
+a structured context (chart data + indicators + account info + strategy), sends it to an LLM
+via OpenRouter API, receives a structured JSON response, and displays it with Accept/Reject buttons.
+Each LLM call is a **fresh, independent context window** — no conversation history is sent.
+The LLM acts as an analytical assistant. Accepting a suggestion auto-fills Order Entry and submits.
+
+**Prerequisites from previous phases:**
+- `config_store` with `openrouter_api_key`, `llm_model`, `strategy_text`, `mm_rules_text` — ✅ Phase 4
+- `data_store` for OHLCV data access — ✅ already in codebase
+- Dual chart with `chart2-data-store` — ✅ Phase 3
+- `ib_gateway.get_account_info()` for balance/buying power — ✅ already in codebase
+
+---
+
+## Task 5.1 — AI Response JSON Schema
+
+**File:** new file `modules/ai_schema.py`
+
+Define the following using Python dataclasses (do NOT add Pydantic — keep dependencies minimal):
+
+```python
+@dataclass
+class Annotation:
+    type: str          # "horizontal_line" or "zone"
+    label: str
+    price: float       # used for horizontal_line
+    price_from: float  # used for zone (None if type == horizontal_line)
+    price_to: float    # used for zone (None if type == horizontal_line)
+    color: str         # hex color string e.g. "#ff9800"
+
+@dataclass
+class EntryResponse:
+    recommendation: str   # "BUY", "SELL", or "NO_TRADE"
+    reason: str
+    order_type: str       # "MARKET" or "LIMIT"
+    entry_price: float    # None if order_type == "MARKET"
+    sl: float
+    tp: float
+    quantity: int
+    rr_ratio: float
+    annotations: list     # list of Annotation objects
+
+@dataclass
+class PositionCheckResponse:
+    action: str           # "HOLD", "CLOSE", "MOVE_SL", or "MOVE_TP"
+    new_sl: float         # None if action is not MOVE_SL
+    new_tp: float         # None if action is not MOVE_TP
+    reason: str
+```
+
+Add a `parse_entry_response(raw: str) -> EntryResponse` function that:
+- Strips markdown code fences if present (` ```json ... ``` `)
+- Parses JSON
+- Validates required fields — raises `ValueError` with a descriptive message on failure
+- Returns a populated `EntryResponse` with nested `Annotation` objects
+
+Add `parse_position_check_response(raw: str) -> PositionCheckResponse` similarly.
+
+**Test:** add a simple `if __name__ == '__main__'` block at the bottom that parses a hardcoded
+valid JSON string and prints the result — this is the only test needed.
+
+---
+
+## Task 5.2 — System Prompt and User Message Builders
+
+**File:** new file `modules/ai_prompts.py`
+
+```python
+def build_entry_system_prompt(strategy: str, mm_rules: str) -> str:
+    ...
+
+def build_entry_user_message(
+    balance: float,
+    buying_power: float,
+    ohlcv_main: list,       # list of bar dicts from data_store
+    tf_main: str,
+    ohlcv_secondary: list,
+    tf_secondary: str,
+    indicators: dict        # current indicator values from /api/indicators/
+) -> str:
+    ...
+```
+
+**System prompt must:**
+- Tell the LLM its role: analyze the provided chart data and return a trade suggestion
+- Include the full `EntryResponse` JSON schema (field names + allowed values) inline in the prompt
+- Instruct the LLM to respond with **only** a valid JSON object — no text outside the JSON
+- Include `strategy` and `mm_rules` as context sections
+
+**User message must:**
+- Include balance and buying power
+- Include OHLCV data for both charts in compact CSV format:
+  `"time,o,h,l,c,v\n{unix_ts},{o},{h},{l},{c},{v}\n..."` — one row per bar
+- Include current indicator values (compact format, e.g. `"EMA20: 151.3, RSI14: 58.2"`)
+- Label each section clearly so the LLM can parse context easily
+
+```python
+def build_position_check_system_prompt(strategy: str) -> str:
+    ...
+
+def build_position_check_user_message(
+    ohlcv_main: list, tf_main: str,
+    ohlcv_secondary: list, tf_secondary: str,
+    indicators: dict,
+    entry_price: float, current_sl: float, current_tp: float, current_pnl: float
+) -> str:
+    ...
+```
+
+Position check system prompt: same pattern as entry prompt but focused on reviewing
+a running trade. Include `PositionCheckResponse` schema. MM rules are NOT included
+in position check queries (per PLAN.md).
+
+---
+
+## Task 5.3 — OpenRouter API Client
+
+**File:** new file `modules/ai_client.py`
+
+```python
+def call_openrouter(api_key: str, model: str, system_prompt: str, user_message: str) -> str:
+    ...
+```
+
+- POST to `https://openrouter.ai/api/v1/chat/completions`
+- Headers: `Authorization: Bearer {api_key}`, `Content-Type: application/json`,
+  `HTTP-Referer: http://localhost:8050` (required by OpenRouter)
+- Body: `{"model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_message}]}`
+- Timeout: 60 seconds
+- Returns the content string from `response['choices'][0]['message']['content']`
+- Raises descriptive exceptions for: missing API key, HTTP errors, timeout, malformed response
+- Uses `requests` (already in project — do NOT add to `requirements.txt`)
+- Do NOT log the API key value anywhere
+
+**Test:** add `if __name__ == '__main__'` block that calls the function with env var
+`OPENROUTER_API_KEY` and a simple prompt, prints the raw response.
+
+---
+
+## Task 5.4 — AI Panel UI
+
+**File:** `app.py`
+
+**Requires:** Tasks 5.1, 5.2, 5.3 complete.
+
+Add an AI panel section between Order Entry and Open Positions in the layout.
+
+**Contents:**
+- Section title: `"🤖 AI Trade Advisor"`
+- `"🔍 Evaluate"` button — id=`ai-evaluate-btn`
+- Loading spinner (`dcc.Loading`) wrapping the response display area
+- Response display area — id=`ai-response-display` (styled `html.Div`, hidden until response)
+- `"✅ Accept"` button — id=`ai-accept-btn`, initially hidden
+- `"❌ Reject"` button — id=`ai-reject-btn`, initially hidden
+- `dcc.Store(id='ai-entry-response-store')` — stores the parsed response as dict for Accept callback
+- Error display area — id=`ai-error-display`
+
+**Response display format** (shown after successful Evaluate):
+```
+Recommendation: BUY  |  Order: MARKET  |  R/R: 1:2.4
+Entry: $151.20   SL: $149.80   TP: $154.00   Qty: 5
+Reason: <reason text>
+```
+
+---
+
+## Task 5.5 — Evaluate Button Callback
+
+**File:** `app.py`
+
+**Requires:** Tasks 5.1–5.4 complete.
+
+On `ai-evaluate-btn` click:
+1. Read from `config_store`: `openrouter_api_key`, `llm_model`, `strategy_text`, `mm_rules_text`
+2. Validate: if `openrouter_api_key` or `llm_model` is empty → show error
+   `"⚠️ Set OpenRouter API key and model in Settings first"`, return early
+3. Call `ib_gateway.get_account_info()` for balance and buying power
+4. Get OHLCV bars for main chart from `data_store.get_bars(symbol, tf)`
+   — use `app_state['current_symbol']`, `app_state['current_timeframe']`
+5. Get OHLCV bars for secondary chart from `data_store.get_bars(symbol, tf2)`
+   — secondary TF comes from `active-tf2-store` State
+6. Get current indicator values: call `/api/indicators/{symbol}/{tf}` internally
+   via `requests.get(f'http://localhost:8050/api/indicators/...')` or call the
+   indicator calculation functions directly — prefer direct function call to avoid
+   HTTP overhead
+7. Call `build_entry_system_prompt()` and `build_entry_user_message()`
+8. Call `call_openrouter()`
+9. Call `parse_entry_response()` on the result
+10. Store the parsed response dict in `ai-entry-response-store`
+11. Populate `ai-response-display` and show Accept/Reject buttons
+
+Handle all errors gracefully — show error text in `ai-error-display`, never crash the app.
+
+---
+
+## Task 5.6 — Accept Button: Auto-Fill and Submit Order
+
+**File:** `app.py`
+
+**Requires:** Task 5.5 complete.
+
+On `ai-accept-btn` click:
+- Read parsed response from `ai-entry-response-store`
+- Set Order Entry fields:
+  - `order-type-select` → `response.order_type`
+  - `limit-price-input` → `response.entry_price` (if LIMIT)
+  - `sl-price-input` → `response.sl`
+  - `tp-price-input` → `response.tp`
+  - `qty-custom` → `response.quantity`
+- Trigger BUY or SELL based on `response.recommendation`
+  — set `buy-btn` or `sell-btn` `n_clicks` to trigger the existing `place_order` callback
+- Hide Accept/Reject buttons after click
+
+**Do NOT duplicate order submission logic** — reuse the existing `place_order` callback
+by populating its input fields and firing the appropriate button click.
+
+---
+
+## Task 5.7 — Chart Annotations from AI Response
+
+**Files:** `assets/chart_manager.js`, `app.py`
+
+**Requires:** Tasks 5.5 complete, Phase 3 chart refactor complete.
+
+**In `chart_manager.js`** — add to `lwcManager` public API (main chart only):
+
+```js
+setAiAnnotations(annotations)  // renders lines/zones, clears previous ones
+clearAiAnnotations()
+```
+
+- Horizontal lines: use `createPriceLine()` on `candleSeries` (same as existing trade lines)
+- Zones: LWC does not natively support filled rectangles — implement as two price lines
+  (top + bottom of zone) with the same label and a distinct `lineStyle`
+- Store rendered annotation references in an instance-local array `aiAnnotationLines`
+
+**In `app.py`:**
+- Add `dcc.Store(id='ai-annotations-store')`
+- After successful Evaluate, populate `ai-annotations-store` with `response.annotations`
+- Add a clientside callback: `ai-annotations-store` → calls `lwcManager.setAiAnnotations(data)`
+- On Reject click: clear `ai-annotations-store` (set to `None`) →
+  clientside callback calls `lwcManager.clearAiAnnotations()`
+
+---
+
+## Constraints
+
+- Do NOT add Pydantic or any new library — use stdlib only
+- Do NOT log the API key anywhere
+- Do NOT modify existing callbacks — extend or add new ones only
+- If anything is ambiguous, make the conservative choice, document in a code comment
+  and in your final summary
+- After finishing, list every file created/changed and every function/callback added
+
+## Verify Before Finishing
+
+- Evaluate button shows spinner while waiting
+- Valid API key + model → response renders correctly
+- Accept fills Order Entry fields and triggers order
+- Reject hides Accept/Reject and clears chart annotations
+- Empty API key → error message shown, no crash
+- Annotations appear on main chart after Evaluate, clear on Reject
+
+---
+
+# Phase 6 — AI Integration: Check Open Position
+
+**Context:**
+This phase adds a second type of AI query: reviewing a currently open trade.
+The user clicks "Check Position" on a specific open trade, the app assembles
+context without MM rules (per PLAN.md), sends it to the LLM, and displays
+a structured recommendation with one-click action buttons.
+
+**Prerequisites:**
+- `modules/ai_schema.py` with `PositionCheckResponse` — ✅ Phase 5, Task 5.1
+- `modules/ai_prompts.py` with position check builders — ✅ Phase 5, Task 5.2
+- `modules/ai_client.py` with `call_openrouter()` — ✅ Phase 5, Task 5.3
+- Open Positions table with per-row dynamic button IDs — ✅ already uses `{'type': ..., 'trade_id': ...}` pattern
+
+---
+
+## Task 6.1 — Check Position Button in Positions Table
+
+**File:** `app.py`
+
+Add a `"🤖 Check"` button to each row in the Open Positions table alongside the
+existing `⟲ BE` and `✖` buttons. Use the same dynamic ID pattern already in use:
+`id={'type': 'check-pos-btn', 'trade_id': trade_id}`
+
+---
+
+## Task 6.2 — Check Position Callback
+
+**File:** `app.py`
+
+**Requires:** Task 6.1 complete.
+
+On `check-pos-btn` click (pattern match, same as existing `close-pos-btn`):
+1. Read `trade_id` from the triggered button ID
+2. Get trade details from `trade_tracker.get_trade(trade_id)`
+   — need: `symbol`, `asset_type`, `entry_price` (or `avg_cost`), `sl`, `tp`, current P&L
+3. Read from `config_store`: `openrouter_api_key`, `llm_model`, `strategy_text`
+4. Validate: if key or model empty → show error in `ai-response-display`, return early
+5. Get OHLCV from `data_store` for both chart timeframes (same as Task 5.5 steps 4–5)
+6. Get current indicator values (same approach as Task 5.5 step 6)
+7. Call `build_position_check_system_prompt()` and `build_position_check_user_message()`
+8. Call `call_openrouter()`
+9. Parse with `parse_position_check_response()`
+10. Display result in `ai-response-display` (reuse same display area as Evaluate):
+    ```
+    Action: MOVE_SL  |  New SL: $150.20
+    Reason: <reason text>
+    ```
+11. Show context-appropriate action button:
+    - `CLOSE` → show `"✖ Close Position"` button (id=`ai-action-btn`, stored action in `dcc.Store`)
+    - `MOVE_SL` or `MOVE_TP` → show `"✔ Apply"` button
+    - `HOLD` → show no action button, only `"❌ Dismiss"`
+
+---
+
+## Task 6.3 — Apply Action Callback
+
+**File:** `app.py`
+
+**Requires:** Task 6.2 complete.
+
+On `ai-action-btn` click:
+- Read parsed `PositionCheckResponse` and `trade_id` from `dcc.Store`
+- `CLOSE`: call the same logic as `close_single_position` callback — reuse via shared helper function
+- `MOVE_SL`: call `trade_tracker.patch_trade(trade_id, {'sl': new_sl})`
+- `MOVE_TP`: call `trade_tracker.patch_trade(trade_id, {'tp': new_tp})`
+- Show feedback in `ai-response-display`
+- Increment `trade-refresh-store` to trigger positions table refresh
+
+---
+
+## Constraints
+
+- Reuse `ai-response-display`, `ai-error-display`, and `ai-entry-response-store` from Phase 5
+  — do NOT create duplicate display areas
+- Do NOT include MM rules in position check queries (per PLAN.md)
+- Do NOT log the API key value anywhere
+- If anything is ambiguous, make the conservative choice, document in a code comment
+  and in your final summary
+- After finishing, list every file changed and every callback added
+
+## Verify Before Finishing
+
+- "Check" button appears on each open position row
+- Clicking it shows spinner then AI response in the AI panel
+- MOVE_SL / MOVE_TP → Apply updates the trade in `trades.json`
+- CLOSE → closes the position via IB and updates `trades.json`
+- HOLD → shows only Dismiss button, no action taken
+- Empty API key → error shown, no crash
+
 
 ---
 

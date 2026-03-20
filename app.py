@@ -582,6 +582,134 @@ app.layout = html.Div([
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
+    # ================================================================
+    # SETTINGS
+    # ================================================================
+    html.Div([
+        html.Div([
+            html.Button('⚙️ Settings', id='settings-toggle-btn', n_clicks=0,
+                        style={'background': '#2d2d3a', 'color': 'white', 'border': 'none',
+                               'padding': '10px 20px', 'borderRadius': '5px', 'cursor': 'pointer'}),
+        ]),
+        html.Div(id='settings-content', style={'display': 'none'}, children=[
+            html.H4('App Defaults', style={'marginTop': '15px', 'marginBottom': '10px'}),
+
+            # Favorite symbols
+            html.Div([
+                html.Label('Favorite symbols', style={'marginRight': '10px'}),
+                dcc.Input(id='settings-favorites', type='text', placeholder='AAPL, EURUSD, TSLA',
+                          style={'width': '250px', 'padding': '8px', 'borderRadius': '5px'}),
+            ], style={'marginBottom': '10px', 'display': 'flex', 'alignItems': 'center'}),
+
+            # Default quantity
+            html.Div([
+                html.Label('Default quantity', style={'marginRight': '10px'}),
+                dcc.Input(id='settings-default-qty', type='number', min=1,
+                          style={'width': '100px', 'padding': '8px', 'borderRadius': '5px'}),
+            ], style={'marginBottom': '10px', 'display': 'flex', 'alignItems': 'center'}),
+
+            # Default timeframe
+            html.Div([
+                html.Label('Default timeframe', style={'marginRight': '10px'}),
+                dcc.Dropdown(
+                    id='settings-default-tf',
+                    options=[
+                        {'label': '1 min', 'value': '1 min'},
+                        {'label': '5 mins', 'value': '5 mins'},
+                        {'label': '15 mins', 'value': '15 mins'},
+                        {'label': '30 mins', 'value': '30 mins'},
+                        {'label': '1 hour', 'value': '1 hour'},
+                        {'label': '1 day', 'value': '1 day'},
+                    ],
+                    value='5 mins',
+                    style={'width': '150px'},
+                    clearable=False,
+                ),
+            ], style={'marginBottom': '10px', 'display': 'flex', 'alignItems': 'center'}),
+
+            # Default asset type
+            html.Div([
+                html.Label('Default asset type', style={'marginRight': '10px'}),
+                dcc.Dropdown(
+                    id='settings-default-asset',
+                    options=[
+                        {'label': 'STOCK', 'value': 'STOCK'},
+                        {'label': 'FOREX', 'value': 'FOREX'},
+                        {'label': 'CRYPTO', 'value': 'CRYPTO'},
+                    ],
+                    value='STOCK',
+                    style={'width': '150px'},
+                    clearable=False,
+                ),
+            ], style={'marginBottom': '10px', 'display': 'flex', 'alignItems': 'center'}),
+
+            # Default exchange
+            html.Div([
+                html.Label('Default exchange', style={'marginRight': '10px'}),
+                dcc.Dropdown(
+                    id='settings-default-exchange',
+                    options=[
+                        {'label': 'SMART', 'value': 'SMART'},
+                        {'label': 'IBIS', 'value': 'IBIS'},
+                        {'label': 'AEB', 'value': 'AEB'},
+                        {'label': 'SBF', 'value': 'SBF'},
+                    ],
+                    value='SMART',
+                    style={'width': '150px'},
+                    clearable=False,
+                ),
+            ], style={'marginBottom': '20px', 'display': 'flex', 'alignItems': 'center'}),
+
+            # AI Configuration section (inactive, Phase 5)
+            html.H4('AI Configuration (Phase 5)', style={'marginBottom': '10px', 'color': '#ffeb3b'}),
+            html.Div('⚠️ AI settings — will be activated in Phase 5',
+                     style={'marginBottom': '15px', 'fontStyle': 'italic', 'color': '#ff9800'}),
+
+            # OpenRouter API key
+            html.Div([
+                html.Label('OpenRouter API key', style={'marginRight': '10px', 'width': '150px'}),
+                dcc.Input(id='settings-api-key', type='password',
+                          placeholder='sk-or-...',
+                          style={'width': '300px', 'padding': '8px', 'borderRadius': '5px'}),
+            ], style={'marginBottom': '10px', 'display': 'flex', 'alignItems': 'center'}),
+
+            # LLM model
+            html.Div([
+                html.Label('LLM model', style={'marginRight': '10px', 'width': '150px'}),
+                dcc.Input(id='settings-llm-model', type='text',
+                          placeholder='e.g. anthropic/claude-3.5-haiku',
+                          style={'width': '300px', 'padding': '8px', 'borderRadius': '5px'}),
+            ], style={'marginBottom': '10px', 'display': 'flex', 'alignItems': 'center'}),
+
+            # Strategy / rules
+            html.Div([
+                html.Label('Strategy / rules', style={'marginRight': '10px', 'width': '150px', 'verticalAlign': 'top'}),
+                dcc.Textarea(id='settings-strategy', rows=6,
+                              placeholder='Describe your trading strategy and entry rules...',
+                              style={'width': '400px', 'padding': '8px', 'borderRadius': '5px'}),
+            ], style={'marginBottom': '10px', 'display': 'flex', 'alignItems': 'flex-start'}),
+
+            # Money management rules
+            html.Div([
+                html.Label('Money management', style={'marginRight': '10px', 'width': '150px', 'verticalAlign': 'top'}),
+                dcc.Textarea(id='settings-mm-rules', rows=4,
+                              placeholder='e.g. max 2% risk per trade, max 3 open positions...',
+                              style={'width': '400px', 'padding': '8px', 'borderRadius': '5px'}),
+            ], style={'marginBottom': '15px', 'display': 'flex', 'alignItems': 'flex-start'}),
+
+            # Save button and feedback
+            html.Div([
+                html.Button('💾 Save Settings', id='settings-save-btn', n_clicks=0,
+                            style={'background': '#4caf50', 'color': 'white', 'border': 'none',
+                                   'padding': '10px 20px', 'borderRadius': '5px', 'cursor': 'pointer'}),
+                html.Span(id='settings-save-feedback', style={'marginLeft': '15px'}),
+            ]),
+        ]),
+        # Hidden Interval to trigger settings load on page start
+        dcc.Interval(id='settings-load-trigger', interval=100, max_intervals=1),
+    ], style={'padding': '20px', 'background': '#2d2d3a',
+              'borderRadius': '8px', 'marginBottom': '20px'}),
+
     dcc.Interval(id='cache-update-interval',     interval=2000,  n_intervals=0),
     dcc.Interval(id='price-update-interval',     interval=10000, n_intervals=0),
     dcc.Interval(id='positions-update-interval', interval=10000, n_intervals=0),
@@ -877,6 +1005,109 @@ def update_exchange(exchange):
     config_store.set('default_exchange', exchange)
     log("INFO", f"[EXCHANGE] Changed to: {exchange}")
     return dash.no_update
+
+
+# ------------------------------------------------------------------
+# SETTINGS: toggle show/hide
+# ------------------------------------------------------------------
+@app.callback(
+    Output('settings-content', 'style'),
+    Input('settings-toggle-btn', 'n_clicks'),
+    prevent_initial_call=True
+)
+def toggle_settings(n_clicks):
+    return {'display': 'block'} if n_clicks % 2 == 1 else {'display': 'none'}
+
+
+# ------------------------------------------------------------------
+# SETTINGS: load settings from config_store on page start
+# ------------------------------------------------------------------
+@app.callback(
+    [Output('settings-favorites', 'value'),
+     Output('settings-default-qty', 'value'),
+     Output('settings-default-tf', 'value'),
+     Output('settings-default-asset', 'value'),
+     Output('settings-default-exchange', 'value'),
+     Output('settings-api-key', 'value'),
+     Output('settings-llm-model', 'value'),
+     Output('settings-strategy', 'value'),
+     Output('settings-mm-rules', 'value')],
+    Input('settings-load-trigger', 'n_intervals'),
+    prevent_initial_call=True
+)
+def load_settings(n_intervals):
+    cfg = config_store.get_all()
+    # favorite_symbols is a list - convert to comma-separated string
+    fav = cfg.get('favorite_symbols', [])
+    fav_str = ", ".join(fav) if isinstance(fav, list) else str(fav)
+    return (
+        fav_str,
+        cfg.get('default_quantity', 1),
+        cfg.get('default_timeframe', '5 mins'),
+        cfg.get('default_asset_type', 'STOCK'),
+        cfg.get('default_exchange', 'SMART'),
+        cfg.get('openrouter_api_key', ''),
+        cfg.get('llm_model', ''),
+        cfg.get('strategy_text', ''),
+        cfg.get('mm_rules_text', ''),
+    )
+
+
+# ------------------------------------------------------------------
+# SETTINGS: save settings and sync to app_state / UI components
+# ------------------------------------------------------------------
+@app.callback(
+    [Output('settings-save-feedback', 'children'),
+     Output('symbol-input', 'value'),
+     Output('qty-custom', 'value'),
+     Output('asset-type-select', 'value'),
+     Output('exchange-select', 'value')],
+    Input('settings-save-btn', 'n_clicks'),
+    [State('settings-favorites', 'value'),
+     State('settings-default-qty', 'value'),
+     State('settings-default-tf', 'value'),
+     State('settings-default-asset', 'value'),
+     State('settings-default-exchange', 'value'),
+     State('settings-api-key', 'value'),
+     State('settings-llm-model', 'value'),
+     State('settings-strategy', 'value'),
+     State('settings-mm-rules', 'value')],
+    prevent_initial_call=True
+)
+def save_settings(n_clicks, fav_str, default_qty, default_tf, default_asset,
+                  default_exchange, api_key, llm_model, strategy_text, mm_rules_text):
+    # Parse favorite symbols from comma-separated string to list
+    favorite_symbols = [s.strip() for s in (fav_str or '').split(',') if s.strip()]
+
+    # Save all values to config_store
+    config_store.set('favorite_symbols', favorite_symbols)
+    config_store.set('default_quantity', default_qty or 1)
+    config_store.set('default_timeframe', default_tf or '5 mins')
+    config_store.set('default_asset_type', default_asset or 'STOCK')
+    config_store.set('default_exchange', default_exchange or 'SMART')
+    config_store.set('openrouter_api_key', api_key or '')
+    config_store.set('llm_model', llm_model or '')
+    config_store.set('strategy_text', strategy_text or '')
+    config_store.set('mm_rules_text', mm_rules_text or '')
+
+    # Sync to app_state
+    app_state['current_timeframe'] = default_tf or '5 mins'
+    app_state['current_asset_type'] = default_asset or 'STOCK'
+    app_state['current_exchange'] = default_exchange or 'SMART'
+
+    # Sync exchange to contract_utils
+    set_default_exchange(default_exchange or 'SMART')
+
+    # Determine default symbol (first in favorites, or AAPL)
+    default_symbol = favorite_symbols[0] if favorite_symbols else 'AAPL'
+
+    return (
+        html.Span('✅ Settings saved', style={'color': '#4caf50'}),
+        default_symbol,
+        default_qty or 1,
+        default_asset or 'STOCK',
+        default_exchange or 'SMART',
+    )
 
 
 # ------------------------------------------------------------------
