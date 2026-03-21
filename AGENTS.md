@@ -12,8 +12,12 @@ The trader collaborates with an AI directly inside the app —
 the AI receives structured market data (OHLCV + indicators) and 
 returns structured responses which the app interprets and acts on.
 The AI acts as an analytical assistant, not an automated trading system.
-### PLAN 
-!!!For the full feature plan and implementation roadmap see **PLAN.md**.
+### Kde hledat informace
+Každý soubor má jasně vymezené téma. Před řešením jakéhokoli úkolu si rozmysli co řešíš a kde je záměr popsán:
+- **PLAN.md** — `plans/` složka — backend architektura: které Flask soubory existují (`ib_api.py`, `openrouter_api.py`, `local_api.py`, `indicators.py`), jaké endpointy každý exponuje, parametry, výstupy, refresh frekvence. Hledej sem pokud řešíš backend endpoint, routing nebo strukturu dat mezi backend moduly.
+- **UI.md** — `plans/` složka — kompletní záměr frontendu: layout, chování každé sekce (grafy, Order Entry, AI panel, Positions, History, Settings), přesné API kontrakty jak UI volá backend, pravidla konzistence (kde se bere cena, jak fungují trade lines, kdy se mažou AI anotace). Hledej sem pokud řešíš cokoliv co uživatel vidí nebo ovládá.
+- **API.md** — `plans/` složka — referenční příručka `ib_async` knihovny: jak se připojit, typy kontraktů, objednávky (Market/Limit/Bracket), historická data, live tick, eventy, chybové kódy. Hledej sem pokud nevíš jak něco udělat na úrovni IB komunikace.
+- **AGENTS.md** — tento soubor — časté chyby, tech stack, paper trading omezení, architektura chart_manager.js, workflow, jak spustit/zastavit aplikaci.
 ### Tech Stack
 - Backend: Python (Dash / Flask + ib_async)
 - Frontend: Dash UI + TradingView Lightweight Charts
