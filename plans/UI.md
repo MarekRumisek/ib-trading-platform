@@ -109,7 +109,7 @@ Co se stane:
 6. Historický ukazatel se posune — příští Load More jde ještě hlouběji
 7. Pokud backend vrátí prázdné pole, `+ Load More` se deaktivuje (žádná starší data)
 **Backend volání:**
-- `GET /api/bars/{symbol}?tf={tf}&asset_type={asset_type}&count={N}&before_time={oldest_timestamp}`
+- `GET /api/bars/{symbol}?tf={tf}&asset_type={asset_type}&exchange={exchange}&count={N}&before_time={oldest_timestamp}`
   → `{ bars: [...] }`
 ### 3.8 Tick
 - Tick běží automaticky na pozadí po každém resetu nebo Load More
@@ -145,8 +145,8 @@ Stav každého indikátoru je vlastní pro daný blok.
 - Automaticky při každém Load More (na celé rozšířené sadě)
 - Automaticky každých ~60s jako součást tick cyklu (každý 12. tick)
 **Backend volání:**
-- `GET /api/indicators/{symbol}?tf={tf}&asset_type={asset_type}&active=ema,rsi`
-  → `{ ema: [...], rsi: [...], macd: {...}, sma: [...] }`
+- `GET /api/bars/{symbol}?tf={tf}&asset_type={asset_type}&exchange={exchange}&count={N}&end_time=now`
+  → `{ bars: [{time, open, high, low, close, volume}] }`
 ### 3.11 Trade lines na grafech
 Každý grafový blok si sám kontroluje které otevřené obchody mají stejný symbol jako jeho aktuální symbol a kreslí jejich čáry. Order Entry panel ani AI panel neřídí kde se čáry kreslí — rozhoduje shoda symbolu obchodu a symbolu grafu.
 Typy čar:
@@ -370,7 +370,8 @@ Tento přehled slouží jako kontrakt. Backend musí implementovat tyto endpoint
 | `/api/account/info` | GET | každých 10s | `{ account_id, net_liquidation, buying_power }` |
 | `/api/tick/{symbol}` | GET | každých 5s per blok | `{ price, close, time }` |
 | `/api/bars/{symbol}` | GET | reset grafu | `{ bars: [{time,open,high,low,close,volume}] }` |
-| `/api/bars/{symbol}` | GET | Load More | stejný endpoint, parametr `before_time` |
+| `/api/bars/{symbol}` | GET | reset grafu — params: `tf, asset_type, exchange, count, end_time=now` | `{ bars: [{time,open,high,low,close,volume}] }` |
+| `/api/bars/{symbol}` | GET | Load More — params: `tf, asset_type, exchange, count, before_time` | stejný výstup |
 | `/api/indicators/{symbol}` | GET | po reset/load/tick | `{ ema, sma, rsi, macd }` |
 | `/api/trades/active_lines` | GET | každých 5s per blok | `[{ entry_price, sl, tp, side }]` |
 | `/api/trades/open` | GET | každých 10s | `{ trades: [...] }` |

@@ -27,14 +27,16 @@ Because of this:
 - tick or real-time data may be limited
 This is expected paper account behavior and should not be treated as a bug.
 IB paper trading requires short delays when submitting orders. 
-Without `ib.sleep()` or `time.sleep()` orders may remain in `PendingSubmit`.
+Without `ib.sleep(n)` orders may remain in `PendingSubmit`.
+⚠️ Vždy používej `ib.sleep()`, nikoli `time.sleep()` — `time.sleep()` blokuje ib_async event loop a způsobuje zamrznutí.
 Once development is stable the platform will migrate to a live IB account.
 ### Dual Chart Architecture (Phase 3)
 `assets/chart_manager.js` uses a **factory pattern** (`createChartInstance(containerId)`) to support multiple independent chart instances:
 - Each instance has its own local state (chart, candleSeries, volumeChart, allBars, tickTimer, tickEnabled, etc.)
 - Constants are shared at module level (VERSION, TICK_POLL_MS, CHART_BG, GRID_COLOR, TEXT_COLOR, UP_COLOR, DOWN_COLOR, CHART_HEIGHT, VOLUME_HEIGHT, RSI_HEIGHT, MACD_HEIGHT, TF_TO_SECONDS)
 - `window.lwcDebug` is a shared global logger function
-- Two instances: `window.lwcManager` (main chart, full features) and `window.lwcManager2` (context chart, candlestick + volume only)
+- Počet instancí je dynamický (1–4) dle `chart_count` z Settings. Každá instance je plnohodnotná — candlestick, volume, RSI, MACD, indikátory (SMA/EMA), trade lines i AI anotace.
+- ⚠️ Starý popis `window.lwcManager2` jako "context chart, candlestick + volume only" je zastaralý a neplatí. Všechny instance jsou identické co do funkcí, liší se jen indexem.
 - Sub-chart container IDs (volume, rsi, macd) are unique per instance using `containerId` prefix
 - When modifying chart_manager.js, ensure new functionality uses instance-local state via closure, not module-level variables
 ## Agent Work Strategy
