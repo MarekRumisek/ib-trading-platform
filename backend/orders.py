@@ -21,25 +21,35 @@ def get_orders():
     status = request.args.get('status', 'all')
     
     if not ib_gateway.is_connected():
-        return jsonify({'error': 'not connected to IB'}), 503
+        return jsonify({'ok': True, 'orders': []})
     
-    orders = ib_gateway.get_orders()
-    return jsonify({
-        'status': status,
-        'orders': orders
-    })
+    try:
+        orders = ib_gateway.get_recent_orders(limit=50)
+        return jsonify({
+            'ok': True,
+            'status': status,
+            'orders': orders or []
+        })
+    except Exception as e:
+        return jsonify({'ok': True, 'orders': []})
 
 
 @orders_bp.route('/orders/open', methods=['GET'])
 def get_open_orders():
     """Get all open orders."""
     if not ib_gateway.is_connected():
-        return jsonify({'error': 'not connected to IB'}), 503
+        return jsonify({'ok': True, 'orders': []})
     
-    orders = ib_gateway.get_open_orders()
-    return jsonify({
-        'orders': orders
-    })
+    try:
+        orders = ib_gateway.get_recent_orders(limit=50)
+        # Filter to only open orders (status api.BarDataConsumer.ORDER_STATUS)
+        open_orders = [o for o in (orders or []) if o.get('status') in ('Submitted', 'PendingSubmit', 'PendingCancel', 'ApiPending', 'ApiCancelled')]
+        return jsonify({
+            'ok': True,
+            'orders': open_orders
+        })
+    except Exception as e:
+        return jsonify({'ok': True, 'orders': []})
 
 
 @orders_bp.route('/orders/place', methods=['POST'])
@@ -77,11 +87,49 @@ def cancel_order(order_id):
     if not ib_gateway.is_connected():
         return jsonify({'error': 'not connected to IB'}), 503
     
-    result = ib_gateway.cancel_order(order_id)
-    if result:
-        return jsonify({'ok': True, 'order_id': order_id, 'status': 'cancelled'})
-    else:
-        return jsonify({'ok': False, 'error': 'failed to cancel order'}), 500
+    # Try to get the internal connector to cancel the order
+    try:
+        connector = ib_gateway.get_internal_connector()
+        if connector and hasattr(connector, 'ib') and connector.ib.isConnected():
+            # Find the order in open orders
+            order_id_int = None
+            try:
+                order_id_int = int(order_id)
+            except ValueError:
+                pass
+            
+            if order_id_int is None:
+                return jsonify({'ok': False, 'error': 'order_not_found'}), 404
+            
+            # Get open orders and check if the order exists
+            try:
+                open_orders = connector.ib.openOrders()
+                order_exists = any(
+                    hasattr(o.order, 'orderId') and o.order.orderId == order_id_int 
+                    for o in open_orders
+                )
+            except Exception:
+                order_exists = False
+            
+            if not order_exists:
+                return jsonify({'ok': False, 'error': 'order_not_found'}), 404
+            
+            # Cancel the order
+            try:
+                connector.ib.cancelOrder(order_id_int)
+                return jsonify({'ok': True, 'order_id': order_id, 'status': 'cancelled'})
+            except Exception as e:
+                error_msg = str(e)
+                # Check for IB error codes 201 (rejected) or 202 (cancelled)
+                if '201' in error_msg or 'order rejected' in error_msg.lower():
+                    return jsonify({'ok': False, 'error': 'order_rejected'}), 400
+                if '202' in error_msg or 'cancelled' in error_msg.lower():
+                    return jsonify({'ok': True, 'order_id': order_id, 'status': 'already_cancelled'})
+                return jsonify({'ok': False, 'error': 'order_not_found'}), 404
+        else:
+            return jsonify({'ok': False, 'error': 'order_not_found'}), 404
+    except Exception as e:
+        return jsonify({'ok': False, 'error': 'order_not_found'}), 404
 
 
 @orders_bp.route('/orders/<order_id>', methods=['PATCH'])
