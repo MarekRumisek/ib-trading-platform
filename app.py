@@ -15,6 +15,7 @@ import config
 from modules.data_store import data_store
 from modules.indicators import SMA, EMA, RSI, MACD
 from modules.trade_tracker import trade_tracker
+from backend import api_bp, market_bp, orders_bp, trades_bp, ai_bp
 import time
 import atexit
 import signal
@@ -38,6 +39,13 @@ app = dash.Dash(
 )
 
 server = app.server
+
+# Register Flask blueprints for backend API
+server.register_blueprint(api_bp)
+server.register_blueprint(market_bp)
+server.register_blueprint(orders_bp)
+server.register_blueprint(trades_bp)
+server.register_blueprint(ai_bp)
 
 
 def fmt_price(price, asset_type=None):
@@ -68,160 +76,7 @@ DURATION_MAP = {
 }
 
 # ================================================================
-# FLASK API
-# ================================================================
-
-@server.route('/api/tick/<symbol>')
-def get_tick(symbol):
-    sym        = symbol.upper()
-    asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
-    price      = ib_gateway.get_latest_price(sym, asset_type)
-    return jsonify({'time': int(datetime.now().timestamp()), 'price': price, 'asset_type': asset_type})
-
-@server.route('/api/deep_load_status/<symbol>/<tf>')
-def deep_load_status(symbol, tf):
-    asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
-    return jsonify(ib_gateway.get_deep_load_status(symbol.upper(), tf.replace('_', ' '), asset_type))
-
-@server.route('/api/indicators/<symbol>/<tf>')
-def api_indicators(symbol, tf):
-    sym       = symbol.upper()
-    timeframe = tf.replace('_', ' ')
-    asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
-    active    = [x.strip() for x in freq.args.get('active', 'ema,rsi').split(',') if x.strip()]
-
-    bars = data_store.get_bars(get_cache_symbol(sym, asset_type), timeframe)
-    if not bars:
-        return jsonify({'ok': False, 'error': 'no_data', 'bars': 0,
-                        'symbol': sym, 'asset_type': asset_type, 'tf': timeframe})
-
-    result = {'ok': True, 'symbol': sym, 'asset_type': asset_type, 'tf': timeframe, 'bars': len(bars)}
-    try:
-        if 'sma' in active:
-            p = int(freq.args.get('sma_p', 20))
-            result['sma']        = SMA(period=p).calculate(bars)
-            result['sma_period'] = p
-        if 'ema' in active:
-            p = int(freq.args.get('ema_p', 20))
-            result['ema']        = EMA(period=p).calculate(bars)
-            result['ema_period'] = p
-        if 'rsi' in active:
-            p = int(freq.args.get('rsi_p', 14))
-            result['rsi']        = RSI(period=p).calculate(bars)
-            result['rsi_period'] = p
-        if 'macd' in active:
-            fast = int(freq.args.get('macd_fast', 12))
-            slow = int(freq.args.get('macd_slow', 26))
-            sig  = int(freq.args.get('macd_sig',   9))
-            result['macd'] = MACD(fast=fast, slow=slow, signal=sig).calculate(bars)
-    except Exception as e:
-        result['ok']      = False
-        result['warning'] = str(e)
-
-    return jsonify(result)
-
-
-# ----------------------------------------------------------------
-# TRADE API
-# ----------------------------------------------------------------
-
-@server.route('/api/trades/open', methods=['GET'])
-def api_trades_open():
-    trades = trade_tracker.get_open_trades()
-    for t in trades:
-        t['entry_time_fmt'] = trade_tracker.fmt_time(t.get('entry_time'))
-    return jsonify({'ok': True, 'trades': trades})
-
-
-@server.route('/api/trades/active_lines', methods=['GET'])
-def api_trades_active_lines():
-    sym = (freq.args.get('symbol') or app_state.get('current_symbol', 'AAPL')).upper()
-    asset_type = normalize_asset_type(freq.args.get('asset_type', app_state.get('current_asset_type', 'STOCK')))
-    trades = []
-
-    # Issue #4 + #3: use avgCost from IB positions (live) or from stored avg_cost in trade record.
-    # Priority: IB live avgCost > stored avg_cost from fills > fill_price (entry_price).
-    ib_positions = ib_gateway.get_positions() if ib_gateway.is_connected() else []
-
-    for t in trade_tracker.get_open_trades():
-        if t.get('symbol') != sym:
-            continue
-        if normalize_asset_type(t.get('asset_type', 'STOCK')) != asset_type:
-            continue
-        ib_pos = next((p for p in ib_positions if p['symbol'] == sym and
-                       normalize_asset_type(p.get('asset_type', 'STOCK')) == asset_type), None)
-        avg_cost_used = False
-        # Fallback chain: IB live avgCost → stored avg_cost from fills → fill_price
-        if ib_pos and ib_pos.get('avgCost'):
-            entry_price = float(ib_pos['avgCost'])
-            avg_cost_used = True
-        elif t.get('avg_cost'):
-            entry_price = float(t['avg_cost'])
-            avg_cost_used = True
-        else:
-            entry_price = t.get('entry_price')
-        trades.append({
-            'symbol': t.get('symbol'),
-            'asset_type': normalize_asset_type(t.get('asset_type', 'STOCK')),
-            'entry_price': entry_price,
-            'sl': t.get('sl'),
-            'tp': t.get('tp'),
-            'side': t.get('side'),
-            'avg_cost_used': avg_cost_used,
-        })
-
-    return jsonify(trades)
-
-
-@server.route('/api/trades/history', methods=['GET'])
-def api_trades_history():
-    limit  = int(freq.args.get('limit', 50))
-    trades = trade_tracker.get_history(limit=limit)
-    for t in trades:
-        t['entry_time_fmt'] = trade_tracker.fmt_time(t.get('entry_time'))
-        t['exit_time_fmt']  = trade_tracker.fmt_time(t.get('exit_time'))
-    return jsonify({'ok': True, 'trades': trades})
-
-
-@server.route('/api/trades/close/<trade_id>', methods=['POST'])
-def api_trade_close(trade_id):
-    body       = freq.get_json(silent=True) or {}
-    exit_price = body.get('exit_price')
-
-    if not exit_price:
-        trade = trade_tracker.get_trade(trade_id)
-        if trade:
-            ticker = ib_gateway.get_tick(trade['symbol'], trade.get('asset_type', 'STOCK'))
-            if ticker:
-                exit_price = ticker.get('price') or ticker.get('last') or trade.get('entry_price')
-
-    if not exit_price:
-        return jsonify({'ok': False, 'error': 'exit_price_missing'}), 400
-
-    updated = trade_tracker.close_trade(trade_id, exit_price)
-    if not updated:
-        return jsonify({'ok': False, 'error': 'trade_not_found_or_already_closed'}), 404
-
-    updated['exit_time_fmt']  = trade_tracker.fmt_time(updated.get('exit_time'))
-    updated['entry_time_fmt'] = trade_tracker.fmt_time(updated.get('entry_time'))
-    return jsonify({'ok': True, 'trade': updated})
-
-
-@server.route('/api/trades/close_all', methods=['POST'])
-def api_trades_close_all():
-    open_trades  = trade_tracker.get_open_trades()
-    symbols      = list({(t['symbol'], t.get('asset_type', 'STOCK')) for t in open_trades})
-    exit_prices  = {}
-    for sym, asset_type in symbols:
-        ticker = ib_gateway.get_tick(sym, asset_type)
-        if ticker:
-            p = ticker.get('price') or ticker.get('last')
-            if p:
-                exit_prices[sym] = p
-    closed = trade_tracker.close_all_open(exit_prices)
-    return jsonify({'ok': True, 'closed': len(closed), 'trades': closed})
-
-
+# app_state - shared state for Dash callbacks
 # ================================================================
 app_state = {
     'current_symbol': config_store.get('default_symbol', 'AAPL'),

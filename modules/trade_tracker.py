@@ -206,6 +206,30 @@ class TradeTracker:
                     return t
         return None
 
+    def update_trade(self, trade_id: str, **kwargs) -> dict | None:
+        """Update fields on an existing trade. Returns updated trade or None."""
+        print(f"{_D} UPDATE | id={trade_id} fields={list(kwargs.keys())}")
+        
+        # Filter allowed fields
+        allowed = {'sl', 'tp', 'note', 'entry_price', 'qty', 'order_type'}
+        update_fields = {k: v for k, v in kwargs.items() if k in allowed}
+        
+        if not update_fields:
+            print(f"{_D} UPDATE | WARN: no valid fields to update")
+            return self.get_trade(trade_id)
+        
+        with self._lock:
+            trades = self._read()
+            for i, t in enumerate(trades):
+                if t['id'] == trade_id:
+                    trades[i].update(update_fields)
+                    self._write_atomic(trades)
+                    print(f"{_D} UPDATE | OK id={trade_id}")
+                    return trades[i]
+        
+        print(f"{_D} UPDATE | WARN: trade_id={trade_id} not found")
+        return None
+
     def patch_trade(self, trade_id: str, fields: dict) -> bool:
         """Atomically update arbitrary fields on a trade record. Returns True if found."""
         print(f"{_D} PATCH | id={trade_id} fields={list(fields.keys())}")

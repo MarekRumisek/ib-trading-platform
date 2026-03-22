@@ -175,7 +175,8 @@ def get_candles(
     symbol: str,
     timeframe: str = '5 mins',
     count: int = 60,
-    asset_type: str = 'STOCK'
+    asset_type: str = 'STOCK',
+    end_before: Optional[int] = None
 ) -> List[Dict[str, Any]]:
     """
     Get historical OHLCV candles.
@@ -185,6 +186,7 @@ def get_candles(
         timeframe: Bar size ('1 min', '5 mins', '15 mins', '1 hour', '1 day')
         count: Approximate number of candles (used to calculate duration)
         asset_type: 'STOCK', 'FOREX', or 'CRYPTO'
+        end_before: Unix timestamp (optional) - return only candles ending before this time
     
     Returns:
         List of dicts with keys: time, open, high, low, close, volume
@@ -223,6 +225,10 @@ def get_candles(
             bar_size=bar_size,
             asset_type=asset_type
         )
+        
+        # Filter candles by end_before if provided
+        if end_before is not None and bars:
+            bars = [b for b in bars if b.get('time', 0) < end_before]
         
         if bars:
             logger.info(f"Got {len(bars)} candles for {symbol} ({timeframe})")
