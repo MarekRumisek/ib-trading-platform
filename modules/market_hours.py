@@ -18,13 +18,13 @@ US_AFTERHOURS = 'US_AFTERHOURS'
 EU_REGULAR = 'EU_REGULAR'
 CLOSED = 'CLOSED'
 
-# Display labels and colors
+# Display labels and colors (UI.md Section 1 spec)
 SESSION_DISPLAY = {
-    US_PREMARKET:   {'label': '🌅 US Pre-Market',  'color': '#ffb74d'},
-    US_REGULAR:     {'label': '🇺🇸 US Regular',     'color': '#4caf50'},
-    US_AFTERHOURS:  {'label': '🌙 US After-Hours',  'color': '#7986cb'},
-    EU_REGULAR:     {'label': '🇪🇺 EU Regular',      'color': '#4caf50'},
-    CLOSED:         {'label': '🔴 Markets Closed',   'color': '#ef5350'},
+    US_PREMARKET:   {'label': 'Pre-Market',   'color': '#ffb74d'},  # Yellow/Orange
+    US_REGULAR:     {'label': 'US Regular',   'color': '#4caf50'},  # Green
+    US_AFTERHOURS:  {'label': 'After-Hours',  'color': '#ffb74d'},  # Yellow/Orange
+    EU_REGULAR:     {'label': 'EU Regular',   'color': '#4caf50'},  # Green
+    CLOSED:         {'label': 'Closed',       'color': '#ef5350'},  # Red
 }
 
 

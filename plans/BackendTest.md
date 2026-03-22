@@ -18,7 +18,6 @@ Total: 23 | PASSED: 19 | FAILED: 4
 [+] GET /api/indicators/AAPL/5_mins
 [+] GET /api/deep_load_status/AAPL/5_mins
 [+] GET / (Health check)
-
 [X] GET /api/bars/AAPL                - víkend/market closed
 [X] POST /api/ai/check_position       - Status 400
 [X] POST /api/ai/evaluate             - Status 400

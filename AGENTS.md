@@ -16,6 +16,7 @@ The AI acts as an analytical assistant, not an automated trading system.
 plans/PLAN.md — architektura endpointů, reference pro Fázi 2 (UI úprava a napojení na backend)
 plans/API.md — IB API reference, agent ji bude potřebovat při každé práci s IB
 plans/UI.md — specifikace frontendu, základ pro Fázi 2
+plans/BackendTest.md - výsledek testu z tools/test_backend.py
 - **AGENTS.md** — tento soubor — časté chyby, tech stack, paper trading omezení, architektura chart_manager.js, workflow, jak spustit/zastavit aplikaci.
 ### Tech Stack
 - Backend: Python (Dash / Flask + ib_async)

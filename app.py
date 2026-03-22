@@ -161,7 +161,8 @@ app.layout = html.Div([
             ),
             html.Span(' svíček', style={'color': '#aaa', 'fontSize': '13px', 'marginRight': '10px'}),
             html.Button(
-                'Load Chart', id='load-chart-btn', n_clicks=0,
+                '+ Load More', id='load-chart-btn', n_clicks=0,
+                title='Load chart with current settings',
                 style={'marginLeft': '5px', 'padding': '8px 20px',
                        'background': 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
                        'border': 'none', 'borderRadius': '5px',
@@ -174,6 +175,71 @@ app.layout = html.Div([
             html.Span(id='price-display', children='Last: $0.00',
                       style={'fontSize': '20px', 'fontWeight': 'bold'}),
             html.Span(id='price-change-display', children='',
+                      style={'fontSize': '16px', 'marginLeft': '15px'})
+        ], style={'display': 'inline-block'})
+    ], style={'padding': '15px', 'background': '#2d2d3a',
+              'borderRadius': '8px', 'marginBottom': '20px'}),
+
+    # Chart 2 inputs (independent per-block state - 3.3)
+    html.Div([
+        html.Div([
+            html.Label('Symbol:', style={'marginRight': '10px', 'fontWeight': 'bold', 'color': '#4caf50'}),
+            dcc.Input(
+                id='symbol-input-2', type='text', value=config_store.get('default_symbol', 'EURUSD'),
+                style={'width': '150px', 'padding': '8px', 'borderRadius': '5px',
+                       'border': '2px solid #4caf50', 'background': '#1e1e2e',
+                       'color': 'white', 'fontSize': '16px'}
+            ),
+            dcc.Dropdown(
+                id='asset-type-select-2',
+                options=[
+                    {'label': 'Stock', 'value': 'STOCK'},
+                    {'label': 'Forex', 'value': 'FOREX'},
+                    {'label': 'Crypto', 'value': 'CRYPTO'},
+                ],
+                value='FOREX',
+                clearable=False,
+                searchable=False,
+                style={'width': '140px', 'display': 'inline-block', 'marginLeft': '10px',
+                       'verticalAlign': 'middle', 'color': '#111'}
+            ),
+            dcc.Dropdown(
+                id='exchange-select-2',
+                options=[
+                    {'label': 'SMART (US)', 'value': 'SMART'},
+                    {'label': 'IBIS (DE)', 'value': 'IBIS'},
+                    {'label': 'AEB (NL)', 'value': 'AEB'},
+                    {'label': 'SBF (FR)', 'value': 'SBF'},
+                ],
+                value='SMART',
+                clearable=False,
+                searchable=False,
+                style={'width': '140px', 'display': 'inline-block', 'marginLeft': '10px',
+                       'verticalAlign': 'middle', 'color': '#111'}
+            ),
+            html.Span(' | ', style={'color': '#555', 'marginLeft': '15px', 'marginRight': '5px'}),
+            dcc.Input(
+                id='candles-count-input-2', type='number', value=60, min=10, max=500, step=10,
+                style={'width': '65px', 'padding': '8px', 'borderRadius': '5px',
+                       'border': '2px solid #4caf50', 'background': '#1e1e2e',
+                       'color': 'white', 'fontSize': '14px', 'textAlign': 'center'}
+            ),
+            html.Span(' svíček', style={'color': '#aaa', 'fontSize': '13px', 'marginRight': '10px'}),
+            html.Button(
+                '+ Load More', id='load-chart-btn-2', n_clicks=0,
+                title='Load chart 2 with current settings',
+                style={'marginLeft': '5px', 'padding': '8px 20px',
+                       'background': 'linear-gradient(135deg, #43a047 0%, #2e7d32 100%)',
+                       'border': 'none', 'borderRadius': '5px',
+                       'color': 'white', 'cursor': 'pointer', 'fontWeight': 'bold'}
+            ),
+            html.Span(id='bars-count-display-2', children='',
+                      style={'marginLeft': '15px', 'fontSize': '13px', 'color': '#888'})
+        ], style={'display': 'inline-block', 'marginRight': '30px'}),
+        html.Div([
+            html.Span(id='price-display-2', children='Last: $0.00',
+                      style={'fontSize': '20px', 'fontWeight': 'bold', 'color': '#4caf50'}),
+            html.Span(id='price-change-display-2', children='',
                       style={'fontSize': '16px', 'marginLeft': '15px'})
         ], style={'display': 'inline-block'})
     ], style={'padding': '15px', 'background': '#2d2d3a',
@@ -457,6 +523,28 @@ app.layout = html.Div([
         html.Div(id='settings-content', style={'display': 'none'}, children=[
             html.H4('App Defaults', style={'marginTop': '15px', 'marginBottom': '10px'}),
 
+            # Chart count (3.1)
+            html.Div([
+                html.Label('Chart count', style={'marginRight': '10px'}),
+                dcc.Dropdown(
+                    id='settings-chart-count',
+                    options=[
+                        {'label': '1 Chart', 'value': 1},
+                        {'label': '2 Charts', 'value': 2},
+                    ],
+                    value=1,
+                    style={'width': '120px'},
+                    clearable=False,
+                ),
+            ], style={'marginBottom': '10px', 'display': 'flex', 'alignItems': 'center'}),
+
+            # Default candles count (3.5)
+            html.Div([
+                html.Label('Default candles count', style={'marginRight': '10px'}),
+                dcc.Input(id='settings-default-candles', type='number', min=10, max=500, value=60,
+                          style={'width': '100px', 'padding': '8px', 'borderRadius': '5px'}),
+            ], style={'marginBottom': '10px', 'display': 'flex', 'alignItems': 'center'}),
+
             # Favorite symbols
             html.Div([
                 html.Label('Favorite symbols', style={'marginRight': '10px'}),
@@ -595,10 +683,10 @@ app.layout = html.Div([
 )
 def update_connection_status(n):
     if ib_gateway.is_connected():
-        return html.Span([html.Span('⚪', style={'color': '#26a69a', 'marginRight': '5px'}),
-                          html.Span('Connected to IB Gateway')])
-    return html.Span([html.Span('⚪', style={'color': '#ef5350', 'marginRight': '5px'}),
-                      html.Span('Disconnected')])
+        return html.Span([html.Span('●', style={'color': '#4caf50', 'marginRight': '5px', 'fontSize': '12px'}),
+                          html.Span('Connected to IB Gateway', style={'color': '#4caf50'})])
+    return html.Span([html.Span('●', style={'color': '#ef5350', 'marginRight': '5px', 'fontSize': '12px'}),
+                      html.Span('Disconnected', style={'color': '#ef5350'})])
 
 
 @app.callback(
@@ -798,34 +886,36 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
 
 
 # ------------------------------------------------------------------
-# CHART 2 (Context Chart) - Phase 3
+# CHART 2 (Context Chart) - Independent per-block state (3.3)
 # ------------------------------------------------------------------
 @app.callback(
     [Output('chart2-data-store', 'data'),
      Output('chart2-append-store', 'data'),
-     Output('chart2-meta-store', 'data')],
-    [Input('load-chart2-btn', 'n_clicks'),
+     Output('chart2-meta-store', 'data'),
+     Output('bars-count-display-2', 'children')],
+    [Input('load-chart-btn-2', 'n_clicks'),
      Input('tf2-1m', 'n_clicks'), Input('tf2-5m', 'n_clicks'),
      Input('tf2-15m', 'n_clicks'), Input('tf2-30m', 'n_clicks'),
      Input('tf2-1h', 'n_clicks'), Input('tf2-1d', 'n_clicks')],
-    [State('symbol-input', 'value'),
-     State('asset-type-select', 'value'),
-     State('candles-count-input', 'value'),
+    [State('symbol-input-2', 'value'),
+     State('asset-type-select-2', 'value'),
+     State('exchange-select-2', 'value'),
+     State('candles-count-input-2', 'value'),
      State('chart2-meta-store', 'data')],
     prevent_initial_call=True
 )
 def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
-                     symbol, asset_type, n_candles, meta):
-    """Load data for the context chart (chart 2). Supports both initial load and prepend (older bars)."""
+                     symbol, asset_type, exchange, n_candles, meta):
+    """Load data for chart 2. Independent per-block state (3.3)."""
     try:
         ctx = dash.callback_context
         btn = (ctx.triggered[0]['prop_id'].split('.')[0]
-               if ctx.triggered else 'load-chart2-btn')
+               if ctx.triggered else 'load-chart-btn-2')
         tf_map = {'tf2-1m': '1 min', 'tf2-5m': '5 mins',
                   'tf2-15m': '15 mins', 'tf2-30m': '30 mins',
                   'tf2-1h': '1 hour', 'tf2-1d': '1 day'}
 
-        symbol     = (symbol or 'AAPL').upper()
+        symbol     = (symbol or 'EURUSD').upper()
         asset_type = normalize_asset_type(asset_type)
         n_candles  = max(10, min(500, int(n_candles or 60)))
 
@@ -839,8 +929,8 @@ def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
         # Check if this is a reset (symbol/TF changed) or append
         prev_symbol = meta.get('symbol') if meta else None
         prev_tf     = meta.get('tf') if meta else None
-        is_reset    = (btn in tf_map or 
-                       prev_symbol != symbol or 
+        is_reset    = (btn in tf_map or
+                       prev_symbol != symbol or
                        prev_tf != tf)
 
         if is_reset:
@@ -850,7 +940,7 @@ def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
             log("DEBUG", f"[CB2] IB returned {len(bars)} bars")
 
             if not bars:
-                return dash.no_update, dash.no_update, dash.no_update
+                return dash.no_update, dash.no_update, dash.no_update, '❌ Žádná data'
 
             new_meta = {
                 'load_count': 1,
@@ -862,7 +952,8 @@ def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
             }
 
             chart2_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars, 'mode': 'initial'}
-            return chart2_data, None, new_meta
+            bars_display = f"📊 {len(bars)} svíček"
+            return chart2_data, None, new_meta, bars_display
 
         else:
             # === APPEND: fetch older candles ===
@@ -879,7 +970,7 @@ def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
                     'n_candles': n_candles
                 }
                 chart2_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars, 'mode': 'initial'}
-                return chart2_data, None, new_meta
+                return chart2_data, None, new_meta, f"📊 {len(bars)} svíček"
 
             log("DEBUG", f"[CB2] APPEND: {symbol} ({asset_type}) | {tf} | n={n_candles} | before={oldest_time}")
 
@@ -888,7 +979,7 @@ def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
             log("DEBUG", f"[CB2] IB returned {len(older_bars)} older bars")
 
             if not older_bars:
-                return dash.no_update, None, dash.no_update
+                return dash.no_update, None, dash.no_update, '⚠️ Žádná starší data'
 
             # Update meta with new oldest time
             new_meta = {
@@ -902,12 +993,13 @@ def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
 
             # Send older bars to append store
             append_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': older_bars, 'mode': 'append'}
+            bars_display = f"📊 {new_meta['total_bars']} svíček (+{len(older_bars)})"
 
-            return dash.no_update, append_data, new_meta
+            return dash.no_update, append_data, new_meta, bars_display
 
     except Exception as e:
         log("INFO", f"[CB2] EXCEPTION: {e}")
-        return dash.no_update, dash.no_update, dash.no_update
+        return dash.no_update, dash.no_update, dash.no_update, f'❌ {e}'
 
 
 @app.callback(
@@ -2086,6 +2178,44 @@ app.clientside_callback(
     prevent_initial_call=True
 )
 
+# Chart 2 trade lines (3.11 - trade lines per block)
+app.clientside_callback(
+    """
+    function(n, refreshCounter, chart2Data, symbolInput2, assetTypeInput2) {
+        var d = window.lwcDebug || function() {};
+        var sym = ((chart2Data && chart2Data.symbol) || symbolInput2 || 'EURUSD').toUpperCase();
+        var assetType = ((chart2Data && chart2Data.asset_type) || assetTypeInput2 || 'FOREX').toUpperCase();
+        if (!sym) return window.dash_clientside.no_update;
+
+        fetch('/api/trades/active_lines?symbol=' + encodeURIComponent(sym) + '&asset_type=' + encodeURIComponent(assetType))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (window.lwcManager2 && window.lwcManager2.setTradeLines) {
+                    window.lwcManager2.setTradeLines(data || []);
+                    d('TRADE2', 'Chart2 trade lines refreshed: ' + sym + ' (' + assetType + ') -> ' + ((data && data.length) || 0));
+                } else {
+                    d('ERR', 'lwcManager2.setTradeLines() neexistuje');
+                }
+            })
+            .catch(function(e) {
+                d('ERR', 'TRADE2 lines fetch error: ' + e);
+                if (window.lwcManager2 && window.lwcManager2.setTradeLines) {
+                    window.lwcManager2.setTradeLines([]);
+                }
+            });
+
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('hidden-state', 'children', allow_duplicate=True),
+    [Input('trades-refresh-interval', 'n_intervals'),
+     Input('trade-refresh-store', 'data')],
+    [State('chart2-data-store', 'data'),
+     State('symbol-input-2', 'value'),
+     State('asset-type-select-2', 'value')],
+    prevent_initial_call=True
+)
+
 
 @app.callback(
     [Output('price-display', 'children'),
@@ -2095,6 +2225,35 @@ app.clientside_callback(
      State('asset-type-select', 'value')]
 )
 def update_price_display(n, symbol, asset_type):
+    if not symbol or not ib_gateway.is_connected(): return 'Last: $0.00', ''
+    asset_type = normalize_asset_type(asset_type)
+    ticker = ib_gateway.get_tick(symbol, asset_type)
+    if not ticker: return 'Last: $0.00', ''
+    lp = ticker.get('price', 0) or ticker.get('last', 0)
+    pc = ticker.get('close', lp) or lp
+    if lp <= 0: return 'Last: $0.00', ''
+    change = lp - pc
+    pct    = (change / pc * 100) if pc > 0 else 0
+    arrow  = '▲' if change >= 0 else '▼'
+    color  = '#26a69a' if change >= 0 else '#ef5350'
+    sign   = '+' if change >= 0 else ''
+    _prec = '4' if asset_type == 'FOREX' else '2'
+    return (
+        f'Last: ${lp:.{_prec}f}',
+        html.Span(f' {arrow} {sign}${change:.{_prec}f} ({sign}{pct:.2f}%)', style={'color': color})
+    )
+
+
+# Chart 2 price update (3.4 - tick per block)
+@app.callback(
+    [Output('price-display-2', 'children'),
+     Output('price-change-display-2', 'children')],
+    Input('price-update-interval', 'n_intervals'),
+    [State('symbol-input-2', 'value'),
+     State('asset-type-select-2', 'value')]
+)
+def update_price_display_2(n, symbol, asset_type):
+    """Update price display for Chart 2 - independent per-block tick (3.4)."""
     if not symbol or not ib_gateway.is_connected(): return 'Last: $0.00', ''
     asset_type = normalize_asset_type(asset_type)
     ticker = ib_gateway.get_tick(symbol, asset_type)
