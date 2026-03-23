@@ -2698,7 +2698,7 @@ app.clientside_callback(
         return window.dash_clientside.no_update;
     }
     """,
-    Output('hidden-state', 'children', allow_duplicate=True),
+    Output('tick-sync-dummy', 'data'),
     Input('trade-debug-store', 'data'),
     prevent_initial_call=True
 )
@@ -2943,7 +2943,7 @@ app.clientside_callback(
         return appendData.symbol||'ok';
     }
     """,
-    Output('hidden-state', 'children', allow_duplicate=True), Input('chart-append-store', 'data'),
+    Output('deep-load-finished-trigger', 'data'), Input('chart-append-store', 'data'),
     prevent_initial_call=True
 )
 
@@ -2961,7 +2961,7 @@ app.clientside_callback(
         return appendData.symbol||'ok';
     }
     """,
-    Output('hidden-state', 'children', allow_duplicate=True), Input('chart2-append-store', 'data'),
+    Output('indicator2-settings-store', 'data'), Input('chart2-append-store', 'data'),
     prevent_initial_call=True
 )
 
@@ -2993,7 +2993,7 @@ app.clientside_callback(
         return window.dash_clientside.no_update;
     }
     """,
-    Output('hidden-state', 'children', allow_duplicate=True),
+    Output('active-tf-store', 'data'),
     [Input('trades-refresh-interval', 'n_intervals'),
      Input('trade-refresh-store', 'data')],
     [State('chart-data-store', 'data'),
@@ -3031,7 +3031,7 @@ app.clientside_callback(
         return window.dash_clientside.no_update;
     }
     """,
-    Output('hidden-state', 'children', allow_duplicate=True),
+    Output('active-tf2-store', 'data'),
     [Input('trades-refresh-interval', 'n_intervals'),
      Input('trade-refresh-store', 'data')],
     [State('chart2-data-store', 'data'),
