@@ -11,10 +11,18 @@ Provides AI-assisted trading analysis:
 
 from flask import Blueprint, jsonify, request
 from modules.config_store import config_store
-import requests as http_client
+from openai import OpenAI
 import json
 
 ai_bp = Blueprint('ai', __name__, url_prefix='/api')
+
+
+def get_openai_client(api_key):
+    """Create OpenAI client configured for OpenRouter."""
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key
+    )
 
 
 @ai_bp.route('/ai/analyze', methods=['POST'])
@@ -97,27 +105,17 @@ Market Data:
     user_prompt += "\nProvide your analysis as a valid JSON object."
 
     try:
-        resp = http_client.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            headers={
-                'Authorization': f'Bearer {api_key}',
-                'Content-Type': 'application/json',
-                'HTTP-Referer': 'http://localhost:8050',
-                'X-Title': 'IB Trading Platform',
-            },
-            json={
-                'model': model,
-                'messages': [
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt},
-                ],
-                'response_format': {'type': 'json_object'},
-            },
+        client = get_openai_client(api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_prompt},
+            ],
+            extra_body={"reasoning": {"enabled": True}},
             timeout=30,
         )
-        resp.raise_for_status()
-        data = resp.json()
-        content = data.get('choices', [{}])[0].get('message', {}).get('content', '{}')
+        content = response.choices[0].message.content
 
         parsed = json.loads(content)
         return jsonify(parsed)
@@ -165,35 +163,21 @@ Market Data:
     user_prompt += "\nProvide your analysis as a valid JSON object."
 
     try:
-        resp = http_client.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            headers={
-                'Authorization': f'Bearer {api_key}',
-                'Content-Type': 'application/json',
-                'HTTP-Referer': 'http://localhost:8050',
-                'X-Title': 'IB Trading Platform',
-            },
-            json={
-                'model': model,
-                'messages': [
-                    {'role': 'system', 'content': system_prompt},
-                    {'role': 'user', 'content': user_prompt},
-                ],
-                'response_format': {'type': 'json_object'},
-            },
+        client = get_openai_client(api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_prompt},
+            ],
+            extra_body={"reasoning": {"enabled": True}},
             timeout=60,
         )
-        resp.raise_for_status()
-        data = resp.json()
-        content = data.get('choices', [{}])[0].get('message', {}).get('content', '{}')
+        content = response.choices[0].message.content
 
         parsed = json.loads(content)
         return jsonify(parsed)
 
-    except http_client.exceptions.Timeout:
-        return jsonify({'ok': False, 'error': 'openrouter_timeout'}), 504
-    except http_client.exceptions.RequestException as e:
-        return jsonify({'ok': False, 'error': str(e)}), 502
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
