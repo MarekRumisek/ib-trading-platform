@@ -2698,8 +2698,9 @@ app.clientside_callback(
         return window.dash_clientside.no_update;
     }
     """,
-    Output('hidden-state', 'children'),
-    Input('trade-debug-store', 'data')
+    Output('hidden-state', 'children', allow_duplicate=True),
+    Input('trade-debug-store', 'data'),
+    prevent_initial_call=True
 )
 
 
@@ -3097,9 +3098,10 @@ def update_price_display_2(n, symbol, asset_type):
 
 
 @app.callback(
-    Output('qty-custom', 'value'),
+    Output('qty-custom', 'value', allow_duplicate=True),
     [Input('qty-1','n_clicks'),Input('qty-5','n_clicks'),
-     Input('qty-10','n_clicks'),Input('qty-25','n_clicks'),Input('qty-100','n_clicks')]
+     Input('qty-10','n_clicks'),Input('qty-25','n_clicks'),Input('qty-100','n_clicks')],
+    prevent_initial_call=True
 )
 def update_quantity(q1,q5,q10,q25,q100):
     ctx = dash.callback_context
