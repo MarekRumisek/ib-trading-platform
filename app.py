@@ -236,14 +236,58 @@ app.layout = html.Div([
                                 'background': '#1e1e2e'}),
             ], style={'width': '100%', 'display': 'block', 'marginBottom': '12px'}),
 
-            # Context chart (bottom) - Phase 3
+            # Context chart (bottom) - Phase 3 — unified with Chart 1 layout
             html.Div([
-                # Chart 2 info header (moved from top of layout)
+                # Row 1: TF buttons (left) + loading indicator (right)
+                html.Div([
+                    html.Div([
+                        html.Span('📊 Context Chart', style={'marginRight': '15px', 'fontWeight': 'bold',
+                                                            'fontSize': '14px', 'color': '#aaa'}),
+                        html.Button('1m',  id='tf2-1m',  n_clicks=0, className='tf-btn'),
+                        html.Button('5m',  id='tf2-5m',  n_clicks=0, className='tf-btn'),
+                        html.Button('15m', id='tf2-15m', n_clicks=0, className='tf-btn'),
+                        html.Button('30m', id='tf2-30m', n_clicks=0, className='tf-btn'),
+                        html.Button('1h',  id='tf2-1h',  n_clicks=0, className='tf-btn'),
+                        html.Button('1D',  id='tf2-1d',  n_clicks=0, className='tf-btn tf-active'),
+                        html.Button(
+                            'Load Chart', id='load-chart2-btn', n_clicks=0,
+                            style={'marginLeft': '15px', 'padding': '8px 20px',
+                                   'background': 'linear-gradient(135deg, #43a047 0%, #2e7d32 100%)',
+                                   'border': 'none', 'borderRadius': '5px',
+                                   'color': 'white', 'cursor': 'pointer', 'fontWeight': 'bold'}
+                        ),
+                        html.Span(id='chart2-loading-indicator', children='',
+                                  style={'marginLeft': '15px', 'fontSize': '13px',
+                                         'color': '#ffa726', 'fontStyle': 'italic',
+                                         'verticalAlign': 'middle'})
+                    ], style={'display': 'inline-block'}),
+                ], style={'marginBottom': '10px', 'overflow': 'hidden'}),
+
+                # Row 2: Indicators (identical to Chart 1)
+                html.Div([
+                    html.Span('📊 Indikátory:',
+                              style={'fontWeight': 'bold', 'marginRight': '12px',
+                                     'fontSize': '13px', 'color': '#aaa', 'verticalAlign': 'middle'}),
+                    html.Button('SMA 20',  id='ind2-sma-btn',  n_clicks=0, className='ind-btn',
+                                title='Simple Moving Average (20)'),
+                    html.Button('EMA 20',  id='ind2-ema-btn',  n_clicks=1, className='ind-btn ind-active',
+                                title='Exponential Moving Average (20)'),
+                    html.Button('RSI 14',  id='ind2-rsi-btn',  n_clicks=0, className='ind-btn',
+                                title='Relative Strength Index (14)'),
+                    html.Button('MACD',    id='ind2-macd-btn', n_clicks=0, className='ind-btn',
+                                title='MACD 12/26/9'),
+                    html.Span(id='indicators2-status', children='',
+                              style={'marginLeft': '15px', 'fontSize': '12px',
+                                     'color': '#888', 'fontStyle': 'italic'}),
+                ], style={'marginBottom': '10px', 'paddingTop': '10px',
+                          'borderTop': '1px solid #3d3d4a'}),
+
+                # Row 3: Symbol | Asset type | Exchange | Candles | Load More | Last price
                 html.Div([
                     html.Div([
                         html.Label('Symbol:', style={'marginRight': '10px', 'fontWeight': 'bold', 'color': '#4caf50'}),
                         dcc.Input(
-                            id='symbol-input-2', type='text', value=config_store.get('default_symbol', 'EURUSD'),
+                            id='symbol-input-2', type='text', value='AAPL',
                             style={'width': '150px', 'padding': '8px', 'borderRadius': '5px',
                                    'border': '2px solid #4caf50', 'background': '#1e1e2e',
                                    'color': 'white', 'fontSize': '16px'}
@@ -255,7 +299,7 @@ app.layout = html.Div([
                                 {'label': 'Forex', 'value': 'FOREX'},
                                 {'label': 'Crypto', 'value': 'CRYPTO'},
                             ],
-                            value='FOREX',
+                            value='STOCK',
                             clearable=False,
                             searchable=False,
                             style={'width': '140px', 'display': 'inline-block', 'marginLeft': '10px',
@@ -285,7 +329,7 @@ app.layout = html.Div([
                         html.Span(' svíček', style={'color': '#aaa', 'fontSize': '13px', 'marginRight': '10px'}),
                         html.Button(
                             '+ Load More', id='load-chart-btn-2', n_clicks=0,
-                            title='Load chart 2 with current settings',
+                            title='Load chart with current settings',
                             style={'marginLeft': '5px', 'padding': '8px 20px',
                                    'background': 'linear-gradient(135deg, #43a047 0%, #2e7d32 100%)',
                                    'border': 'none', 'borderRadius': '5px',
@@ -303,27 +347,9 @@ app.layout = html.Div([
                 ], style={'padding': '15px', 'background': '#2d2d3a',
                           'borderRadius': '8px', 'marginBottom': '15px'}),
 
-                # Context chart header with TF buttons
-                html.Div([
-                    html.Span('📊 Context Chart', style={'marginRight': '15px', 'fontWeight': 'bold',
-                                                        'fontSize': '14px', 'color': '#aaa'}),
-                    html.Button('1m',  id='tf2-1m',  n_clicks=0, className='tf-btn'),
-                    html.Button('5m',  id='tf2-5m',  n_clicks=0, className='tf-btn'),
-                    html.Button('15m', id='tf2-15m', n_clicks=0, className='tf-btn'),
-                    html.Button('30m', id='tf2-30m', n_clicks=0, className='tf-btn'),
-                    html.Button('1h',  id='tf2-1h',  n_clicks=0, className='tf-btn'),
-                    html.Button('1D',  id='tf2-1d',  n_clicks=0, className='tf-btn tf-active'),
-                    html.Button(
-                        'Load Chart 2', id='load-chart2-btn', n_clicks=0,
-                        style={'marginLeft': '15px', 'padding': '8px 20px',
-                               'background': 'linear-gradient(135deg, #43a047 0%, #2e7d32 100%)',
-                               'border': 'none', 'borderRadius': '5px',
-                               'color': 'white', 'cursor': 'pointer', 'fontWeight': 'bold'}
-                    ),
-                ], style={'marginBottom': '10px', 'overflow': 'hidden', 'padding': '5px 0'}),
-
+                # Chart container — 500px height like Chart 1
                 html.Div(id='lwc-container-2',
-                         style={'width': '100%', 'height': '400px', 'position': 'relative',
+                         style={'width': '100%', 'height': '500px', 'position': 'relative',
                                 'background': '#1e1e2e'}),
             ], style={'width': '100%', 'display': 'block'}),
         ], style={'display': 'block'}),
@@ -339,6 +365,7 @@ app.layout = html.Div([
         dcc.Store(id='indicator-settings-store',
                   data={'sma': False, 'ema': True, 'rsi': False, 'macd': False}),
         dcc.Store(id='indicators-data-store'),
+        dcc.Store(id='indicators2-data-store'),  # Chart 2 indicators data
         dcc.Store(id='trade-refresh-store', data=0),
         dcc.Store(id='trade-debug-store', data=None),
         # Phase 3: Chart 2 stores
@@ -2829,6 +2856,80 @@ app.clientside_callback(
     [Input('chart-data-store', 'data'), Input('indicator-settings-store', 'data')]
 )
 
+# Chart 2 indicator toggle callback — mirrors Chart 1 indicator toggle
+app.clientside_callback(
+    """
+    function(nSma, nEma, nRsi, nMacd, settings) {
+        var ctx = window.dash_clientside.callback_context;
+        if (!ctx || !ctx.triggered || ctx.triggered.length === 0)
+            return [settings,
+                    settings.sma  ? 'ind-btn ind-active' : 'ind-btn',
+                    settings.ema  ? 'ind-btn ind-active' : 'ind-btn',
+                    settings.rsi  ? 'ind-btn ind-active' : 'ind-btn',
+                    settings.macd ? 'ind-btn ind-active' : 'ind-btn'];
+        var tid = ctx.triggered_id || ctx.triggered[0].prop_id.split('.')[0];
+        var s = Object.assign({}, settings);
+        if (tid === 'ind2-sma-btn')  s.sma  = !s.sma;
+        if (tid === 'ind2-ema-btn')  s.ema  = !s.ema;
+        if (tid === 'ind2-rsi-btn')  s.rsi  = !s.rsi;
+        if (tid === 'ind2-macd-btn') s.macd = !s.macd;
+        if (window.lwcDebug) {
+            var on = Object.keys(s).filter(function(k){return s[k];});
+            window.lwcDebug('IND2', 'Toggle -> ' + (on.length ? on.join(',') : 'zadny'));
+        }
+        return [s,
+                s.sma  ? 'ind-btn ind-active' : 'ind-btn',
+                s.ema  ? 'ind-btn ind-active' : 'ind-btn',
+                s.rsi  ? 'ind-btn ind-active' : 'ind-btn',
+                s.macd ? 'ind-btn ind-active' : 'ind-btn'];
+    }
+    """,
+    [Output('indicator2-settings-store', 'data'),
+     Output('ind2-sma-btn', 'className'), Output('ind2-ema-btn', 'className'),
+     Output('ind2-rsi-btn', 'className'), Output('ind2-macd-btn', 'className')],
+    [Input('ind2-sma-btn', 'n_clicks'), Input('ind2-ema-btn', 'n_clicks'),
+     Input('ind2-rsi-btn', 'n_clicks'), Input('ind2-macd-btn', 'n_clicks')],
+    State('indicator2-settings-store', 'data')
+)
+
+# Chart 2 indicator fetch callback — mirrors Chart 1 but uses lwcManager2
+app.clientside_callback(
+    """
+    function(chartData, settings) {
+        var d = window.lwcDebug || function() {};
+        if (!chartData || !chartData.bars || chartData.bars.length === 0)
+            return window.dash_clientside.no_update;
+        var sym    = chartData.symbol;
+        var tf     = chartData.timeframe.replace(/ /g, '_');
+        var assetType = chartData.asset_type || 'STOCK';
+        var active = [];
+        if (settings.sma)  active.push('sma');
+        if (settings.ema)  active.push('ema');
+        if (settings.rsi)  active.push('rsi');
+        if (settings.macd) active.push('macd');
+        if (active.length === 0) {
+            d('IND2', 'Vsechny indikatory vypnuty');
+            if (window.lwcManager2 && window.lwcManager2.setIndicators)
+                window.lwcManager2.setIndicators({ok:true,sma:null,ema:null,rsi:null,macd:null});
+            return null;
+        }
+        var url = '/api/indicators/' + sym + '/' + tf + '?active=' + active.join(',') + '&asset_type=' + encodeURIComponent(assetType);
+        d('IND2', 'Fetching: ' + url);
+        fetch(url).then(function(r){return r.json();}).then(function(data){
+            if (!data.ok){d('ERR','IND2 FAIL: '+(data.error||'unknown'));return;}
+            d('IND2','OK: '+active.join(',')+' | bars='+data.bars);
+            if (window.lwcManager2 && window.lwcManager2.setIndicators)
+                window.lwcManager2.setIndicators(data, settings);
+            else d('ERR','lwcManager2.setIndicators() neexistuje');
+        }).catch(function(e){d('ERR','IND2 fetch error: '+e);});
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('indicators2-data-store', 'data'),
+    [Input('chart2-data-store', 'data'), Input('indicator2-settings-store', 'data')]
+)
+
+# Chart 2 loading indicator callback
 app.clientside_callback(
     """
     function(n1m,n5m,n15m,n30m,n1h,n1d,nLoad,dlTrigger){
@@ -2836,14 +2937,14 @@ app.clientside_callback(
         if(!ctx||!ctx.triggered||ctx.triggered.length===0)return '';
         var tid=ctx.triggered_id||ctx.triggered[0].prop_id.split('.')[0];
         if(tid==='deep-load-finished-trigger')return '✅ Data z cache načtena';
-        var labels={'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m','tf-30m':'30m','tf-1h':'1h','tf-1d':'1D','load-chart-btn':'Load'};
+        var labels={'tf2-1m':'1m','tf2-5m':'5m','tf2-15m':'15m','tf2-30m':'30m','tf2-1h':'1h','tf2-1d':'1D','load-chart2-btn':'Load'};
         return '⏳ Načítám '+(labels[tid]||tid)+'\u2026';
     }
     """,
-    Output('chart-loading-indicator', 'children'),
-    [Input('tf-1m','n_clicks'),Input('tf-5m','n_clicks'),Input('tf-15m','n_clicks'),
-     Input('tf-30m','n_clicks'),Input('tf-1h','n_clicks'),Input('tf-1d','n_clicks'),
-     Input('load-chart-btn','n_clicks'),Input('deep-load-finished-trigger','data')]
+    Output('chart2-loading-indicator', 'children'),
+    [Input('tf2-1m','n_clicks'),Input('tf2-5m','n_clicks'),Input('tf2-15m','n_clicks'),
+     Input('tf2-30m','n_clicks'),Input('tf2-1h','n_clicks'),Input('tf2-1d','n_clicks'),
+     Input('load-chart2-btn','n_clicks'),Input('deep-load-finished-trigger','data')]
 )
 
 app.clientside_callback(
