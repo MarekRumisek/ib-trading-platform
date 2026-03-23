@@ -1,3 +1,113 @@
+app.clientside_callback(
+    """
+    function(appendData){
+        var d=window.lwcDebug||function(){};
+        if(!appendData){d('CB','appendData NULL -> no_update');return window.dash_clientside.no_update;}
+        if(!appendData.bars||appendData.bars.length===0){d('CB','append bars prazdne -> no_update');return window.dash_clientside.no_update;}
+        d('CB','APPEND: symbol='+appendData.symbol+' tf='+appendData.timeframe+' baru='+appendData.bars.length);
+        if(window.lwcManager){d('CB','volam lwcManager.prependData()');window.lwcManager.prependData(appendData);}
+        else{var a=0,r=setInterval(function(){a++;if(window.lwcManager){window.lwcManager.prependData(appendData);clearInterval(r);}else if(a>20){d('ERR','lwcManager nenalezen!');clearInterval(r);}},200);}
+        return appendData.symbol||'ok';
+    }
+    """,
+    Output('hidden-state', 'children', allow_duplicate=True), Input('chart-append-store', 'data'),
+    prevent_initial_call=True
+)
+
+# Phase 3: Chart 2 prepend/append callback - feeds chart2-append-store to lwcManager2.prependData()
+app.clientside_callback(
+    """
+    function(appendData){
+        var d=window.lwcDebug||function(){};
+        d('CB2-APPEND','=== Chart2 append callback ===');
+        if(!appendData){d('CB2-APPEND','appendData NULL -> no_update');return window.dash_clientside.no_update;}
+        if(!appendData.bars||appendData.bars.length===0){d('CB2-APPEND','append bars prazdne -> no_update');return window.dash_clientside.no_update;}
+        d('CB2-APPEND','symbol='+appendData.symbol+' tf='+appendData.timeframe+' baru='+appendData.bars.length);
+        if(window.lwcManager2){d('CB2-APPEND','volam lwcManager2.prependData()');window.lwcManager2.prependData(appendData);}
+        else{var a=0,r=setInterval(function(){a++;if(window.lwcManager2){window.lwcManager2.prependData(appendData);clearInterval(r);}else if(a>20){d('ERR','lwcManager2 nenalezen!');clearInterval(r);}},200);}
+        return appendData.symbol||'ok';
+    }
+    """,
+    Output('hidden-state', 'children', allow_duplicate=True), Input('chart2-append-store', 'data'),
+    prevent_initial_call=True
+)
+
+app.clientside_callback(
+    """
+    function(n, refreshCounter, chartData, symbolInput, assetTypeInput) {
+        var d = window.lwcDebug || function() {};
+        var sym = ((chartData && chartData.symbol) || symbolInput || 'AAPL').toUpperCase();
+        var assetType = ((chartData && chartData.asset_type) || assetTypeInput || 'STOCK').toUpperCase();
+        if (!sym) return window.dash_clientside.no_update;
+
+        fetch('/api/trades/active_lines?symbol=' + encodeURIComponent(sym) + '&asset_type=' + encodeURIComponent(assetType))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (window.lwcManager && window.lwcManager.setTradeLines) {
+                    window.lwcManager.setTradeLines(data || []);
+                    d('TRADE', 'Trade lines refreshed: ' + sym + ' (' + assetType + ') -> ' + ((data && data.length) || 0));
+                } else {
+                    d('ERR', 'lwcManager.setTradeLines() neexistuje');
+                }
+            })
+            .catch(function(e) {
+                d('ERR', 'TRADE lines fetch error: ' + e);
+                if (window.lwcManager && window.lwcManager.setTradeLines) {
+                    window.lwcManager.setTradeLines([]);
+                }
+            });
+
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('hidden-state', 'children', allow_duplicate=True),
+    [Input('trades-refresh-interval', 'n_intervals'),
+     Input('trade-refresh-store', 'data')],
+    [State('chart-data-store', 'data'),
+     State('symbol-input', 'value'),
+     State('asset-type-select', 'value')],
+    prevent_initial_call=True
+)
+
+# Chart 2 trade lines (3.11 - trade lines per block)
+app.clientside_callback(
+    """
+    function(n, refreshCounter, chart2Data, symbolInput2, assetTypeInput2) {
+        var d = window.lwcDebug || function() {};
+        var sym = ((chart2Data && chart2Data.symbol) || symbolInput2 || 'EURUSD').toUpperCase();
+        var assetType = ((chart2Data && chart2Data.asset_type) || assetTypeInput2 || 'FOREX').toUpperCase();
+        if (!sym) return window.dash_clientside.no_update;
+
+        fetch('/api/trades/active_lines?symbol=' + encodeURIComponent(sym) + '&asset_type=' + encodeURIComponent(assetType))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (window.lwcManager2 && window.lwcManager2.setTradeLines) {
+                    window.lwcManager2.setTradeLines(data || []);
+                    d('TRADE2', 'Chart2 trade lines refreshed: ' + sym + ' (' + assetType + ') -> ' + ((data && data.length) || 0));
+                } else {
+                    d('ERR', 'lwcManager2.setTradeLines() neexistuje');
+                }
+            })
+            .catch(function(e) {
+                d('ERR', 'TRADE2 lines fetch error: ' + e);
+                if (window.lwcManager2 && window.lwcManager2.setTradeLines) {
+                    window.lwcManager2.setTradeLines([]);
+                }
+            });
+
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('hidden-state', 'children', allow_duplicate=True),
+    [Input('trades-refresh-interval', 'n_intervals'),
+     Input('trade-refresh-store', 'data')],
+    [State('chart2-data-store', 'data'),
+     State('symbol-input-2', 'value'),
+     State('asset-type-select-2', 'value')],
+    prevent_initial_call=True
+)
+
+
 import sys
 import io
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
@@ -2683,23 +2793,115 @@ def update_trade_history(_n, _refresh):
 # ------------------------------------------------------------------
 # TRADE DEBUG STORE → debug-log-area (clientside)
 # ------------------------------------------------------------------
+# ========== UNIFIED HIDDEN-STATE CALLBACK ==========
+# All hidden-state.children updates merged into one callback to avoid
+# "Duplicate callback outputs" error when multiple callbacks target
+# the same output.
 app.clientside_callback(
     """
-    function(tradeLog) {
-        if (!tradeLog || !tradeLog.msg) return window.dash_clientside.no_update;
-        var a = document.getElementById('debug-log-area');
-        if (!a) return window.dash_clientside.no_update;
-        var ts = new Date().toTimeString().slice(0, 8);
-        var lines = tradeLog.msg.split('\\n');
-        lines.forEach(function(line) {
-            if (line) a.value += '[' + ts + '] ' + line + '\\n';
-        });
-        a.scrollTop = a.scrollHeight;
+    function(nIntervals, tradeRefresh, chartAppend, chart2Append, tradeLog, chartData, chart2Data, symbol1, assetType1, symbol2, assetType2) {
+        var ctx = window.dash_clientside.callback_context;
+        var triggered = ctx.triggered || [];
+        var triggered_id = triggered.length > 0 ? triggered[0].prop_id.split('.')[0] : null;
+        var d = window.lwcDebug || function(){};
+        
+        // 1) trades-refresh-interval - chart 1 trade lines
+        if (triggered_id === 'trades-refresh-interval' && chartData) {
+            var sym = (chartData.symbol || symbol1 || 'EURUSD').toUpperCase();
+            var assetType = (chartData.asset_type || assetType1 || 'FOREX').toUpperCase();
+            if (!sym) return window.dash_clientside.no_update;
+            
+            fetch('/api/trades/active_lines?symbol=' + encodeURIComponent(sym) + '&asset_type=' + encodeURIComponent(assetType))
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (window.lwcManager && window.lwcManager.setTradeLines) {
+                        window.lwcManager.setTradeLines(data || []);
+                        d('TRADE1', 'Chart1 trade lines refreshed: ' + sym);
+                    } else {
+                        d('ERR', 'lwcManager.setTradeLines() neexistuje');
+                    }
+                })
+                .catch(function(e) {
+                    d('ERR', 'TRADE1 lines fetch error: ' + e);
+                    if (window.lwcManager && window.lwcManager.setTradeLines) {
+                        window.lwcManager.setTradeLines([]);
+                    }
+                });
+        }
+        
+        // 2) trades-refresh-interval - chart 2 trade lines
+        if (triggered_id === 'trades-refresh-interval' && chart2Data) {
+            var sym2 = (chart2Data.symbol || symbol2 || 'EURUSD').toUpperCase();
+            var assetType2 = (chart2Data.asset_type || assetType2 || 'FOREX').toUpperCase();
+            if (!sym2) return window.dash_clientside.no_update;
+            
+            fetch('/api/trades/active_lines?symbol=' + encodeURIComponent(sym2) + '&asset_type=' + encodeURIComponent(assetType2))
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (window.lwcManager2 && window.lwcManager2.setTradeLines) {
+                        window.lwcManager2.setTradeLines(data || []);
+                        d('TRADE2', 'Chart2 trade lines refreshed: ' + sym2);
+                    } else {
+                        d('ERR', 'lwcManager2.setTradeLines() neexistuje');
+                    }
+                })
+                .catch(function(e) {
+                    d('ERR', 'TRADE2 lines fetch error: ' + e);
+                    if (window.lwcManager2 && window.lwcManager2.setTradeLines) {
+                        window.lwcManager2.setTradeLines([]);
+                    }
+                });
+        }
+        
+        // 3) chart-append-store - prepend data to main chart
+        if (triggered_id === 'chart-append-store') {
+            if (!chartAppend) { d('CB','appendData NULL -> no_update'); return window.dash_clientside.no_update; }
+            if (!chartAppend.bars || chartAppend.bars.length === 0) { d('CB','bars prazdne -> no_update'); return window.dash_clientside.no_update; }
+            d('CB','APPEND: symbol='+chartAppend.symbol+' tf='+chartAppend.timeframe+' baru='+chartAppend.bars.length);
+            if (window.lwcManager) { d('CB','volam lwcManager.prependData()'); window.lwcManager.prependData(chartAppend); }
+            else { var a=0,r=setInterval(function(){a++;if(window.lwcManager){window.lwcManager.prependData(chartAppend);clearInterval(r);}else if(a>20){d('ERR','lwcManager nenalezen!');clearInterval(r);}},200); }
+            return chartAppend.symbol||'ok';
+        }
+        
+        // 4) chart2-append-store - prepend data to chart 2
+        if (triggered_id === 'chart2-append-store') {
+            if (!chart2Append) { d('CB2-APPEND','appendData NULL -> no_update'); return window.dash_clientside.no_update; }
+            if (!chart2Append.bars || chart2Append.bars.length === 0) { d('CB2-APPEND','bars prazdne -> no_update'); return window.dash_clientside.no_update; }
+            d('CB2-APPEND','symbol='+chart2Append.symbol+' tf='+chart2Append.timeframe+' baru='+chart2Append.bars.length);
+            if (window.lwcManager2) { d('CB2-APPEND','volam lwcManager2.prependData()'); window.lwcManager2.prependData(chart2Append); }
+            else { var a=0,r=setInterval(function(){a++;if(window.lwcManager2){window.lwcManager2.prependData(chart2Append);clearInterval(r);}else if(a>20){d('ERR','lwcManager2 nenalezen!');clearInterval(r);}},200); }
+            return chart2Append.symbol||'ok';
+        }
+        
+        // 5) trade-debug-store - update debug log display
+        if (triggered_id === 'trade-debug-store') {
+            if (!tradeLog || !tradeLog.msg) return window.dash_clientside.no_update;
+            var a = document.getElementById('debug-log-area');
+            if (!a) return window.dash_clientside.no_update;
+            var ts = new Date().toTimeString().slice(0, 8);
+            var lines = tradeLog.msg.split('\\n');
+            lines.forEach(function(line) {
+                if (line) a.value += '[' + ts + '] ' + line + '\\n';
+            });
+            a.scrollTop = a.scrollHeight;
+            return window.dash_clientside.no_update;
+        }
+        
         return window.dash_clientside.no_update;
     }
     """,
-    Output('tick-sync-dummy', 'data'),
-    Input('trade-debug-store', 'data'),
+    Output('hidden-state', 'children'),
+    [Input('trades-refresh-interval', 'n_intervals'),
+     Input('trade-refresh-store', 'data'),
+     Input('chart-append-store', 'data'),
+     Input('chart2-append-store', 'data'),
+     Input('trade-debug-store', 'data')],
+    [State('chart-data-store', 'data'),
+     State('chart2-data-store', 'data'),
+     State('symbol-input', 'value'),
+     State('asset-type-select', 'value'),
+     State('symbol-input-2', 'value'),
+     State('asset-type-select-2', 'value')],
     prevent_initial_call=True
 )
 
@@ -2747,9 +2949,8 @@ app.clientside_callback(
         return window.dash_clientside.no_update;
     }
     """,
-    Output('tick-sync-dummy', 'data', allow_duplicate=True),
-    Input('tick-enabled-store', 'data'),
-    prevent_initial_call=True
+    Output('tick-sync-dummy', 'data'),
+    Input('tick-enabled-store', 'data')
 )
 
 app.clientside_callback(
@@ -2931,116 +3132,6 @@ app.clientside_callback(
     Output('chart2-trigger-store', 'data', allow_duplicate=True), Input('chart2-data-store', 'data'),
     prevent_initial_call=True
 )
-
-app.clientside_callback(
-    """
-    function(appendData){
-        var d=window.lwcDebug||function(){};
-        if(!appendData){d('CB','appendData NULL -> no_update');return window.dash_clientside.no_update;}
-        if(!appendData.bars||appendData.bars.length===0){d('CB','append bars prazdne -> no_update');return window.dash_clientside.no_update;}
-        d('CB','APPEND: symbol='+appendData.symbol+' tf='+appendData.timeframe+' baru='+appendData.bars.length);
-        if(window.lwcManager){d('CB','volam lwcManager.prependData()');window.lwcManager.prependData(appendData);}
-        else{var a=0,r=setInterval(function(){a++;if(window.lwcManager){window.lwcManager.prependData(appendData);clearInterval(r);}else if(a>20){d('ERR','lwcManager nenalezen!');clearInterval(r);}},200);}
-        return appendData.symbol||'ok';
-    }
-    """,
-    Output('deep-load-finished-trigger', 'data', allow_duplicate=True), Input('chart-append-store', 'data'),
-    prevent_initial_call=True
-)
-
-# Phase 3: Chart 2 prepend/append callback - feeds chart2-append-store to lwcManager2.prependData()
-app.clientside_callback(
-    """
-    function(appendData){
-        var d=window.lwcDebug||function(){};
-        d('CB2-APPEND','=== Chart2 append callback ===');
-        if(!appendData){d('CB2-APPEND','appendData NULL -> no_update');return window.dash_clientside.no_update;}
-        if(!appendData.bars||appendData.bars.length===0){d('CB2-APPEND','append bars prazdne -> no_update');return window.dash_clientside.no_update;}
-        d('CB2-APPEND','symbol='+appendData.symbol+' tf='+appendData.timeframe+' baru='+appendData.bars.length);
-        if(window.lwcManager2){d('CB2-APPEND','volam lwcManager2.prependData()');window.lwcManager2.prependData(appendData);}
-        else{var a=0,r=setInterval(function(){a++;if(window.lwcManager2){window.lwcManager2.prependData(appendData);clearInterval(r);}else if(a>20){d('ERR','lwcManager2 nenalezen!');clearInterval(r);}},200);}
-        return appendData.symbol||'ok';
-    }
-    """,
-    Output('indicator2-settings-store', 'data'), Input('chart2-append-store', 'data'),
-    prevent_initial_call=True
-)
-
-app.clientside_callback(
-    """
-    function(n, refreshCounter, chartData, symbolInput, assetTypeInput) {
-        var d = window.lwcDebug || function() {};
-        var sym = ((chartData && chartData.symbol) || symbolInput || 'AAPL').toUpperCase();
-        var assetType = ((chartData && chartData.asset_type) || assetTypeInput || 'STOCK').toUpperCase();
-        if (!sym) return window.dash_clientside.no_update;
-
-        fetch('/api/trades/active_lines?symbol=' + encodeURIComponent(sym) + '&asset_type=' + encodeURIComponent(assetType))
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (window.lwcManager && window.lwcManager.setTradeLines) {
-                    window.lwcManager.setTradeLines(data || []);
-                    d('TRADE', 'Trade lines refreshed: ' + sym + ' (' + assetType + ') -> ' + ((data && data.length) || 0));
-                } else {
-                    d('ERR', 'lwcManager.setTradeLines() neexistuje');
-                }
-            })
-            .catch(function(e) {
-                d('ERR', 'TRADE lines fetch error: ' + e);
-                if (window.lwcManager && window.lwcManager.setTradeLines) {
-                    window.lwcManager.setTradeLines([]);
-                }
-            });
-
-        return window.dash_clientside.no_update;
-    }
-    """,
-    Output('active-tf-store', 'data', allow_duplicate=True),
-    [Input('trades-refresh-interval', 'n_intervals'),
-     Input('trade-refresh-store', 'data')],
-    [State('chart-data-store', 'data'),
-     State('symbol-input', 'value'),
-     State('asset-type-select', 'value')],
-    prevent_initial_call=True
-)
-
-# Chart 2 trade lines (3.11 - trade lines per block)
-app.clientside_callback(
-    """
-    function(n, refreshCounter, chart2Data, symbolInput2, assetTypeInput2) {
-        var d = window.lwcDebug || function() {};
-        var sym = ((chart2Data && chart2Data.symbol) || symbolInput2 || 'EURUSD').toUpperCase();
-        var assetType = ((chart2Data && chart2Data.asset_type) || assetTypeInput2 || 'FOREX').toUpperCase();
-        if (!sym) return window.dash_clientside.no_update;
-
-        fetch('/api/trades/active_lines?symbol=' + encodeURIComponent(sym) + '&asset_type=' + encodeURIComponent(assetType))
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
-                if (window.lwcManager2 && window.lwcManager2.setTradeLines) {
-                    window.lwcManager2.setTradeLines(data || []);
-                    d('TRADE2', 'Chart2 trade lines refreshed: ' + sym + ' (' + assetType + ') -> ' + ((data && data.length) || 0));
-                } else {
-                    d('ERR', 'lwcManager2.setTradeLines() neexistuje');
-                }
-            })
-            .catch(function(e) {
-                d('ERR', 'TRADE2 lines fetch error: ' + e);
-                if (window.lwcManager2 && window.lwcManager2.setTradeLines) {
-                    window.lwcManager2.setTradeLines([]);
-                }
-            });
-
-        return window.dash_clientside.no_update;
-    }
-    """,
-    Output('active-tf2-store', 'data', allow_duplicate=True),
-    [Input('trades-refresh-interval', 'n_intervals'),
-     Input('trade-refresh-store', 'data')],
-    [State('chart2-data-store', 'data'),
-     State('symbol-input-2', 'value'),
-     State('asset-type-select-2', 'value')],
-    prevent_initial_call=True
-)
-
 
 @app.callback(
     [Output('price-display', 'children'),
