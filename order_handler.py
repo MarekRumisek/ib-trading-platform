@@ -311,6 +311,7 @@ class OrderHandler:
             order_id = trade.order.orderId
             filled = trade.orderStatus.filled
             remaining = trade.orderStatus.remaining
+            avg_fill_price = trade.orderStatus.avgFillPrice if final_status == 'Filled' else None
             
             if config.DEBUG_ORDERS:
                 print("="*60)
@@ -320,6 +321,7 @@ class OrderHandler:
                 print(f"Order ID: {order_id}")
                 print(f"Filled: {filled}")
                 print(f"Remaining: {remaining}")
+                print(f"Avg Fill Price: {avg_fill_price}")
                 print("="*60 + "\n")
             
             # Determine success
@@ -331,6 +333,8 @@ class OrderHandler:
                 'status': final_status,
                 'filled': filled,
                 'remaining': remaining,
+                'avgFillPrice': avg_fill_price,
+                'fill_price': avg_fill_price,
                 'error': None if success else f"Order failed with status: {final_status}"
             }
             

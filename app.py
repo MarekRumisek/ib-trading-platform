@@ -1910,11 +1910,12 @@ app.clientside_callback(
                 'tick-btn ' + (enabled ? 'tick-on' : 'tick-off')];
     }
     """,
-    [Output('tick-enabled-store', 'data'),
-     Output('tick-toggle-btn', 'children'),
-     Output('tick-toggle-btn', 'className')],
+    [Output('tick-enabled-store', 'data', allow_duplicate=True),
+     Output('tick-toggle-btn', 'children', allow_duplicate=True),
+     Output('tick-toggle-btn', 'className', allow_duplicate=True)],
     Input('tick-toggle-btn', 'n_clicks'),
-    State('tick-enabled-store', 'data')
+    State('tick-enabled-store', 'data'),
+    prevent_initial_call=True
 )
 
 # Synchronize tick state to JS when Python changes tick-enabled-store (e.g., auto-enable on chart load)
@@ -2087,7 +2088,8 @@ app.clientside_callback(
         return storeData.symbol||'ok';
     }
     """,
-    Output('chart-trigger-store', 'data'), Input('chart-data-store', 'data')
+    Output('chart-trigger-store', 'data', allow_duplicate=True), Input('chart-data-store', 'data'),
+    prevent_initial_call=True
 )
 
 # Phase 3: Chart 2 clientside callback - feeds chart2-data-store to lwcManager2.loadData()
@@ -2104,7 +2106,8 @@ app.clientside_callback(
         return storeData.symbol||'ok';
     }
     """,
-    Output('chart2-trigger-store', 'data'), Input('chart2-data-store', 'data')
+    Output('chart2-trigger-store', 'data', allow_duplicate=True), Input('chart2-data-store', 'data'),
+    prevent_initial_call=True
 )
 
 app.clientside_callback(

@@ -15,9 +15,79 @@ from contract_utils import normalize_asset_type
 orders_bp = Blueprint('orders', __name__, url_prefix='/api')
 
 
-@orders_bp.route('/orders', methods=['GET'])
-def get_orders():
-    """Get all orders (open and historical)."""
+@orders_bp.route('/orders', methods=['GET', 'POST'])
+def orders_endpoint():
+    """Get all orders (GET) or place a new order (POST)."""
+    # Handle POST request - place new order
+    if request.method == 'POST':
+        data = request.get_json() or {}
+        symbol = data.get('symbol')
+        side = data.get('action') or data.get('side')  # UI sends 'action', internal uses 'side'
+        qty = data.get('quantity')
+        order_type = data.get('order_type', 'MARKET')
+        limit_price = data.get('limit_price')
+        sl = data.get('sl')
+        tp = data.get('tp')
+        note = data.get('note')
+        asset_type = normalize_asset_type(data.get('asset_type', 'STOCK'))
+        exchange = data.get('exchange', 'SMART')
+        
+        if not symbol or not side or not qty:
+            return jsonify({'ok': False, 'error': 'missing required fields: symbol, action, quantity'}), 400
+        
+        result = ib_gateway.place_order(
+            symbol=symbol.upper(),
+            action=side.upper(),
+            quantity=int(qty),
+            order_type=order_type.upper() if order_type else 'MARKET',
+            limit_price=limit_price,
+            asset_type=asset_type
+        )
+        
+        if result and result.get('order_id'):
+            # Record the trade
+            trade_recorded = False
+            trade_id = None
+            try:
+                from modules.trade_tracker import trade_tracker
+                # Use fill_price from result if available, otherwise 0 (will be updated by sync)
+                entry_price = result.get('fill_price') or result.get('avgFillPrice') or 0
+                trade = trade_tracker.open_trade(
+                    symbol=symbol.upper(),
+                    side=side.upper(),
+                    qty=int(qty),
+                    entry_price=entry_price,
+                    order_type=order_type.upper() if order_type else 'MARKET',
+                    sl=sl,
+                    tp=tp,
+                    note=note,
+                    asset_type=asset_type,
+                    avg_cost=entry_price if entry_price else None
+                )
+                trade_id = trade.get('id') if trade else None
+                trade_recorded = True
+                
+                # If order is Filled but fill_price was 0, try to get actual fill price
+                if result.get('status') == 'Filled' and entry_price == 0 and result.get('avgFillPrice'):
+                    fill_price = result.get('avgFillPrice')
+                    if trade_id:
+                        trade_tracker.update_trade(trade_id, entry_price=fill_price, avg_cost=fill_price)
+                        trade_recorded = True
+                        
+            except Exception as e:
+                print(f"Error recording trade: {e}")
+            
+            return jsonify({
+                'ok': True,
+                'order_id': result.get('order_id'),
+                'fill_price': result.get('fill_price') or result.get('avgFillPrice'),
+                'status': result.get('status'),
+                'message': f"Order placed successfully. Trade recorded: {trade_recorded}"
+            })
+        else:
+            return jsonify({'ok': False, 'error': result.get('error', 'order failed')}), 500
+    
+    # Handle GET request - return all orders
     status = request.args.get('status', 'all')
     
     if not ib_gateway.is_connected():

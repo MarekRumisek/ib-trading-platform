@@ -211,7 +211,7 @@ class TradeTracker:
         print(f"{_D} UPDATE | id={trade_id} fields={list(kwargs.keys())}")
         
         # Filter allowed fields
-        allowed = {'sl', 'tp', 'note', 'entry_price', 'qty', 'order_type'}
+        allowed = {'sl', 'tp', 'note', 'entry_price', 'qty', 'order_type', 'avg_cost'}
         update_fields = {k: v for k, v in kwargs.items() if k in allowed}
         
         if not update_fields:
