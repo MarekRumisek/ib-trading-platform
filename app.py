@@ -347,7 +347,163 @@ app.layout = html.Div([
         dcc.Store(id='chart2-append-store'),  # For loading older bars on chart2
         dcc.Store(id='chart2-meta-store', data={'load_count': 0, 'oldest_time': None, 'total_bars': 0, 'symbol': None, 'tf': None}),
         dcc.Store(id='active-tf2-store', data='tf2-1d'),
+        # AI stores
+        dcc.Store(id='ai-models-store', data=[]),
+        dcc.Store(id='ai-evaluate-state', data={'visible': False, 'loading': False, 'result': None, 'error': None}),
+        dcc.Store(id='ai-check-state', data={'visible': False, 'loading': False, 'result': None, 'error': None, 'trade': None}),
+        dcc.Store(id='ai-check-trigger', data=None),
+        dcc.Store(id='indicator2-settings-store',
+                  data={'sma': False, 'ema': True, 'rsi': False, 'macd': False}),
 
+    ], style={'padding': '20px', 'background': '#2d2d3a',
+              'borderRadius': '8px', 'marginBottom': '20px'}),
+
+    # ================================================================
+    # AI TRADE ADVISOR — SEKCE A: EVALUATE ENTRY
+    # ================================================================
+    html.Div([
+        html.H3('🔍 AI Trade Advisor — Evaluate Entry',
+                style={'marginBottom': '15px', 'color': '#00d4ff'}),
+
+        # Přepínač pro výběr primárního grafu
+        html.Div([
+            html.Label('AI pracuje s grafem:', style={'marginRight': '10px', 'fontWeight': 'bold'}),
+            dcc.RadioItems(
+                id='ai-evaluate-primary-graph',
+                options=[
+                    {'label': ' Graf 1 ', 'value': 1},
+                    {'label': ' Graf 2 ', 'value': 2},
+                ],
+                value=1,
+                style={'display': 'inline-block', 'color': '#ccc'},
+                inputStyle={'marginRight': '4px', 'marginLeft': '8px'}
+            ),
+            html.Span(' | ', style={'color': '#555', 'marginLeft': '10px', 'marginRight': '10px'}),
+            html.Span(id='ai-evaluate-symbol-info', children='AAPL | STOCK',
+                      style={'color': '#aaa', 'fontSize': '13px'}),
+        ], style={'marginBottom': '12px'}),
+
+        # Checkboxy pro výběr grafů a limit svíček
+        html.Div([
+            html.Label('Zahrnout data z grafů:', style={'marginRight': '10px', 'fontWeight': 'bold'}),
+            dcc.Checklist(
+                id='ai-evaluate-graphs-checklist',
+                options=[
+                    {'label': ' Graf 1 ', 'value': 1},
+                    {'label': ' Graf 2 ', 'value': 2},
+                ],
+                value=[1],
+                style={'display': 'inline-block', 'color': '#ccc'},
+                inputStyle={'marginRight': '8px', 'marginLeft': '4px'}
+            ),
+            html.Span(' | Max. svíček / graf:', style={'color': '#aaa', 'marginLeft': '15px', 'marginRight': '8px'}),
+            dcc.Input(
+                id='ai-evaluate-max-bars',
+                type='number',
+                value=100,
+                min=10,
+                max=500,
+                style={'width': '70px', 'padding': '6px', 'borderRadius': '5px',
+                       'border': '2px solid #667eea', 'background': '#1e1e2e',
+                       'color': 'white', 'fontSize': '13px'}
+            ),
+            html.Span(id='ai-evaluate-bars-info', children='~100 řádků dat',
+                      style={'color': '#888', 'marginLeft': '10px', 'fontSize': '12px'}),
+        ], style={'marginBottom': '15px'}),
+
+        # Tlačítko Evaluate
+        html.Div([
+            html.Button('🔍 Evaluate', id='ai-evaluate-btn', n_clicks=0,
+                        style={'padding': '10px 25px', 'background': 'linear-gradient(135deg, #00d4ff 0%, #0099cc 100%)',
+                               'border': 'none', 'borderRadius': '6px', 'color': 'white',
+                               'fontWeight': 'bold', 'cursor': 'pointer', 'fontSize': '14px'}),
+            html.Span(id='ai-evaluate-loading', children='',
+                      style={'marginLeft': '15px', 'color': '#ffd54f', 'fontSize': '14px'}),
+        ], style={'marginBottom': '15px'}),
+
+        # Response oblast
+        html.Div(id='ai-evaluate-response', style={'display': 'none'}, children=[
+            html.Div([
+                html.Div(id='ai-evaluate-result', style={'marginBottom': '10px'}),
+                html.Div(id='ai-evaluate-reason', style={'marginBottom': '15px', 'color': '#aaa', 'fontSize': '13px'}),
+                html.Div([
+                    html.Button('✅ Accept', id='ai-evaluate-accept-btn', n_clicks=0,
+                                style={'padding': '8px 20px', 'background': '#4caf50',
+                                       'border': 'none', 'borderRadius': '5px', 'color': 'white',
+                                       'cursor': 'pointer', 'marginRight': '10px'}),
+                    html.Button('❌ Reject', id='ai-evaluate-reject-btn', n_clicks=0,
+                                style={'padding': '8px 20px', 'background': '#ef5350',
+                                       'border': 'none', 'borderRadius': '5px', 'color': 'white',
+                                       'cursor': 'pointer'}),
+                ]),
+            ], style={'padding': '15px', 'background': '#1a1a2e', 'borderRadius': '8px',
+                      'border': '1px solid #3d3d4a'}),
+        ]),
+
+        # Error oblast
+        html.Div(id='ai-evaluate-error', style={'display': 'none', 'color': '#ef5350',
+                  'marginTop': '10px', 'padding': '10px', 'background': '#2d1a1a',
+                  'borderRadius': '5px'}),
+    ], style={'padding': '20px', 'background': '#2d2d3a',
+              'borderRadius': '8px', 'marginBottom': '20px'}),
+
+    # ================================================================
+    # AI TRADE ADVISOR — SEKCE B: CHECK POSITION
+    # ================================================================
+    html.Div(id='ai-check-section', children=[
+        html.H3('🤖 AI Trade Advisor — Check Position',
+                style={'marginBottom': '15px', 'color': '#00d4ff'}),
+
+        # Info řádek (skrytý dokud není aktivován)
+        html.Div(id='ai-check-info', style={'display': 'none', 'marginBottom': '12px',
+                  'padding': '10px', 'background': '#1a1a2e', 'borderRadius': '5px',
+                  'color': '#ffd54f', 'fontSize': '13px'}),
+
+        # Přepínač pro výběr primárního grafu
+        html.Div([
+            html.Label('AI pracuje s grafem:', style={'marginRight': '10px', 'fontWeight': 'bold'}),
+            dcc.RadioItems(
+                id='ai-check-primary-graph',
+                options=[
+                    {'label': ' Graf 1 ', 'value': 1},
+                    {'label': ' Graf 2 ', 'value': 2},
+                ],
+                value=1,
+                style={'display': 'inline-block', 'color': '#ccc'},
+                inputStyle={'marginRight': '4px', 'marginLeft': '8px'}
+            ),
+            html.Span(' | ', style={'color': '#555', 'marginLeft': '10px', 'marginRight': '10px'}),
+            html.Label('Zahrnout data z grafů:', style={'marginRight': '10px', 'fontWeight': 'bold'}),
+            dcc.Checklist(
+                id='ai-check-graphs-checklist',
+                options=[
+                    {'label': ' Graf 1 ', 'value': 1},
+                    {'label': ' Graf 2 ', 'value': 2},
+                ],
+                value=[1],
+                style={'display': 'inline-block', 'color': '#ccc'},
+                inputStyle={'marginRight': '8px', 'marginLeft': '4px'}
+            ),
+        ], style={'marginBottom': '15px'}),
+
+        # Loading indikátor
+        html.Div(id='ai-check-loading', children='',
+                 style={'color': '#ffd54f', 'fontSize': '14px', 'marginBottom': '15px'}),
+
+        # Response oblast
+        html.Div(id='ai-check-response', style={'display': 'none'}, children=[
+            html.Div([
+                html.Div(id='ai-check-result', style={'marginBottom': '10px'}),
+                html.Div(id='ai-check-reason', style={'marginBottom': '15px', 'color': '#aaa', 'fontSize': '13px'}),
+                html.Div(id='ai-check-actions'),
+            ], style={'padding': '15px', 'background': '#1a1a2e', 'borderRadius': '8px',
+                      'border': '1px solid #3d3d4a'}),
+        ]),
+
+        # Error oblast
+        html.Div(id='ai-check-error', style={'display': 'none', 'color': '#ef5350',
+                  'marginTop': '10px', 'padding': '10px', 'background': '#2d1a1a',
+                  'borderRadius': '5px'}),
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
 
@@ -624,12 +780,33 @@ app.layout = html.Div([
                           style={'width': '300px', 'padding': '8px', 'borderRadius': '5px'}),
             ], style={'marginBottom': '10px', 'display': 'flex', 'alignItems': 'center'}),
 
-            # LLM model
+            # LLM model (dropdown with dynamic options from OpenRouter)
             html.Div([
                 html.Label('LLM model', style={'marginRight': '10px', 'width': '150px'}),
-                dcc.Input(id='settings-llm-model', type='text',
-                          placeholder='e.g. anthropic/claude-3.5-haiku',
-                          style={'width': '300px', 'padding': '8px', 'borderRadius': '5px'}),
+                dcc.Dropdown(
+                    id='settings-llm-model',
+                    options=[
+                        {'label': 'minimax/minimax-m2.5:free (default)', 'value': 'minimax/minimax-m2.5:free'},
+                    ],
+                    value='minimax/minimax-m2.5:free',
+                    style={'width': '320px', 'color': '#111'},
+                    clearable=False,
+                ),
+                html.Button('🔄', id='ai-refresh-models-btn', n_clicks=0,
+                            title='Refresh models list',
+                            style={'marginLeft': '8px', 'padding': '6px 10px',
+                                   'background': '#667eea', 'border': 'none',
+                                   'borderRadius': '5px', 'color': 'white',
+                                   'cursor': 'pointer', 'fontSize': '12px'}),
+                html.Span(id='ai-models-status', children='',
+                          style={'marginLeft': '10px', 'fontSize': '12px', 'color': '#888'}),
+            ], style={'marginBottom': '10px', 'display': 'flex', 'alignItems': 'center'}),
+
+            # Max bars per chart for AI
+            html.Div([
+                html.Label('Max. svíček / graf pro AI', style={'marginRight': '10px', 'width': '200px'}),
+                dcc.Input(id='settings-ai-max-bars', type='number', min=10, max=500, value=100,
+                          style={'width': '100px', 'padding': '8px', 'borderRadius': '5px'}),
             ], style={'marginBottom': '10px', 'display': 'flex', 'alignItems': 'center'}),
 
             # Strategy / rules
@@ -1070,7 +1247,8 @@ def toggle_settings(n_clicks):
      Output('settings-api-key', 'value'),
      Output('settings-llm-model', 'value'),
      Output('settings-strategy', 'value'),
-     Output('settings-mm-rules', 'value')],
+     Output('settings-mm-rules', 'value'),
+     Output('settings-ai-max-bars', 'value')],
     Input('settings-load-trigger', 'n_intervals'),
     prevent_initial_call=True
 )
@@ -1086,9 +1264,10 @@ def load_settings(n_intervals):
         cfg.get('default_asset_type', 'STOCK'),
         cfg.get('default_exchange', 'SMART'),
         cfg.get('openrouter_api_key', ''),
-        cfg.get('llm_model', ''),
+        cfg.get('llm_model', 'minimax/minimax-m2.5:free'),
         cfg.get('strategy_text', ''),
         cfg.get('mm_rules_text', ''),
+        cfg.get('ai_max_bars_per_chart', 100),
     )
 
 
@@ -1109,11 +1288,12 @@ def load_settings(n_intervals):
      State('settings-api-key', 'value'),
      State('settings-llm-model', 'value'),
      State('settings-strategy', 'value'),
-     State('settings-mm-rules', 'value')],
+     State('settings-mm-rules', 'value'),
+     State('settings-ai-max-bars', 'value')],
     prevent_initial_call=True
 )
 def save_settings(n_clicks, fav_str, default_qty, default_tf, default_asset,
-                  default_exchange, api_key, llm_model, strategy_text, mm_rules_text):
+                  default_exchange, api_key, llm_model, strategy_text, mm_rules_text, ai_max_bars):
     # Parse favorite symbols from comma-separated string to list
     favorite_symbols = [s.strip() for s in (fav_str or '').split(',') if s.strip()]
 
@@ -1124,9 +1304,10 @@ def save_settings(n_clicks, fav_str, default_qty, default_tf, default_asset,
     config_store.set('default_asset_type', default_asset or 'STOCK')
     config_store.set('default_exchange', default_exchange or 'SMART')
     config_store.set('openrouter_api_key', api_key or '')
-    config_store.set('llm_model', llm_model or '')
+    config_store.set('llm_model', llm_model or 'minimax/minimax-m2.5:free')
     config_store.set('strategy_text', strategy_text or '')
     config_store.set('mm_rules_text', mm_rules_text or '')
+    config_store.set('ai_max_bars_per_chart', ai_max_bars or 100)
 
     # Sync to app_state
     app_state['current_timeframe'] = default_tf or '5 mins'
@@ -1146,6 +1327,633 @@ def save_settings(n_clicks, fav_str, default_qty, default_tf, default_asset,
         default_asset or 'STOCK',
         default_exchange or 'SMART',
     )
+
+
+# ------------------------------------------------------------------
+# AI: refresh models list from OpenRouter
+# ------------------------------------------------------------------
+@app.callback(
+    [Output('ai-models-store', 'data'),
+     Output('settings-llm-model', 'options'),
+     Output('ai-models-status', 'children')],
+    [Input('ai-refresh-models-btn', 'n_clicks'),
+     Input('settings-load-trigger', 'n_intervals')],
+    State('settings-api-key', 'value'),
+    prevent_initial_call=True
+)
+def refresh_ai_models(n_clicks_refresh, n_intervals_load, api_key):
+    ctx = dash.callback_context
+    triggered = ctx.triggered[0]['prop_id'] if ctx.triggered else ''
+    
+    if not api_key:
+        return [], [{'label': 'minimax/minimax-m2.5:free (default)', 'value': 'minimax/minimax-m2.5:free'}], '⚠️ Nastavte API key'
+    
+    try:
+        import requests
+        resp = requests.get(
+            'https://openrouter.ai/api/v1/models',
+            headers={'Authorization': f'Bearer {api_key}'},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        
+        # Filter free models (pricing.prompt == "0")
+        free_models = []
+        for model in data.get('data', []):
+            pricing = model.get('pricing', {})
+            prompt_price = pricing.get('prompt', '0')
+            if str(prompt_price) == '0' or str(prompt_price) == '0.0':
+                model_id = model.get('id', '')
+                model_name = model.get('name', model_id)
+                free_models.append({
+                    'id': model_id,
+                    'name': model_name,
+                    'label': f"{model_name} ({model_id})" if model_name != model_id else model_id,
+                    'value': model_id,
+                })
+        
+        # Sort by name
+        free_models.sort(key=lambda x: x['name'].lower())
+        
+        # Build options for dropdown
+        options = [{'label': m['label'], 'value': m['value']} for m in free_models]
+        
+        if not options:
+            options = [{'label': 'minimax/minimax-m2.5:free (default)', 'value': 'minimax/minimax-m2.5:free'}]
+        
+        return free_models, options, f'✅ {len(free_models)} free models'
+        
+    except Exception as e:
+        return [], [{'label': 'minimax/minimax-m2.5:free (default)', 'value': 'minimax/minimax-m2.5:free'}], f'❌ Chyba: {str(e)[:50]}'
+
+
+# ------------------------------------------------------------------
+# AI EVALUATE: update symbol info based on primary graph selection
+# ------------------------------------------------------------------
+@app.callback(
+    Output('ai-evaluate-symbol-info', 'children'),
+    Input('ai-evaluate-primary-graph', 'value'),
+    [State('symbol-input', 'value'),
+     State('asset-type-select', 'value'),
+     State('symbol-input-2', 'value'),
+     State('asset-type-select-2', 'value')]
+)
+def update_ai_evaluate_symbol(primary_graph, sym1, at1, sym2, at2):
+    if primary_graph == 1:
+        return f"{sym1 or 'AAPL'} | {at1 or 'STOCK'}"
+    else:
+        return f"{sym2 or 'EURUSD'} | {at2 or 'FOREX'}"
+
+
+@app.callback(
+    Output('ai-evaluate-bars-info', 'children'),
+    Input('ai-evaluate-max-bars', 'value'),
+    State('ai-evaluate-graphs-checklist', 'value')
+)
+def update_ai_evaluate_bars_info(max_bars, selected_graphs):
+    count = len(selected_graphs) * (max_bars or 100)
+    return f"~{count} řádků dat"
+
+
+# ------------------------------------------------------------------
+# AI EVALUATE: main evaluate callback
+# ------------------------------------------------------------------
+@app.callback(
+    [Output('ai-evaluate-loading', 'children'),
+     Output('ai-evaluate-response', 'style'),
+     Output('ai-evaluate-error', 'style'),
+     Output('ai-evaluate-result', 'children'),
+     Output('ai-evaluate-reason', 'children'),
+     Output('ai-evaluate-state', 'data'),
+     Output('ai-evaluate-max-bars', 'value')],
+    Input('ai-evaluate-btn', 'n_clicks'),
+    [State('ai-evaluate-primary-graph', 'value'),
+     State('ai-evaluate-graphs-checklist', 'value'),
+     State('ai-evaluate-max-bars', 'value'),
+     State('chart-data-store', 'data'),
+     State('symbol-input', 'value'),
+     State('asset-type-select', 'value'),
+     State('symbol-input-2', 'value'),
+     State('asset-type-select-2', 'value'),
+     State('active-tf-store', 'data'),
+     State('active-tf2-store', 'data'),
+     State('indicator-settings-store', 'data'),
+     State('indicator2-settings-store', 'data'),
+     State('chart2-data-store', 'data')],
+    prevent_initial_call=True
+)
+def ai_evaluate_callback(n_clicks, primary_graph, selected_graphs, max_bars,
+                          chart1_data, sym1, at1, sym2, at2, tf1, tf2,
+                          ind1_settings, ind2_settings, chart2_data):
+    if n_clicks == 0:
+        return '', {'display': 'none'}, {'display': 'none'}, '', '', dash.no_update, dash.no_update
+    
+    # Check if at least one graph is selected
+    if not selected_graphs:
+        return '', {'display': 'none'}, {'display': 'block'}, '', '⚠️ Vyberte alespoň jeden graf', dash.no_update, dash.no_update
+    
+    # Check API key
+    api_key = config_store.get('openrouter_api_key', '')
+    model = config_store.get('llm_model', '')
+    if not api_key:
+        return '', {'display': 'none'}, {'display': 'block'}, '', '⚠️ Nastavte OpenRouter API key v Settings', dash.no_update, dash.no_update
+    
+    # Show loading
+    loading_style = {'color': '#ffd54f'}
+    
+    try:
+        import requests
+        import json
+        
+        # Prepare graphs data
+        graphs = []
+        indicators = {}
+        
+        # TF mapping
+        tf_map = {
+            'tf-1m': '1 min', 'tf-5m': '5 mins', 'tf-15m': '15 mins',
+            'tf-30m': '30 mins', 'tf-1h': '1 hour', 'tf-1d': '1 day',
+            'tf2-1m': '1 min', 'tf2-5m': '5 mins', 'tf2-15m': '15 mins',
+            'tf2-30m': '30 mins', 'tf2-1h': '1 hour', 'tf2-1d': '1 day',
+        }
+        
+        max_bars = max_bars or 100
+        
+        # Graph 1
+        if 1 in selected_graphs and chart1_data:
+            bars = chart1_data[-max_bars:] if len(chart1_data) > max_bars else chart1_data
+            graphs.append({
+                'symbol': sym1 or 'AAPL',
+                'tf': tf_map.get(tf1, '5 mins'),
+                'asset_type': at1 or 'STOCK',
+                'bars': bars
+            })
+            if primary_graph == 1:
+                indicators = ind1_settings or {}
+        
+        # Graph 2
+        if 2 in selected_graphs and chart2_data:
+            bars = chart2_data[-max_bars:] if len(chart2_data) > max_bars else chart2_data
+            graphs.append({
+                'symbol': sym2 or 'EURUSD',
+                'tf': tf_map.get(tf2, '5 mins'),
+                'asset_type': at2 or 'FOREX',
+                'bars': bars
+            })
+            if primary_graph == 2:
+                indicators = ind2_settings or {}
+        
+        # Get account info
+        try:
+            resp = requests.get(f'http://localhost:8050/api/account/info', timeout=5)
+            account_info = resp.json() if resp.status_code == 200 else {}
+        except:
+            account_info = {}
+        
+        # Build request payload
+        payload = {
+            'primary_graph_index': primary_graph,
+            'graphs': graphs,
+            'indicators': indicators,
+            'account': {
+                'net_liquidation': account_info.get('net_liquidation', 0),
+                'buying_power': account_info.get('buying_power', 0)
+            }
+        }
+        
+        # Call AI endpoint
+        resp = requests.post(
+            'http://localhost:8050/api/ai/evaluate',
+            json=payload,
+            timeout=60
+        )
+        
+        if resp.status_code != 200:
+            return '', {'display': 'none'}, {'display': 'block'}, '', f'❌ Chyba API: {resp.status_code}', dash.no_update, dash.no_update
+        
+        result = resp.json()
+        
+        if 'error' in result:
+            return '', {'display': 'none'}, {'display': 'block'}, '', f'❌ {result["error"]}', dash.no_update, dash.no_update
+        
+        # Format result
+        rec = result.get('recommendation', 'HOLD')
+        order_type = result.get('order_type', 'MARKET')
+        rr_ratio = result.get('rr_ratio', '–')
+        entry = result.get('entry_price', 0)
+        sl = result.get('sl', 0)
+        tp = result.get('tp', 0)
+        qty = result.get('quantity', 0)
+        reason = result.get('reason', '')
+        
+        result_text = f"Recommendation: {rec} | Order: {order_type} | R/R: {rr_ratio}"
+        entry_text = f"Entry: ${entry:.2f} | SL: ${sl:.2f} | TP: ${tp:.2f} | Qty: {qty}"
+        
+        return ('', {'display': 'block'}, {'display': 'none'},
+                f"{result_text}\n{entry_text}", reason,
+                {'visible': True, 'loading': False, 'result': result, 'error': None},
+                dash.no_update)
+        
+    except Exception as e:
+        import traceback
+        log("ERROR", f"AI evaluate error: {e}\n{traceback.format_exc()}")
+        return '', {'display': 'none'}, {'display': 'block'}, '', f'❌ {str(e)[:100]}', dash.no_update, dash.no_update
+
+
+# ------------------------------------------------------------------
+# AI EVALUATE: Accept button - fill order entry and submit
+# ------------------------------------------------------------------
+@app.callback(
+    [Output('ai-evaluate-response', 'style', allow_duplicate=True),
+     Output('ai-evaluate-state', 'data', allow_duplicate=True),
+     Output('sl-price-input', 'value'),
+     Output('tp-price-input', 'value'),
+     Output('qty-custom', 'value'),
+     Output('buy-btn', 'n_clicks'),
+     Output('sell-btn', 'n_clicks')],
+    Input('ai-evaluate-accept-btn', 'n_clicks'),
+    State('ai-evaluate-state', 'data'),
+    prevent_initial_call=True
+)
+def ai_evaluate_accept(n_clicks, state):
+    if n_clicks == 0 or not state or not state.get('result'):
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update
+    
+    result = state['result']
+    sl = result.get('sl', 0)
+    tp = result.get('tp', 0)
+    qty = result.get('quantity', 0)
+    recommendation = result.get('recommendation', 'BUY')
+    
+    # Determine if BUY or SELL
+    if recommendation == 'BUY':
+        return {'display': 'none'}, {'visible': False, 'loading': False, 'result': None, 'error': None}, sl, tp, qty, 1, 0
+    else:
+        return {'display': 'none'}, {'visible': False, 'loading': False, 'result': None, 'error': None}, sl, tp, qty, 0, 1
+
+
+@app.callback(
+    [Output('ai-evaluate-response', 'style', allow_duplicate=True),
+     Output('ai-evaluate-state', 'data', allow_duplicate=True)],
+    Input('ai-evaluate-reject-btn', 'n_clicks'),
+    State('ai-evaluate-state', 'data'),
+    prevent_initial_call=True
+)
+def ai_evaluate_reject(n_clicks, state):
+    if n_clicks == 0:
+        return dash.no_update, dash.no_update
+    return {'display': 'none'}, {'visible': False, 'loading': False, 'result': None, 'error': None}
+
+
+# ------------------------------------------------------------------
+# AI CHECK POSITION: trigger from position table button
+# ------------------------------------------------------------------
+@app.callback(
+    Output('ai-check-trigger', 'data'),
+    Input({'type': 'ai-check-pos-btn', 'trade_id': dash.ALL}, 'n_clicks'),
+    State({'type': 'ai-check-pos-btn', 'trade_id': dash.ALL}, 'id'),
+    prevent_initial_call=True
+)
+def ai_check_position_trigger(n_clicks_list, button_ids):
+    ctx = dash.callback_context
+    if not ctx.triggered:
+        return dash.no_update
+    
+    triggered = ctx.triggered[0]
+    if not triggered['value']:
+        return dash.no_update
+    
+    import json
+    prop_id = triggered['prop_id']
+    id_part = prop_id.split('.')[0]
+    trade_id_dict = json.loads(id_part)
+    trade_id = trade_id_dict.get('trade_id', '')
+    
+    if trade_id:
+        return {'trade_id': trade_id, 'triggered': True}
+    return dash.no_update
+
+
+# ------------------------------------------------------------------
+# AI CHECK POSITION: main check callback
+# ------------------------------------------------------------------
+@app.callback(
+    [Output('ai-check-info', 'style'),
+     Output('ai-check-info', 'children'),
+     Output('ai-check-loading', 'children'),
+     Output('ai-check-response', 'style'),
+     Output('ai-check-error', 'style'),
+     Output('ai-check-result', 'children'),
+     Output('ai-check-reason', 'children'),
+     Output('ai-check-actions', 'children'),
+     Output('ai-check-state', 'data'),
+     Output('ai-check-primary-graph', 'value')],
+    Input('ai-check-trigger', 'data'),
+    [State('ai-check-primary-graph', 'value'),
+     State('ai-check-graphs-checklist', 'value'),
+     State('chart-data-store', 'data'),
+     State('symbol-input', 'value'),
+     State('asset-type-select', 'value'),
+     State('symbol-input-2', 'value'),
+     State('asset-type-select-2', 'value'),
+     State('active-tf-store', 'data'),
+     State('active-tf2-store', 'data'),
+     State('indicator-settings-store', 'data'),
+     State('indicator2-settings-store', 'data'),
+     State('chart2-data-store', 'data')],
+    prevent_initial_call=True
+)
+def ai_check_position_callback(trigger_data, primary_graph, selected_graphs,
+                               chart1_data, sym1, at1, sym2, at2, tf1, tf2,
+                               ind1_settings, ind2_settings, chart2_data):
+    if not trigger_data or not trigger_data.get('triggered'):
+        return dash.no_update, dash.no_update, '', {'display': 'none'}, {'display': 'none'}, '', '', '', dash.no_update, dash.no_update
+    
+    trade_id = trigger_data.get('trade_id', '')
+    
+    # Get trade details
+    trade = trade_tracker.get_trade(trade_id)
+    if not trade:
+        return {'display': 'block'}, '⚠️ Trade nenalezen', '', {'display': 'none'}, {'display': 'block'}, '', '❌ Trade nenalezen', '', dash.no_update, dash.no_update
+    
+    # Build info line
+    sym = trade.get('symbol', '?')
+    side = trade.get('side', 'BUY')
+    qty = trade.get('qty', 0)
+    entry = trade.get('entry_price', 0)
+    sl = trade.get('sl', 0)
+    tp = trade.get('tp', 0)
+    trade_sym = sym
+    
+    # Calculate P&L
+    pnl = 0
+    try:
+        positions = ib_gateway.get_positions() or []
+        for pos in positions:
+            if pos.get('symbol') == sym:
+                mult = 1 if side == 'BUY' else -1
+                current_price = pos['market_value'] / abs(pos['position']) if pos['position'] != 0 else 0
+                pnl = mult * (current_price - entry) * qty
+                break
+    except:
+        pass
+    
+    pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+    info_line = f"Kontroluji: {sym} {side} {qty}× | Entry ${entry:.2f} | SL ${sl:.2f} | TP ${tp:.2f} | P&L {pnl_str}"
+    
+    # Check API key
+    api_key = config_store.get('openrouter_api_key', '')
+    if not api_key:
+        return {'display': 'block'}, info_line, '', {'display': 'none'}, {'display': 'block'}, '', '⚠️ Nastavte OpenRouter API key v Settings', '', dash.no_update, dash.no_update
+    
+    # Auto-select primary graph based on symbol match
+    if sym1 and sym1.upper() == sym.upper():
+        auto_primary = 1
+    elif sym2 and sym2.upper() == sym.upper():
+        auto_primary = 2
+    else:
+        auto_primary = primary_graph
+    
+    try:
+        import requests
+        import json
+        
+        # Prepare graphs data
+        graphs = []
+        indicators = {}
+        
+        # TF mapping
+        tf_map = {
+            'tf-1m': '1 min', 'tf-5m': '5 mins', 'tf-15m': '15 mins',
+            'tf-30m': '30 mins', 'tf-1h': '1 hour', 'tf-1d': '1 day',
+            'tf2-1m': '1 min', 'tf2-5m': '5 mins', 'tf2-15m': '15 mins',
+            'tf2-30m': '30 mins', 'tf2-1h': '1 hour', 'tf2-1d': '1 day',
+        }
+        
+        max_bars = config_store.get('ai_max_bars_per_chart', 100)
+        
+        # Graph 1
+        if 1 in selected_graphs and chart1_data:
+            bars = chart1_data[-max_bars:] if len(chart1_data) > max_bars else chart1_data
+            graphs.append({
+                'symbol': sym1 or 'AAPL',
+                'tf': tf_map.get(tf1, '5 mins'),
+                'asset_type': at1 or 'STOCK',
+                'bars': bars
+            })
+            if auto_primary == 1:
+                indicators = ind1_settings or {}
+        
+        # Graph 2
+        if 2 in selected_graphs and chart2_data:
+            bars = chart2_data[-max_bars:] if len(chart2_data) > max_bars else chart2_data
+            graphs.append({
+                'symbol': sym2 or 'EURUSD',
+                'tf': tf_map.get(tf2, '5 mins'),
+                'asset_type': at2 or 'FOREX',
+                'bars': bars
+            })
+            if auto_primary == 2:
+                indicators = ind2_settings or {}
+        
+        # Build request payload
+        payload = {
+            'trade_id': trade_id,
+            'primary_graph_index': auto_primary,
+            'graphs': graphs,
+            'indicators': indicators,
+            'trade': {
+                'entry_price': entry,
+                'sl': sl,
+                'tp': tp,
+                'pnl': pnl
+            }
+        }
+        
+        # Call AI endpoint
+        resp = requests.post(
+            'http://localhost:8050/api/ai/check_position',
+            json=payload,
+            timeout=60
+        )
+        
+        if resp.status_code != 200:
+            return {'display': 'block'}, info_line, '', {'display': 'none'}, {'display': 'block'}, '', f'❌ Chyba API: {resp.status_code}', '', dash.no_update, dash.no_update
+        
+        result = resp.json()
+        
+        if 'error' in result:
+            return {'display': 'block'}, info_line, '', {'display': 'none'}, {'display': 'block'}, '', f'❌ {result["error"]}', '', dash.no_update, dash.no_update
+        
+        # Format result
+        action = result.get('action', 'HOLD')
+        new_sl = result.get('new_sl')
+        new_tp = result.get('new_tp')
+        reason = result.get('reason', '')
+        
+        action_text = f"Action: {action}"
+        if action == 'MOVE_SL' and new_sl:
+            action_text += f" | New SL: ${new_sl:.2f}"
+        elif action == 'MOVE_TP' and new_tp:
+            action_text += f" | New TP: ${new_tp:.2f}"
+        
+        # Build action buttons based on action type
+        action_buttons = []
+        if action in ('MOVE_SL', 'MOVE_TP'):
+            action_buttons.append(
+                html.Button('✔ Apply', id='ai-check-apply-btn', n_clicks=0,
+                           style={'padding': '8px 20px', 'background': '#4caf50',
+                                  'border': 'none', 'borderRadius': '5px', 'color': 'white',
+                                  'cursor': 'pointer', 'marginRight': '10px'})
+            )
+        elif action == 'CLOSE':
+            action_buttons.append(
+                html.Button('✖ Close Position', id='ai-check-close-btn', n_clicks=0,
+                           style={'padding': '8px 20px', 'background': '#ef5350',
+                                  'border': 'none', 'borderRadius': '5px', 'color': 'white',
+                                  'cursor': 'pointer', 'marginRight': '10px'})
+            )
+        
+        action_buttons.append(
+            html.Button('❌ Dismiss', id='ai-check-dismiss-btn', n_clicks=0,
+                       style={'padding': '8px 20px', 'background': '#666',
+                              'border': 'none', 'borderRadius': '5px', 'color': 'white',
+                              'cursor': 'pointer'})
+        )
+        
+        state_data = {
+            'visible': True,
+            'loading': False,
+            'result': result,
+            'error': None,
+            'trade': {'trade_id': trade_id, 'entry': entry, 'sl': sl, 'tp': tp, 'symbol': trade_sym}
+        }
+        
+        return ({'display': 'block'}, info_line, '', {'display': 'block'}, {'display': 'none'},
+                action_text, reason, action_buttons, state_data, auto_primary)
+        
+    except Exception as e:
+        import traceback
+        log("ERROR", f"AI check position error: {e}\n{traceback.format_exc()}")
+        return {'display': 'block'}, info_line, '', {'display': 'none'}, {'display': 'block'}, '', f'❌ {str(e)[:100]}', '', dash.no_update, dash.no_update
+
+
+# ------------------------------------------------------------------
+# AI CHECK POSITION: Apply button (MOVE_SL/MOVE_TP)
+# ------------------------------------------------------------------
+@app.callback(
+    [Output('ai-check-response', 'style', allow_duplicate=True),
+     Output('ai-check-state', 'data', allow_duplicate=True),
+     Output('trade-refresh-store', 'data', allow_duplicate=True)],
+    Input('ai-check-apply-btn', 'n_clicks'),
+    State('ai-check-state', 'data'),
+    prevent_initial_call=True
+)
+def ai_check_apply(n_clicks, state):
+    if n_clicks == 0 or not state or not state.get('result'):
+        return dash.no_update, dash.no_update, dash.no_update
+    
+    result = state['result']
+    trade_info = state.get('trade', {})
+    trade_id = trade_info.get('trade_id', '')
+    action = result.get('action', '')
+    
+    if not trade_id:
+        return dash.no_update, dash.no_update, dash.no_update
+    
+    try:
+        import requests
+        
+        if action == 'MOVE_SL' and result.get('new_sl'):
+            payload = {'sl': result['new_sl']}
+        elif action == 'MOVE_TP' and result.get('new_tp'):
+            payload = {'tp': result['new_tp']}
+        else:
+            return dash.no_update, dash.no_update, dash.no_update
+        
+        resp = requests.post(
+            f'http://localhost:8050/api/trades/patch/{trade_id}',
+            json=payload,
+            timeout=10
+        )
+        
+        # Refresh trades
+        return {'display': 'none'}, {'visible': False, 'loading': False, 'result': None, 'error': None}, dash.no_update
+        
+    except Exception as e:
+        return dash.no_update, dash.no_update, dash.no_update
+
+
+# ------------------------------------------------------------------
+# AI CHECK POSITION: Close button
+# ------------------------------------------------------------------
+@app.callback(
+    [Output('ai-check-response', 'style', allow_duplicate=True),
+     Output('ai-check-state', 'data', allow_duplicate=True),
+     Output('trade-refresh-store', 'data', allow_duplicate=True)],
+    Input('ai-check-close-btn', 'n_clicks'),
+    State('ai-check-state', 'data'),
+    prevent_initial_call=True
+)
+def ai_check_close(n_clicks, state):
+    if n_clicks == 0 or not state or not state.get('trade'):
+        return dash.no_update, dash.no_update, dash.no_update
+    
+    trade_info = state.get('trade', {})
+    trade_id = trade_info.get('trade_id', '')
+    
+    if not trade_id:
+        return dash.no_update, dash.no_update, dash.no_update
+    
+    try:
+        import requests
+        
+        resp = requests.post(
+            f'http://localhost:8050/api/trades/close/{trade_id}',
+            timeout=10
+        )
+        
+        return {'display': 'none'}, {'visible': False, 'loading': False, 'result': None, 'error': None}, dash.no_update
+        
+    except Exception as e:
+        return dash.no_update, dash.no_update, dash.no_update
+
+
+@app.callback(
+    [Output('ai-check-response', 'style', allow_duplicate=True),
+     Output('ai-check-state', 'data', allow_duplicate=True)],
+    Input('ai-check-dismiss-btn', 'n_clicks'),
+    State('ai-check-state', 'data'),
+    prevent_initial_call=True
+)
+def ai_check_dismiss(n_clicks, state):
+    if n_clicks == 0:
+        return dash.no_update, dash.no_update
+    return {'display': 'none'}, {'visible': False, 'loading': False, 'result': None, 'error': None}
+
+
+# ------------------------------------------------------------------
+# AI: scroll to Check Position section
+# ------------------------------------------------------------------
+app.clientside_callback(
+    """
+    function(triggerData) {
+        if (triggerData && triggerData.triggered) {
+            setTimeout(function() {
+                var el = document.getElementById('ai-check-section');
+                if (el) {
+                    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                }
+            }, 100);
+        }
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('ai-check-trigger', 'data', allow_duplicate=True),
+    Input('ai-check-trigger', 'data'),
+    prevent_initial_call=True
+)
 
 
 # ------------------------------------------------------------------
@@ -1585,6 +2393,12 @@ def update_positions_table(n, _refresh, _btn):
                         html.Td(tp_txt,  style={'color': '#a5d6a7', 'fontSize': '12px'}),
                         html.Td(
                             html.Span([
+                                html.Button('🤖 Check', id={'type': 'ai-check-pos-btn', 'trade_id': trade_id},
+                                            n_clicks=0,
+                                            style={'padding': '4px 8px', 'background': '#667eea',
+                                                   'border': 'none', 'borderRadius': '4px',
+                                                   'color': 'white', 'cursor': 'pointer',
+                                                   'fontSize': '11px', 'marginRight': '4px'}),
                                 html.Button('⟲ BE', id={'type': 'breakeven-btn', 'trade_id': trade_id},
                                             n_clicks=0,
                                             style={'padding': '4px 8px', 'background': '#f57c00',
@@ -1641,6 +2455,12 @@ def update_positions_table(n, _refresh, _btn):
                     html.Td(tp_txt,  style={'color': '#a5d6a7', 'fontSize': '12px'}),
                     html.Td(
                         html.Span([
+                            html.Button('🤖 Check', id={'type': 'ai-check-pos-btn', 'trade_id': trade_id},
+                                        n_clicks=0,
+                                        style={'padding': '4px 8px', 'background': '#667eea',
+                                               'border': 'none', 'borderRadius': '4px',
+                                               'color': 'white', 'cursor': 'pointer',
+                                               'fontSize': '11px', 'marginRight': '4px'}),
                             html.Button('⟲ BE', id={'type': 'breakeven-btn', 'trade_id': trade_id},
                                         n_clicks=0,
                                         style={'padding': '4px 8px', 'background': '#f57c00',

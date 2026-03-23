@@ -13,6 +13,7 @@ from flask import Blueprint, jsonify, request
 from modules.config_store import config_store
 from openai import OpenAI
 import json
+import requests as http_client
 
 ai_bp = Blueprint('ai', __name__, url_prefix='/api')
 

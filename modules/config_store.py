@@ -19,9 +19,10 @@ _DEFAULTS = {
     'default_exchange': 'SMART',
     'favorite_symbols': ['AAPL', 'EURUSD'],
     'openrouter_api_key': '',
-    'llm_model': '',
+    'llm_model': 'minimax/minimax-m2.5:free',
     'strategy_text': '',
     'mm_rules_text': '',
+    'ai_max_bars_per_chart': 100,
 }
 
 
