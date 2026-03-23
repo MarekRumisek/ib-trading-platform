@@ -115,136 +115,6 @@ app.layout = html.Div([
     ], style={'padding': '15px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px', 'fontSize': '16px'}),
 
-    # Symbol + cena
-    html.Div([
-        html.Div([
-            html.Label('Symbol:', style={'marginRight': '10px', 'fontWeight': 'bold'}),
-            dcc.Input(
-                id='symbol-input', type='text', value=config_store.get('default_symbol', 'AAPL'),
-                style={'width': '150px', 'padding': '8px', 'borderRadius': '5px',
-                       'border': '2px solid #667eea', 'background': '#1e1e2e',
-                       'color': 'white', 'fontSize': '16px'}
-            ),
-            dcc.Dropdown(
-                id='asset-type-select',
-                options=[
-                    {'label': 'Stock', 'value': 'STOCK'},
-                    {'label': 'Forex', 'value': 'FOREX'},
-                    {'label': 'Crypto', 'value': 'CRYPTO'},
-                ],
-                value=config_store.get('default_asset_type', 'STOCK'),
-                clearable=False,
-                searchable=False,
-                style={'width': '140px', 'display': 'inline-block', 'marginLeft': '10px',
-                       'verticalAlign': 'middle', 'color': '#111'}
-            ),
-            dcc.Dropdown(
-                id='exchange-select',
-                options=[
-                    {'label': 'SMART (US)', 'value': 'SMART'},
-                    {'label': 'IBIS (DE)', 'value': 'IBIS'},
-                    {'label': 'AEB (NL)', 'value': 'AEB'},
-                    {'label': 'SBF (FR)', 'value': 'SBF'},
-                ],
-                value=config_store.get('default_exchange', 'SMART'),
-                clearable=False,
-                searchable=False,
-                style={'width': '140px', 'display': 'inline-block', 'marginLeft': '10px',
-                       'verticalAlign': 'middle', 'color': '#111'}
-            ),
-            html.Span(' | ', style={'color': '#555', 'marginLeft': '15px', 'marginRight': '5px'}),
-            dcc.Input(
-                id='candles-count-input', type='number', value=60, min=10, max=500, step=10,
-                style={'width': '65px', 'padding': '8px', 'borderRadius': '5px',
-                       'border': '2px solid #667eea', 'background': '#1e1e2e',
-                       'color': 'white', 'fontSize': '14px', 'textAlign': 'center'}
-            ),
-            html.Span(' svíček', style={'color': '#aaa', 'fontSize': '13px', 'marginRight': '10px'}),
-            html.Button(
-                '+ Load More', id='load-chart-btn', n_clicks=0,
-                title='Load chart with current settings',
-                style={'marginLeft': '5px', 'padding': '8px 20px',
-                       'background': 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-                       'border': 'none', 'borderRadius': '5px',
-                       'color': 'white', 'cursor': 'pointer', 'fontWeight': 'bold'}
-            ),
-            html.Span(id='bars-count-display', children='',
-                      style={'marginLeft': '15px', 'fontSize': '13px', 'color': '#888'})
-        ], style={'display': 'inline-block', 'marginRight': '30px'}),
-        html.Div([
-            html.Span(id='price-display', children='Last: $0.00',
-                      style={'fontSize': '20px', 'fontWeight': 'bold'}),
-            html.Span(id='price-change-display', children='',
-                      style={'fontSize': '16px', 'marginLeft': '15px'})
-        ], style={'display': 'inline-block'})
-    ], style={'padding': '15px', 'background': '#2d2d3a',
-              'borderRadius': '8px', 'marginBottom': '20px'}),
-
-    # Chart 2 inputs (independent per-block state - 3.3)
-    html.Div([
-        html.Div([
-            html.Label('Symbol:', style={'marginRight': '10px', 'fontWeight': 'bold', 'color': '#4caf50'}),
-            dcc.Input(
-                id='symbol-input-2', type='text', value=config_store.get('default_symbol', 'EURUSD'),
-                style={'width': '150px', 'padding': '8px', 'borderRadius': '5px',
-                       'border': '2px solid #4caf50', 'background': '#1e1e2e',
-                       'color': 'white', 'fontSize': '16px'}
-            ),
-            dcc.Dropdown(
-                id='asset-type-select-2',
-                options=[
-                    {'label': 'Stock', 'value': 'STOCK'},
-                    {'label': 'Forex', 'value': 'FOREX'},
-                    {'label': 'Crypto', 'value': 'CRYPTO'},
-                ],
-                value='FOREX',
-                clearable=False,
-                searchable=False,
-                style={'width': '140px', 'display': 'inline-block', 'marginLeft': '10px',
-                       'verticalAlign': 'middle', 'color': '#111'}
-            ),
-            dcc.Dropdown(
-                id='exchange-select-2',
-                options=[
-                    {'label': 'SMART (US)', 'value': 'SMART'},
-                    {'label': 'IBIS (DE)', 'value': 'IBIS'},
-                    {'label': 'AEB (NL)', 'value': 'AEB'},
-                    {'label': 'SBF (FR)', 'value': 'SBF'},
-                ],
-                value='SMART',
-                clearable=False,
-                searchable=False,
-                style={'width': '140px', 'display': 'inline-block', 'marginLeft': '10px',
-                       'verticalAlign': 'middle', 'color': '#111'}
-            ),
-            html.Span(' | ', style={'color': '#555', 'marginLeft': '15px', 'marginRight': '5px'}),
-            dcc.Input(
-                id='candles-count-input-2', type='number', value=60, min=10, max=500, step=10,
-                style={'width': '65px', 'padding': '8px', 'borderRadius': '5px',
-                       'border': '2px solid #4caf50', 'background': '#1e1e2e',
-                       'color': 'white', 'fontSize': '14px', 'textAlign': 'center'}
-            ),
-            html.Span(' svíček', style={'color': '#aaa', 'fontSize': '13px', 'marginRight': '10px'}),
-            html.Button(
-                '+ Load More', id='load-chart-btn-2', n_clicks=0,
-                title='Load chart 2 with current settings',
-                style={'marginLeft': '5px', 'padding': '8px 20px',
-                       'background': 'linear-gradient(135deg, #43a047 0%, #2e7d32 100%)',
-                       'border': 'none', 'borderRadius': '5px',
-                       'color': 'white', 'cursor': 'pointer', 'fontWeight': 'bold'}
-            ),
-            html.Span(id='bars-count-display-2', children='',
-                      style={'marginLeft': '15px', 'fontSize': '13px', 'color': '#888'})
-        ], style={'display': 'inline-block', 'marginRight': '30px'}),
-        html.Div([
-            html.Span(id='price-display-2', children='Last: $0.00',
-                      style={'fontSize': '20px', 'fontWeight': 'bold', 'color': '#4caf50'}),
-            html.Span(id='price-change-display-2', children='',
-                      style={'fontSize': '16px', 'marginLeft': '15px'})
-        ], style={'display': 'inline-block'})
-    ], style={'padding': '15px', 'background': '#2d2d3a',
-              'borderRadius': '8px', 'marginBottom': '20px'}),
-
     # Graf
     html.Div([
         html.Div([
@@ -294,8 +164,73 @@ app.layout = html.Div([
 
         # Vertical stack for dual charts (one above the other)
         html.Div([
-            # Main chart (top)
+            # Main chart (top) with info header
             html.Div([
+                # Chart 1 info header (moved from top of layout)
+                html.Div([
+                    html.Div([
+                        html.Label('Symbol:', style={'marginRight': '10px', 'fontWeight': 'bold'}),
+                        dcc.Input(
+                            id='symbol-input', type='text', value=config_store.get('default_symbol', 'AAPL'),
+                            style={'width': '150px', 'padding': '8px', 'borderRadius': '5px',
+                                   'border': '2px solid #667eea', 'background': '#1e1e2e',
+                                   'color': 'white', 'fontSize': '16px'}
+                        ),
+                        dcc.Dropdown(
+                            id='asset-type-select',
+                            options=[
+                                {'label': 'Stock', 'value': 'STOCK'},
+                                {'label': 'Forex', 'value': 'FOREX'},
+                                {'label': 'Crypto', 'value': 'CRYPTO'},
+                            ],
+                            value=config_store.get('default_asset_type', 'STOCK'),
+                            clearable=False,
+                            searchable=False,
+                            style={'width': '140px', 'display': 'inline-block', 'marginLeft': '10px',
+                                   'verticalAlign': 'middle', 'color': '#111'}
+                        ),
+                        dcc.Dropdown(
+                            id='exchange-select',
+                            options=[
+                                {'label': 'SMART (US)', 'value': 'SMART'},
+                                {'label': 'IBIS (DE)', 'value': 'IBIS'},
+                                {'label': 'AEB (NL)', 'value': 'AEB'},
+                                {'label': 'SBF (FR)', 'value': 'SBF'},
+                            ],
+                            value=config_store.get('default_exchange', 'SMART'),
+                            clearable=False,
+                            searchable=False,
+                            style={'width': '140px', 'display': 'inline-block', 'marginLeft': '10px',
+                                   'verticalAlign': 'middle', 'color': '#111'}
+                        ),
+                        html.Span(' | ', style={'color': '#555', 'marginLeft': '15px', 'marginRight': '5px'}),
+                        dcc.Input(
+                            id='candles-count-input', type='number', value=60, min=10, max=500, step=10,
+                            style={'width': '65px', 'padding': '8px', 'borderRadius': '5px',
+                                   'border': '2px solid #667eea', 'background': '#1e1e2e',
+                                   'color': 'white', 'fontSize': '14px', 'textAlign': 'center'}
+                        ),
+                        html.Span(' svíček', style={'color': '#aaa', 'fontSize': '13px', 'marginRight': '10px'}),
+                        html.Button(
+                            '+ Load More', id='load-chart-btn', n_clicks=0,
+                            title='Load chart with current settings',
+                            style={'marginLeft': '5px', 'padding': '8px 20px',
+                                   'background': 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+                                   'border': 'none', 'borderRadius': '5px',
+                                   'color': 'white', 'cursor': 'pointer', 'fontWeight': 'bold'}
+                        ),
+                        html.Span(id='bars-count-display', children='',
+                                  style={'marginLeft': '15px', 'fontSize': '13px', 'color': '#888'})
+                    ], style={'display': 'inline-block', 'marginRight': '30px'}),
+                    html.Div([
+                        html.Span(id='price-display', children='Last: $0.00',
+                                  style={'fontSize': '20px', 'fontWeight': 'bold'}),
+                        html.Span(id='price-change-display', children='',
+                                  style={'fontSize': '16px', 'marginLeft': '15px'})
+                    ], style={'display': 'inline-block'})
+                ], style={'padding': '15px', 'background': '#2d2d3a',
+                          'borderRadius': '8px', 'marginBottom': '15px'}),
+
                 html.Div(id='lwc-container',
                          style={'width': '100%', 'height': '500px', 'position': 'relative',
                                 'background': '#1e1e2e'}),
@@ -303,6 +238,71 @@ app.layout = html.Div([
 
             # Context chart (bottom) - Phase 3
             html.Div([
+                # Chart 2 info header (moved from top of layout)
+                html.Div([
+                    html.Div([
+                        html.Label('Symbol:', style={'marginRight': '10px', 'fontWeight': 'bold', 'color': '#4caf50'}),
+                        dcc.Input(
+                            id='symbol-input-2', type='text', value=config_store.get('default_symbol', 'EURUSD'),
+                            style={'width': '150px', 'padding': '8px', 'borderRadius': '5px',
+                                   'border': '2px solid #4caf50', 'background': '#1e1e2e',
+                                   'color': 'white', 'fontSize': '16px'}
+                        ),
+                        dcc.Dropdown(
+                            id='asset-type-select-2',
+                            options=[
+                                {'label': 'Stock', 'value': 'STOCK'},
+                                {'label': 'Forex', 'value': 'FOREX'},
+                                {'label': 'Crypto', 'value': 'CRYPTO'},
+                            ],
+                            value='FOREX',
+                            clearable=False,
+                            searchable=False,
+                            style={'width': '140px', 'display': 'inline-block', 'marginLeft': '10px',
+                                   'verticalAlign': 'middle', 'color': '#111'}
+                        ),
+                        dcc.Dropdown(
+                            id='exchange-select-2',
+                            options=[
+                                {'label': 'SMART (US)', 'value': 'SMART'},
+                                {'label': 'IBIS (DE)', 'value': 'IBIS'},
+                                {'label': 'AEB (NL)', 'value': 'AEB'},
+                                {'label': 'SBF (FR)', 'value': 'SBF'},
+                            ],
+                            value='SMART',
+                            clearable=False,
+                            searchable=False,
+                            style={'width': '140px', 'display': 'inline-block', 'marginLeft': '10px',
+                                   'verticalAlign': 'middle', 'color': '#111'}
+                        ),
+                        html.Span(' | ', style={'color': '#555', 'marginLeft': '15px', 'marginRight': '5px'}),
+                        dcc.Input(
+                            id='candles-count-input-2', type='number', value=60, min=10, max=500, step=10,
+                            style={'width': '65px', 'padding': '8px', 'borderRadius': '5px',
+                                   'border': '2px solid #4caf50', 'background': '#1e1e2e',
+                                   'color': 'white', 'fontSize': '14px', 'textAlign': 'center'}
+                        ),
+                        html.Span(' svíček', style={'color': '#aaa', 'fontSize': '13px', 'marginRight': '10px'}),
+                        html.Button(
+                            '+ Load More', id='load-chart-btn-2', n_clicks=0,
+                            title='Load chart 2 with current settings',
+                            style={'marginLeft': '5px', 'padding': '8px 20px',
+                                   'background': 'linear-gradient(135deg, #43a047 0%, #2e7d32 100%)',
+                                   'border': 'none', 'borderRadius': '5px',
+                                   'color': 'white', 'cursor': 'pointer', 'fontWeight': 'bold'}
+                        ),
+                        html.Span(id='bars-count-display-2', children='',
+                                  style={'marginLeft': '15px', 'fontSize': '13px', 'color': '#888'})
+                    ], style={'display': 'inline-block', 'marginRight': '30px'}),
+                    html.Div([
+                        html.Span(id='price-display-2', children='Last: $0.00',
+                                  style={'fontSize': '20px', 'fontWeight': 'bold', 'color': '#4caf50'}),
+                        html.Span(id='price-change-display-2', children='',
+                                  style={'fontSize': '16px', 'marginLeft': '15px'})
+                    ], style={'display': 'inline-block'})
+                ], style={'padding': '15px', 'background': '#2d2d3a',
+                          'borderRadius': '8px', 'marginBottom': '15px'}),
+
                 # Context chart header with TF buttons
                 html.Div([
                     html.Span('📊 Context Chart', style={'marginRight': '15px', 'fontWeight': 'bold',
@@ -1071,6 +1071,7 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
      Output('chart2-meta-store', 'data'),
      Output('bars-count-display-2', 'children')],
     [Input('load-chart-btn-2', 'n_clicks'),
+     Input('load-chart2-btn', 'n_clicks'),
      Input('tf2-1m', 'n_clicks'), Input('tf2-5m', 'n_clicks'),
      Input('tf2-15m', 'n_clicks'), Input('tf2-30m', 'n_clicks'),
      Input('tf2-1h', 'n_clicks'), Input('tf2-1d', 'n_clicks')],
@@ -1081,16 +1082,18 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
      State('chart2-meta-store', 'data')],
     prevent_initial_call=True
 )
-def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
+def load_chart2_data(load_clicks, load_clicks2, tf1, tf5, tf15, tf30, tf1h, tf1d,
                      symbol, asset_type, exchange, n_candles, meta):
     """Load data for chart 2. Independent per-block state (3.3)."""
     try:
         ctx = dash.callback_context
         btn = (ctx.triggered[0]['prop_id'].split('.')[0]
                if ctx.triggered else 'load-chart-btn-2')
+        log("DEBUG", f"[CB2] TRIGGERED: {btn} | symbol={symbol} asset_type={asset_type}")
         tf_map = {'tf2-1m': '1 min', 'tf2-5m': '5 mins',
                   'tf2-15m': '15 mins', 'tf2-30m': '30 mins',
-                  'tf2-1h': '1 hour', 'tf2-1d': '1 day'}
+                  'tf2-1h': '1 hour', 'tf2-1d': '1 day',
+                  'load-chart-btn-2': None, 'load-chart2-btn': None}
 
         symbol     = (symbol or 'EURUSD').upper()
         asset_type = normalize_asset_type(asset_type)
@@ -1099,9 +1102,12 @@ def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
         # Determine TF from button click
         if btn in tf_map:
             tf = tf_map[btn]
+            if tf is None:
+                # Load button clicked - use stored TF or default to 5 mins
+                tf = (meta.get('tf') if meta else None) or '5 mins'
         else:
-            # Default to 1 day for context chart if not specified
-            tf = '1 day'
+            # Default to 5 mins for chart 2 if not specified
+            tf = '5 mins'
 
         # Check if this is a reset (symbol/TF changed) or append
         prev_symbol = meta.get('symbol') if meta else None
