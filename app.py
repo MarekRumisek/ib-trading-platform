@@ -372,6 +372,7 @@ app.layout = html.Div([
         dcc.Store(id='chart2-data-store'),
         dcc.Store(id='chart2-trigger-store'),
         dcc.Store(id='chart2-append-store'),  # For loading older bars on chart2
+        dcc.Store(id='chart2-append-confirm-store'),  # Dummy output for prepend callback
         dcc.Store(id='chart2-meta-store', data={'load_count': 0, 'oldest_time': None, 'total_bars': 0, 'symbol': None, 'tf': None}),
         dcc.Store(id='active-tf2-store', data='tf2-1d'),
         # AI stores
@@ -3069,7 +3070,7 @@ app.clientside_callback(
         return appendData.symbol||'ok';
     }
     """,
-    Output('indicator2-settings-store', 'data'), Input('chart2-append-store', 'data'),
+    Output('chart2-append-confirm-store', 'data'), Input('chart2-append-store', 'data'),
     prevent_initial_call=True
 )
 
