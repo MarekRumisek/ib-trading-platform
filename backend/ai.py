@@ -14,10 +14,10 @@ from modules.config_store import config_store
 import requests as http_client
 import json
 
-ai_bp = Blueprint('ai', __name__, url_prefix='/api/ai')
+ai_bp = Blueprint('ai', __name__, url_prefix='/api')
 
 
-@ai_bp.route('/analyze', methods=['POST'])
+@ai_bp.route('/ai/analyze', methods=['POST'])
 def analyze():
     """Analyze market data and generate insights."""
     data = request.get_json() or {}
@@ -31,7 +31,7 @@ def analyze():
     })
 
 
-@ai_bp.route('/suggest', methods=['GET'])
+@ai_bp.route('/ai/suggest', methods=['GET'])
 def suggest():
     """Get AI trade suggestion for a symbol."""
     symbol = request.args.get('symbol')
@@ -43,7 +43,7 @@ def suggest():
     })
 
 
-@ai_bp.route('/history', methods=['GET'])
+@ai_bp.route('/ai/history', methods=['GET'])
 def history():
     """Get historical AI analysis results."""
     limit = request.args.get('limit', 50, type=int)
@@ -55,7 +55,7 @@ def history():
     })
 
 
-@ai_bp.route('/evaluate', methods=['POST'])
+@ai_bp.route('/ai/evaluate', methods=['POST'])
 def ai_evaluate():
     """AI analysis of potential entry."""
     body = request.get_json(silent=True) or {}
@@ -102,6 +102,8 @@ Market Data:
             headers={
                 'Authorization': f'Bearer {api_key}',
                 'Content-Type': 'application/json',
+                'HTTP-Referer': 'http://localhost:8050',
+                'X-Title': 'IB Trading Platform',
             },
             json={
                 'model': model,
@@ -124,7 +126,7 @@ Market Data:
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
-@ai_bp.route('/check_position', methods=['POST'])
+@ai_bp.route('/ai/check_position', methods=['POST'])
 def ai_check_position():
     """AI review of an open position."""
     body = request.get_json(silent=True) or {}
@@ -168,6 +170,8 @@ Market Data:
             headers={
                 'Authorization': f'Bearer {api_key}',
                 'Content-Type': 'application/json',
+                'HTTP-Referer': 'http://localhost:8050',
+                'X-Title': 'IB Trading Platform',
             },
             json={
                 'model': model,
@@ -177,7 +181,7 @@ Market Data:
                 ],
                 'response_format': {'type': 'json_object'},
             },
-            timeout=30,
+            timeout=60,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -186,5 +190,46 @@ Market Data:
         parsed = json.loads(content)
         return jsonify(parsed)
 
+    except http_client.exceptions.Timeout:
+        return jsonify({'ok': False, 'error': 'openrouter_timeout'}), 504
+    except http_client.exceptions.RequestException as e:
+        return jsonify({'ok': False, 'error': str(e)}), 502
     except Exception as e:
         return jsonify({'ok': False, 'error': str(e)}), 500
+
+
+@ai_bp.route('/models', methods=['GET'])
+def list_models():
+    """List available free models from OpenRouter."""
+    api_key = config_store.get('openrouter_api_key', '')
+
+    if not api_key:
+        return jsonify({'ok': False, 'error': 'api_key_missing'}), 400
+
+    try:
+        resp = http_client.get(
+            'https://openrouter.ai/api/v1/models',
+            headers={
+                'Authorization': f'Bearer {api_key}',
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Filter free models (pricing.prompt == "0")
+        free_models = []
+        for model in data.get('data', []):
+            pricing = model.get('pricing', {})
+            prompt_price = pricing.get('prompt', '0')
+            if prompt_price == '0' or prompt_price == 0:
+                free_models.append({
+                    'id': model.get('id', ''),
+                    'name': model.get('name', model.get('id', '')),
+                    'context_length': model.get('context_length', 0),
+                })
+
+        return jsonify({'ok': True, 'models': free_models})
+
+    except Exception:
+        return jsonify({'ok': False, 'error': 'openrouter_error'}), 500
