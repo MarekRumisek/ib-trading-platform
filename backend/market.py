@@ -83,7 +83,13 @@ def api_indicators(symbol, tf):
     if bars is None or len(bars) == 0:
         return jsonify({'error': 'no data available'}), 404
     
-    result = {'symbol': sym, 'timeframe': timeframe, 'indicators': {}}
+    # Flat response structure matching frontend expectations in chart_manager.js setIndicators()
+    result = {
+        'ok': True,
+        'symbol': sym,
+        'timeframe': timeframe,
+        'bars': len(bars)
+    }
     
     for indicator_name in active:
         indicator_name = indicator_name.lower()
@@ -91,26 +97,39 @@ def api_indicators(symbol, tf):
             period = int(request.args.get('sma_period', 20))
             ind = SMA(period)
             values = ind.calculate(bars)
-            result['indicators']['sma'] = {'period': period, 'values': values[-50:]}
+            # Return all non-None values - frontend filters by timestamp
+            result['sma'] = [v for v in values if v['value'] is not None]
+            result['sma_period'] = period
         elif indicator_name == 'ema':
             period = int(request.args.get('ema_period', 20))
             ind = EMA(period)
             values = ind.calculate(bars)
-            result['indicators']['ema'] = {'period': period, 'values': values[-50:]}
+            # Return all non-None values - frontend filters by timestamp
+            result['ema'] = [v for v in values if v['value'] is not None]
+            result['ema_period'] = period
         elif indicator_name == 'rsi':
             period = int(request.args.get('rsi_period', 14))
             ind = RSI(period)
             values = ind.calculate(bars)
-            result['indicators']['rsi'] = {'period': period, 'values': values[-50:]}
+            # Return all non-None values - frontend filters by timestamp
+            result['rsi'] = [v for v in values if v['value'] is not None]
+            result['rsi_period'] = period
         elif indicator_name == 'macd':
             ind = MACD()
             values = ind.calculate(bars)
             if values is not None:
-                result['indicators']['macd'] = {
-                    'macd': values['macd'][-50:].tolist() if hasattr(values['macd'][-50:], 'tolist') else list(values['macd'][-50:]),
-                    'signal': values['signal'][-50:].tolist() if hasattr(values['signal'][-50:], 'tolist') else list(values['signal'][-50:]),
-                    'histogram': values['histogram'][-50:].tolist() if hasattr(values['histogram'][-50:], 'tolist') else list(values['histogram'][-50:])
-                }
+                # MACD needs special handling - return list of dicts with time, macd, signal, histogram
+                # Filter out None values and convert to list format
+                macd_data = []
+                for i in range(len(values['macd'])):
+                    if values['macd'][i] is not None:
+                        macd_data.append({
+                            'time': int(values['time'][i]),
+                            'macd': values['macd'][i],
+                            'signal': values['signal'][i],
+                            'histogram': values['histogram'][i]
+                        })
+                result['macd'] = macd_data
     
     return jsonify(result)
 
