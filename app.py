@@ -208,7 +208,6 @@ app.layout = html.Div([
                                    'border': '2px solid #667eea', 'background': '#1e1e2e',
                                    'color': 'white', 'fontSize': '14px', 'textAlign': 'center'}
                         ),
-                        html.Span(' svíček', style={'color': '#aaa', 'fontSize': '13px', 'marginRight': '10px'}),
                         html.Button(
                             '+ Load More', id='load-chart-btn', n_clicks=0,
                             title='Load chart with current settings',
@@ -216,6 +215,21 @@ app.layout = html.Div([
                                    'background': 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
                                    'border': 'none', 'borderRadius': '5px',
                                    'color': 'white', 'cursor': 'pointer', 'fontWeight': 'bold'}
+                        ),
+                        html.Button(
+                            '⊡ Fit',
+                            id='fit-chart-btn',
+                            n_clicks=0,
+                            style={
+                                'fontSize': '12px',
+                                'padding': '3px 8px',
+                                'background': '#2a2a3a',
+                                'color': '#aaa',
+                                'border': '1px solid #444',
+                                'borderRadius': '4px',
+                                'cursor': 'pointer',
+                                'marginLeft': '4px',
+                            }
                         ),
                         html.Span(id='bars-count-display', children='',
                                   style={'marginLeft': '15px', 'fontSize': '13px', 'color': '#888'})
@@ -317,7 +331,6 @@ app.layout = html.Div([
                                    'border': '2px solid #4caf50', 'background': '#1e1e2e',
                                    'color': 'white', 'fontSize': '14px', 'textAlign': 'center'}
                         ),
-                        html.Span(' svíček', style={'color': '#aaa', 'fontSize': '13px', 'marginRight': '10px'}),
                         html.Button(
                             '+ Load More', id='load-chart-btn-2', n_clicks=0,
                             title='Load chart with current settings',
@@ -325,6 +338,21 @@ app.layout = html.Div([
                                    'background': 'linear-gradient(135deg, #43a047 0%, #2e7d32 100%)',
                                    'border': 'none', 'borderRadius': '5px',
                                    'color': 'white', 'cursor': 'pointer', 'fontWeight': 'bold'}
+                        ),
+                        html.Button(
+                            '⊡ Fit',
+                            id='fit-chart2-btn',
+                            n_clicks=0,
+                            style={
+                                'fontSize': '12px',
+                                'padding': '3px 8px',
+                                'background': '#2a2a3a',
+                                'color': '#aaa',
+                                'border': '1px solid #444',
+                                'borderRadius': '4px',
+                                'cursor': 'pointer',
+                                'marginLeft': '4px',
+                            }
                         ),
                         html.Span(id='bars-count-display-2', children='',
                                   style={'marginLeft': '15px', 'fontSize': '13px', 'color': '#888'})
@@ -375,6 +403,9 @@ app.layout = html.Div([
         dcc.Store(id='ai-check-trigger', data=None),
         dcc.Store(id='indicator2-settings-store',
                   data={'sma': False, 'ema': True, 'rsi': False, 'macd': False}),
+        # Fit chart stores
+        dcc.Store(id='fit-chart-dummy', data=None),
+        dcc.Store(id='fit-chart2-dummy', data=None),
 
     ], style={'padding': '20px', 'background': '#2d2d3a',
               'borderRadius': '8px', 'marginBottom': '20px'}),
@@ -3409,6 +3440,35 @@ app.index_string = '''
     </body>
 </html>
 '''
+
+
+# ========== FIT CHART CALLBACKS ==========
+
+# Chart 1: Fit button callback
+app.clientside_callback(
+    """
+    function(n) {
+        if (n && window.lwcManager) window.lwcManager.fitContent();
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('fit-chart-dummy', 'data', allow_duplicate=True),
+    Input('fit-chart-btn', 'n_clicks'),
+    prevent_initial_call=True
+)
+
+# Chart 2: Fit button callback
+app.clientside_callback(
+    """
+    function(n) {
+        if (n && window.lwcManager2) window.lwcManager2.fitContent();
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('fit-chart2-dummy', 'data', allow_duplicate=True),
+    Input('fit-chart2-btn', 'n_clicks'),
+    prevent_initial_call=True
+)
 
 
 # ========== RUN ==========

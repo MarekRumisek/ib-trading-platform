@@ -1299,6 +1299,16 @@
     }
 
     // =================================================================
+    // Fit chart to show all bars
+    // =================================================================
+    function fitContent() {
+      if (chart) {
+        chart.timeScale().fitContent();
+        writeDebug("FIT", "[" + containerId + "] fitContent() called");
+      }
+    }
+
+    // =================================================================
     // Public API for this instance
     // =================================================================
     return {
@@ -1307,6 +1317,7 @@
       prependData: prependData,
       testChart: testChart,
       setTickEnabled: setTickEnabled,
+      fitContent: fitContent,
       addIndicator: addIndicator,
       removeIndicator: removeIndicator,
       setIndicators: setIndicators,
