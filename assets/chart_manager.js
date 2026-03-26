@@ -4,9 +4,10 @@
  * v2.5.0:
  *   - REFACTORED: Factory pattern - createChartInstance(containerId)
  *   - Each chart instance has independent state (chart, candleSeries, etc.)
- *   - Two instances: window.lwcManager (main), window.lwcManager2 (context)
- *   - lwcManager2: plain candlestick + volume only (no tick, indicators, trade lines)
+ *   - Two instances: window.lwcManager (Chart 1), window.lwcManager2 (Chart 2)
+ *   - Both charts have FULL parity - any feature on Chart 1 must work on Chart 2
  *   - Constants shared: VERSION, TICK_POLL_MS, CHART_BG, GRID_COLOR, TEXT_COLOR, etc.
+ *   - See AGENTS.md for architecture rules - AGENTS.md takes precedence over code comments
  */
 (function () {
   "use strict";
@@ -371,8 +372,7 @@
             currentTf,
         );
 
-        // Only enable tick polling if this instance supports it
-        // (lwcManager2 does NOT get tick polling per Phase 3 requirements)
+        // Tick polling - enabled per instance based on tickEnabled flag
         if (tickEnabled) startTickPolling(symbol, currentAssetType);
         else if (tickTimer) {
           clearInterval(tickTimer);
@@ -768,7 +768,8 @@
       sourceChart
         .timeScale()
         .subscribeVisibleLogicalRangeChange(function (range) {
-          if (syncingRange || !range) return;
+          // FIX: Check for null range AND null properties inside range
+          if (syncingRange || !range || range.from == null || range.to == null) return;
           syncingRange = true;
           targetCharts.forEach(function (tc) {
             try {
@@ -951,7 +952,10 @@
       // Aplikuj aktualni logical range hned po nacteni
       try {
         var curRange = chart.timeScale().getVisibleLogicalRange();
-        if (curRange) rsiChart.timeScale().setVisibleLogicalRange(curRange);
+        // FIX: Check both curRange and its properties
+        if (curRange && curRange.from != null && curRange.to != null) {
+          rsiChart.timeScale().setVisibleLogicalRange(curRange);
+        }
       } catch (e) {}
 
       writeDebug("IND", "RSI sub-chart OK: " + validData.length + " bodu");
@@ -1055,7 +1059,10 @@
       // Aplikuj aktualni logical range hned
       try {
         var curRange = chart.timeScale().getVisibleLogicalRange();
-        if (curRange) macdChart.timeScale().setVisibleLogicalRange(curRange);
+        // FIX: Check both curRange and its properties
+        if (curRange && curRange.from != null && curRange.to != null) {
+          macdChart.timeScale().setVisibleLogicalRange(curRange);
+        }
       } catch (e) {}
 
       writeDebug("IND", "MACD sub-chart OK: " + validMacd.length + " bodu");
@@ -1206,8 +1213,10 @@
         setTimeout(function () {
           try {
             var curRange = chart.timeScale().getVisibleLogicalRange();
-            if (curRange)
+            // FIX: Check both curRange and its properties
+            if (curRange && curRange.from != null && curRange.to != null) {
               volumeChart.timeScale().setVisibleLogicalRange(curRange);
+            }
           } catch (e) {}
         }, 50);
       }
@@ -1238,16 +1247,13 @@
   // =================================================================
   // Create two chart instances
   // =================================================================
-  // Main chart: lwcManager gets full functionality (tick, indicators, trade lines)
+  // Both charts have FULL parity per AGENTS.md architecture rules
   window.lwcManager = createChartInstance("lwc-container");
-
-  // Context chart: lwcManager2 is plain candlestick + volume only
-  // Per Phase 3: NO tick polling, NO indicators, NO trade lines
   window.lwcManager2 = createChartInstance("lwc-container-2");
 
   writeDebug("INIT", "=== LWC Manager " + VERSION + " factory loaded ===");
-  writeDebug("INIT", "=== lwcManager (main): full features ===");
-  writeDebug("INIT", "=== lwcManager2 (context): candlestick + volume only ===");
+  writeDebug("INIT", "=== lwcManager (Chart 1): full features ===");
+  writeDebug("INIT", "=== lwcManager2 (Chart 2): full features (parity with Chart 1) ===");
 
   // Auto-init main chart after DOM is ready
   setTimeout(function () {

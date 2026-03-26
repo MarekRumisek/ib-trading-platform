@@ -138,9 +138,7 @@ app.layout = html.Div([
                                 'borderRadius': '4px'}),
                 html.Span('⚠️ 15min delay na demo',
                           style={'fontSize': '11px', 'color': '#666',
-                                 'marginRight': '10px', 'verticalAlign': 'middle'}),
-                html.Button('⚡ TICK: OFF', id='tick-toggle-btn',
-                            n_clicks=0, className='tick-btn tick-off')
+                                 'marginRight': '10px', 'verticalAlign': 'middle'})
             ], style={'display': 'inline-block', 'float': 'right'})
         ], style={'marginBottom': '10px', 'overflow': 'hidden'}),
 
@@ -249,13 +247,6 @@ app.layout = html.Div([
                         html.Button('30m', id='tf2-30m', n_clicks=0, className='tf-btn'),
                         html.Button('1h',  id='tf2-1h',  n_clicks=0, className='tf-btn'),
                         html.Button('1D',  id='tf2-1d',  n_clicks=0, className='tf-btn tf-active'),
-                        html.Button(
-                            'Load Chart', id='load-chart2-btn', n_clicks=0,
-                            style={'marginLeft': '15px', 'padding': '8px 20px',
-                                   'background': 'linear-gradient(135deg, #43a047 0%, #2e7d32 100%)',
-                                   'border': 'none', 'borderRadius': '5px',
-                                   'color': 'white', 'cursor': 'pointer', 'fontWeight': 'bold'}
-                        ),
                         html.Span(id='chart2-loading-indicator', children='',
                                   style={'marginLeft': '15px', 'fontSize': '13px',
                                          'color': '#ffa726', 'fontStyle': 'italic',
@@ -938,8 +929,6 @@ _TOPUP_DURATION = {
      Output('chart-append-store', 'data'),
      Output('chart-meta-store', 'data'),
      Output('tick-enabled-store', 'data', allow_duplicate=True),
-     Output('tick-toggle-btn', 'children', allow_duplicate=True),
-     Output('tick-toggle-btn', 'className', allow_duplicate=True),
      Output('bars-count-display', 'children')],
     [Input('load-chart-btn', 'n_clicks'),
      Input('tf-1m',  'n_clicks'), Input('tf-5m',  'n_clicks'),
@@ -949,11 +938,12 @@ _TOPUP_DURATION = {
     [State('symbol-input', 'value'),
      State('asset-type-select', 'value'),
      State('candles-count-input', 'value'),
-     State('chart-meta-store', 'data')],
+     State('chart-meta-store', 'data'),
+     State('active-tf-store', 'data')],  # FIX: Use active TF from UI for Load More
     prevent_initial_call=True
 )
 def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
-                    symbol, asset_type, n_candles, meta):
+                   symbol, asset_type, n_candles, meta, active_tf):
     print(f"[LOAD_CHART] Called! load_clicks={load_clicks}, tf1={tf1}, tf5={tf5}, tf15={tf15}, tf30={tf30}, tf1h={tf1h}, tf1d={tf1d}")
     try:
         ctx = dash.callback_context
@@ -963,13 +953,24 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
                   'tf-15m': '15 mins', 'tf-30m': '30 mins',
                   'tf-1h': '1 hour', 'tf-1d': '1 day'}
         
+        # FIX: Map active-tf button ID to timeframe string
+        tf_id_to_tf = {'tf-1m': '1 min', 'tf-5m': '5 mins', 'tf-15m': '15 mins',
+                       'tf-30m': '30 mins', 'tf-1h': '1 hour', 'tf-1d': '1 day'}
+        
         # Determine if TF button was clicked
         if btn in tf_map:
             app_state['current_timeframe'] = tf_map[btn]
         
         symbol     = (symbol or 'AAPL').upper()
         asset_type = normalize_asset_type(asset_type)
-        tf         = app_state['current_timeframe']
+        
+        # FIX: For Load More, use active TF from UI, not from app_state
+        # This ensures Load More respects the selected timeframe in the UI
+        if btn == 'load-chart-btn' or btn == 'deep-load-finished-trigger':
+            tf = tf_id_to_tf.get(active_tf) or app_state['current_timeframe']
+            log("DEBUG", f"[CB] Load More: using active_tf={active_tf} -> tf={tf}")
+        else:
+            tf = app_state['current_timeframe']
         n_candles  = max(10, min(500, int(n_candles or 60)))
         
         # INFO: Log inputs
@@ -993,7 +994,7 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
             log("INFO", f"[CB] IB returned {len(bars)} bars")
             
             if not bars:
-                return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, '❌ Žádná data'
+                return dash.no_update, dash.no_update, dash.no_update, dash.no_update, '❌ Žádná data'
             
             # Update meta
             new_meta = {
@@ -1010,7 +1011,7 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
             
             log('INFO', f'[CB] VRACIM {len(bars)} SVICCEK DO STORE | tf={tf} | bars[0].time={bars[0]["time"] if bars else "N/A"}')
             log('INFO', '[TICK] Auto-enabled on chart load')
-            return chart_data, None, new_meta, True, '⚡ TICK: ON', 'tick-btn tick-on', bars_display
+            return chart_data, None, new_meta, True, bars_display
         
         else:
             # === APPEND: fetch older candles ===
@@ -1028,7 +1029,7 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
                     'n_candles': n_candles
                 }
                 chart_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars, 'mode': 'initial'}
-                return chart_data, None, new_meta, True, '⚡ TICK: ON', 'tick-btn tick-on', f"📊 {len(bars)} svíček"
+                return chart_data, None, new_meta, True, f"📊 {len(bars)} svíček"
             
             log("DEBUG", f"[CB] APPEND: {symbol} ({asset_type}) | {tf} | n={n_candles} | before={oldest_time} | load_count={meta.get('load_count', 0)}")
             
@@ -1050,7 +1051,7 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
                 
                 if not older_bars or len(older_bars) == 0:
                     log("DIAG", f"[CB] 1D: no older bars after filter - returning no_update")
-                    return dash.no_update, None, dash.no_update, dash.no_update, dash.no_update, dash.no_update, '⚠️ Žádná starší data'
+                    return dash.no_update, None, dash.no_update, dash.no_update, '⚠️ Žádná starší data'
                 
                 # Take only the first n_candles after filtering
                 older_bars = older_bars[:n_candles]
@@ -1065,7 +1066,7 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
                 older_bars = ib_gateway.get_n_bars(symbol, n_candles, tf, asset_type, end_time=append_end_time)
                 
                 if not older_bars:
-                    return dash.no_update, None, dash.no_update, dash.no_update, dash.no_update, dash.no_update, '⚠️ Žádná starší data'
+                    return dash.no_update, None, dash.no_update, dash.no_update, '⚠️ Žádná starší data'
             
             log("DEBUG", f"[CB] IB returned {len(older_bars)} older bars | first_time={older_bars[0]['time'] if older_bars else 'N/A'}")
             
@@ -1083,11 +1084,11 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
             append_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': older_bars, 'mode': 'append'}
             bars_display = f"📊 {new_meta['total_bars']} svíček (+{len(older_bars)})"
             
-            return dash.no_update, append_data, new_meta, dash.no_update, dash.no_update, dash.no_update, bars_display
+            return dash.no_update, append_data, new_meta, dash.no_update, bars_display
     
     except Exception as e:
         log("INFO", f"[CB] EXCEPTION: {e}")
-        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, f'❌ {e}'
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, f'❌ {e}'
 
 
 # ------------------------------------------------------------------
@@ -1099,7 +1100,6 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
      Output('chart2-meta-store', 'data'),
      Output('bars-count-display-2', 'children')],
     [Input('load-chart-btn-2', 'n_clicks'),
-     Input('load-chart2-btn', 'n_clicks'),
      Input('tf2-1m', 'n_clicks'), Input('tf2-5m', 'n_clicks'),
      Input('tf2-15m', 'n_clicks'), Input('tf2-30m', 'n_clicks'),
      Input('tf2-1h', 'n_clicks'), Input('tf2-1d', 'n_clicks')],
@@ -1109,36 +1109,42 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
      State('asset-type-select-2', 'value'),
      State('exchange-select-2', 'value'),
      State('candles-count-input-2', 'value'),
-     State('chart2-meta-store', 'data')],
+     State('chart2-meta-store', 'data'),
+     State('active-tf2-store', 'data')],  # FIX: Use active TF from UI for Load More
     prevent_initial_call=True
 )
-def load_chart2_data(load_clicks, load_clicks2, tf1, tf5, tf15, tf30, tf1h, tf1d,
-                     symbol, asset_type, exchange, n_candles, meta):
+def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
+                     symbol, asset_type, exchange, n_candles, meta, active_tf2):
     """Load data for chart 2. Independent per-block state (3.3)."""
     try:
         ctx = dash.callback_context
         btn = (ctx.triggered[0]['prop_id'].split('.')[0]
                if ctx.triggered else 'load-chart-btn-2')
         log("DEBUG", f"[CB2] TRIGGERED: {btn} | symbol={symbol} asset_type={asset_type}")
+        # DIAG: Log meta.tf to understand Load More issue
+        meta_tf = meta.get('tf') if meta else None
+        log("DIAG", f"[CB2] meta.tf={meta_tf} | btn={btn} | btn in tf_map={btn in {'tf2-1m': '1 min', 'tf2-5m': '5 mins', 'tf2-15m': '15 mins', 'tf2-30m': '30 mins', 'tf2-1h': '1 hour', 'tf2-1d': '1 day'}}")
         tf_map = {'tf2-1m': '1 min', 'tf2-5m': '5 mins',
                   'tf2-15m': '15 mins', 'tf2-30m': '30 mins',
                   'tf2-1h': '1 hour', 'tf2-1d': '1 day'}
-        # NOTE: load-chart2-btn is for initial load (handled in tf_map as None)
-        # load-chart-btn-2 is "Load More" - NOT in tf_map so it triggers APPEND
+        # NOTE: load-chart-btn-2 is "Load More" - NOT in tf_map so it triggers APPEND
 
         symbol     = (symbol or 'EURUSD').upper()
         asset_type = normalize_asset_type(asset_type)
         n_candles  = max(10, min(500, int(n_candles or 60)))
 
+        # FIX: Map active-tf2-store button ID to timeframe string
+        tf_id_to_tf = {'tf2-1m': '1 min', 'tf2-5m': '5 mins', 'tf2-15m': '15 mins',
+                       'tf2-30m': '30 mins', 'tf2-1h': '1 hour', 'tf2-1d': '1 day'}
+        
         # Determine TF from button click
         if btn in tf_map:
             tf = tf_map[btn]
-            if tf is None:
-                # Load button clicked - use stored TF or default to 5 mins
-                tf = (meta.get('tf') if meta else None) or '5 mins'
         else:
-            # Default to 5 mins for chart 2 if not specified
-            tf = '5 mins'
+            # For load-chart-btn-2 (Load More), use active TF from UI, not from meta
+            # This fixes the issue where Load More didn't respect the selected timeframe
+            tf = tf_id_to_tf.get(active_tf2) or (meta.get('tf') if meta else None) or '5 mins'
+            log("DEBUG", f"[CB2] Load More: using active_tf2={active_tf2} -> tf={tf}")
 
         # Check if this is a reset (symbol/TF changed) or append
         prev_symbol = meta.get('symbol') if meta else None
@@ -2750,32 +2756,6 @@ app.clientside_callback(
     prevent_initial_call=True
 )
 
-app.clientside_callback(
-    """function(n){if(n>0&&window.lwcDebug)window.lwcDebug('BTN','Load Chart2 n='+n+' - cekam na Python/IB...');return n;}""",
-    Output('chart2-trigger-store', 'data', allow_duplicate=True), Input('load-chart2-btn', 'n_clicks'),
-    prevent_initial_call=True
-)
-
-app.clientside_callback(
-    """
-    function(n, currentEnabled) {
-        var enabled = (n > 0) ? !currentEnabled : currentEnabled;
-        if (n > 0) {
-            if (window.lwcManager) window.lwcManager.setTickEnabled(enabled);
-            if (window.lwcDebug)
-                window.lwcDebug('TICK', 'Tick ' + (enabled ? 'ZAPNUT ⚡' : 'VYPNUT'));
-        }
-        return [enabled, '⚡ TICK: ' + (enabled ? 'ON' : 'OFF'),
-                'tick-btn ' + (enabled ? 'tick-on' : 'tick-off')];
-    }
-    """,
-    [Output('tick-enabled-store', 'data', allow_duplicate=True),
-     Output('tick-toggle-btn', 'children', allow_duplicate=True),
-     Output('tick-toggle-btn', 'className', allow_duplicate=True)],
-    Input('tick-toggle-btn', 'n_clicks'),
-    State('tick-enabled-store', 'data'),
-    prevent_initial_call=True
-)
 
 # Synchronize tick state to JS when Python changes tick-enabled-store (e.g., auto-enable on chart load)
 app.clientside_callback(
@@ -2942,14 +2922,16 @@ app.clientside_callback(
         if(!ctx||!ctx.triggered||ctx.triggered.length===0)return '';
         var tid=ctx.triggered_id||ctx.triggered[0].prop_id.split('.')[0];
         if(tid==='deep-load-finished-trigger')return '✅ Data z cache načtena';
-        var labels={'tf2-1m':'1m','tf2-5m':'5m','tf2-15m':'15m','tf2-30m':'30m','tf2-1h':'1h','tf2-1d':'1D','load-chart2-btn':'Load'};
-        return '⏳ Načítám '+(labels[tid]||tid)+'\u2026';
+        var labels={'tf2-1m':'1m','tf2-5m':'5m','tf2-15m':'15m','tf2-30m':'30m','tf2-1h':'1h','tf2-1d':'1D','load-chart-btn-2':''};
+        var label=labels[tid];
+        if(!label)return '';
+        return '⏳ Načítám '+label+'\u2026';
     }
     """,
     Output('chart2-loading-indicator', 'children'),
     [Input('tf2-1m','n_clicks'),Input('tf2-5m','n_clicks'),Input('tf2-15m','n_clicks'),
      Input('tf2-30m','n_clicks'),Input('tf2-1h','n_clicks'),Input('tf2-1d','n_clicks'),
-     Input('load-chart2-btn','n_clicks'),Input('deep-load-finished-trigger','data')]
+     Input('load-chart-btn-2','n_clicks'),Input('deep-load-finished-trigger','data')]
 )
 
 app.clientside_callback(
@@ -3233,7 +3215,7 @@ app.index_string = '''
         <title>{%title%}</title>
         {%favicon%}
         {%css%}
-        <script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+        <script src="/assets/lightweight-charts.4.2.0.production.js"></script>
         <style>
             body { margin: 0; padding: 0; background: #1e1e2e; }
             #lwc-container { display: block; width: 100%; height: 500px; }
@@ -3383,6 +3365,17 @@ app.index_string = '''
                             return;
                         }
                         window.lwcManager.setTradeLines = setTradeLines;
+                        // Also attach to lwcManager2 for Chart 2 parity
+                        if (window.lwcManager2) {
+                            window.lwcManager2.setTradeLines = setTradeLines;
+                        } else {
+                            // Retry until lwcManager2 is available
+                            setTimeout(function() {
+                                if (window.lwcManager2) {
+                                    window.lwcManager2.setTradeLines = setTradeLines;
+                                }
+                            }, 500);
+                        }
                     }
 
                     attachTradeLines();

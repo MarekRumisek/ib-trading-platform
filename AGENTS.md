@@ -34,15 +34,22 @@ IB paper trading requires short delays when submitting orders.
 Without `ib.sleep(n)` orders may remain in `PendingSubmit`.
 ⚠️ Vždy používej `ib.sleep()`, nikoli `time.sleep()` — `time.sleep()` blokuje ib_async event loop a způsobuje zamrznutí.
 Once development is stable the platform will migrate to a live IB account.
-### Dual Chart Architecture (Phase 3)
-`assets/chart_manager.js` uses a **factory pattern** (`createChartInstance(containerId)`) to support multiple independent chart instances:
-- Each instance has its own local state (chart, candleSeries, volumeChart, allBars, tickTimer, tickEnabled, etc.)
-- Constants are shared at module level (VERSION, TICK_POLL_MS, CHART_BG, GRID_COLOR, TEXT_COLOR, UP_COLOR, DOWN_COLOR, CHART_HEIGHT, VOLUME_HEIGHT, RSI_HEIGHT, MACD_HEIGHT, TF_TO_SECONDS)
-- `window.lwcDebug` is a shared global logger function
-- Počet instancí je dynamický (1–4) dle `chart_count` z Settings. Každá instance je plnohodnotná — candlestick, volume, RSI, MACD, indikátory (SMA/EMA), trade lines i AI anotace.
-- ⚠️ Starý popis `window.lwcManager2` jako "context chart, candlestick + volume only" je zastaralý a neplatí. Všechny instance jsou identické co do funkcí, liší se jen indexem.
-- Sub-chart container IDs (volume, rsi, macd) are unique per instance using `containerId` prefix
-- When modifying chart_manager.js, ensure new functionality uses instance-local state via closure, not module-level variables
+### Dual Chart Architecture
+Oba charty (lwcManager = Chart 1, lwcManager2 = Chart 2) jsou
+nezávislé instance stejného chart manageru (factory pattern).
+Každý má vlastní symbol, timeframe, historii a ovládání —
+jako dva monitory na trading desktopu.
+Jakákoliv funkce která existuje na Chart 1 musí fungovat
+identicky i na Chart 2. Při každém bugreportu na Chart 2
+porovnej implementaci s Chart 1 — rozdíl je zpravidla příčina.
+`assets/chart_manager.js` — klíčové principy:
+- Každá instance má vlastní lokální stav přes closure
+  (chart, candleSeries, volumeChart, allBars, tickTimer, atd.)
+- Sdílené jsou pouze konstanty na úrovni modulu
+- Sub-chart container IDs jsou unikátní per instance
+  (prefix containerId: např. lwc-container-2-volume-container)
+- Každá nová funkcionalita musí používat instance-local state,
+  nikoliv module-level proměnné
 ## Agent Work Strategy
 Agents should avoid frequent micro-edits across multiple files.
 Small back-and-forth edits significantly increase token usage and cost.
