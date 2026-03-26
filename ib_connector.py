@@ -703,12 +703,16 @@ class _HistWorker:
 
 
 def _bar_date_to_unix(bar_date):
-    if hasattr(bar_date, 'timestamp'):
-        return int(bar_date.timestamp())
+    # Always return UTC timestamp - no timezone offset
+    import calendar
+    if hasattr(bar_date, 'timetuple'):
+        # For datetime objects: use calendar.timegm (UTC) instead of .timestamp() (localtime)
+        return int(calendar.timegm(bar_date.timetuple()))
     if isinstance(bar_date, str):
         clean = bar_date.split(' US/')[0].split(' America/')[0].strip()
         fmt   = '%Y%m%d' if len(clean) == 8 else '%Y%m%d %H:%M:%S'
-        return int(datetime.strptime(clean, fmt).timestamp())
+        dt = datetime.strptime(clean, fmt)
+        return int(calendar.timegm(dt.timetuple()))
     return int(datetime.now().timestamp())
 
 

@@ -47,12 +47,12 @@ def get_bars(symbol):
     formatted_bars = []
     for bar in recent_bars:
         formatted_bars.append({
-            'time': bar.name.timestamp() if hasattr(bar.name, 'timestamp') else int(bar.name),
-            'open': float(bar.Open),
-            'high': float(bar.High),
-            'low': float(bar.Low),
-            'close': float(bar.Close),
-            'volume': int(bar.Volume) if hasattr(bar, 'Volume') and bar.Volume else 0
+            'time': int(bar['time']),
+            'open': float(bar['open']),
+            'high': float(bar['high']),
+            'low': float(bar['low']),
+            'close': float(bar['close']),
+            'volume': int(bar['volume']) if bar.get('volume') else 0
         })
     
     return jsonify({

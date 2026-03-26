@@ -366,6 +366,8 @@ app.layout = html.Div([
         dcc.Store(id='chart2-append-confirm-store'),  # Dummy output for prepend callback
         dcc.Store(id='chart2-meta-store', data={'load_count': 0, 'oldest_time': None, 'total_bars': 0, 'symbol': None, 'tf': None}),
         dcc.Store(id='active-tf2-store', data='tf2-1d'),
+        dcc.Store(id='tick-enabled-store-2', data=False),  # Chart 2 tick enabled
+        dcc.Store(id='tick-sync-dummy-2', data=None),  # Chart 2 tick sync
         # AI stores
         dcc.Store(id='ai-models-store', data=[]),
         dcc.Store(id='ai-evaluate-state', data={'visible': False, 'loading': False, 'result': None, 'error': None}),
@@ -1098,6 +1100,7 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
     [Output('chart2-data-store', 'data'),
      Output('chart2-append-store', 'data'),
      Output('chart2-meta-store', 'data'),
+     Output('tick-enabled-store-2', 'data', allow_duplicate=True),
      Output('bars-count-display-2', 'children')],
     [Input('load-chart-btn-2', 'n_clicks'),
      Input('tf2-1m', 'n_clicks'), Input('tf2-5m', 'n_clicks'),
@@ -1161,7 +1164,7 @@ def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
             log("DEBUG", f"[CB2] IB returned {len(bars)} bars")
 
             if not bars:
-                return dash.no_update, dash.no_update, dash.no_update, '❌ Žádná data'
+                return dash.no_update, dash.no_update, dash.no_update, dash.no_update, '❌ Žádná data'
 
             new_meta = {
                 'load_count': 1,
@@ -1174,7 +1177,8 @@ def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
 
             chart2_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars, 'mode': 'initial'}
             bars_display = f"📊 {len(bars)} svíček"
-            return chart2_data, None, new_meta, bars_display
+            log('INFO', '[CB2] Auto-enabled tick on chart load')
+            return chart2_data, None, new_meta, True, bars_display
 
         else:
             # === APPEND: fetch older candles ===
@@ -1191,7 +1195,7 @@ def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
                     'n_candles': n_candles
                 }
                 chart2_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': bars, 'mode': 'initial'}
-                return chart2_data, None, new_meta, f"📊 {len(bars)} svíček"
+                return chart2_data, None, new_meta, True, f"📊 {len(bars)} svíček"
 
             log("DEBUG", f"[CB2] APPEND: {symbol} ({asset_type}) | {tf} | n={n_candles} | before={oldest_time}")
 
@@ -1200,7 +1204,7 @@ def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
             log("DEBUG", f"[CB2] IB returned {len(older_bars)} older bars")
 
             if not older_bars:
-                return dash.no_update, None, dash.no_update, '⚠️ Žádná starší data'
+                return dash.no_update, None, dash.no_update, dash.no_update, '⚠️ Žádná starší data'
 
             # Update meta with new oldest time
             new_meta = {
@@ -1216,11 +1220,11 @@ def load_chart2_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d,
             append_data = {'symbol': symbol, 'asset_type': asset_type, 'timeframe': tf, 'bars': older_bars, 'mode': 'append'}
             bars_display = f"📊 {new_meta['total_bars']} svíček (+{len(older_bars)})"
 
-            return dash.no_update, append_data, new_meta, bars_display
+            return dash.no_update, append_data, new_meta, dash.no_update, bars_display
 
     except Exception as e:
         log("INFO", f"[CB2] EXCEPTION: {e}")
-        return dash.no_update, dash.no_update, dash.no_update, f'❌ {e}'
+        return dash.no_update, dash.no_update, dash.no_update, dash.no_update, f'❌ {e}'
 
 
 @app.callback(
@@ -2770,6 +2774,19 @@ app.clientside_callback(
     prevent_initial_call=True
 )
 
+# Chart 2: Synchronize tick state to JS when Python changes tick-enabled-store-2
+app.clientside_callback(
+    """
+    function(enabled) {
+        if (window.lwcManager2) window.lwcManager2.setTickEnabled(!!enabled);
+        return window.dash_clientside.no_update;
+    }
+    """,
+    Output('tick-sync-dummy-2', 'data', allow_duplicate=True),
+    Input('tick-enabled-store-2', 'data'),
+    prevent_initial_call=True
+)
+
 app.clientside_callback(
     """
     function(nSma, nEma, nRsi, nMacd, settings) {
@@ -2940,6 +2957,9 @@ app.clientside_callback(
         var ctx=window.dash_clientside.callback_context;
         if(!ctx||!ctx.triggered||ctx.triggered.length===0)return window.dash_clientside.no_update;
         var tid=ctx.triggered_id||ctx.triggered[0].prop_id.split('.')[0];
+        var tfMap={'tf-1m':'1 min','tf-5m':'5 mins','tf-15m':'15 mins','tf-30m':'30 mins','tf-1h':'1 hour','tf-1d':'1 day'};
+        var tfStr=tfMap[tid]||'5 mins';
+        if(window.lwcManager&&window.lwcManager.setCurrentTf)window.lwcManager.setCurrentTf(tfStr);
         if(window.lwcDebug){var lbl={'tf-1m':'1m','tf-5m':'5m','tf-15m':'15m','tf-30m':'30m','tf-1h':'1h','tf-1d':'1D'};window.lwcDebug('TF','Zmen -> '+(lbl[tid]||tid)+' (cekam na IB...)'); }
         return tid;
     }
@@ -2968,6 +2988,9 @@ app.clientside_callback(
         var ctx=dash_clientside.callback_context;
         if(!ctx.triggered||ctx.triggered.length===0)return window.dash_clientside.no_update;
         var tid=ctx.triggered_id||ctx.triggered[0].prop_id.split('.')[0];
+        var tfMap={'tf2-1m':'1 min','tf2-5m':'5 mins','tf2-15m':'15 mins','tf2-30m':'30 mins','tf2-1h':'1 hour','tf2-1d':'1 day'};
+        var tfStr=tfMap[tid]||'1 day';
+        if(window.lwcManager2&&window.lwcManager2.setCurrentTf)window.lwcManager2.setCurrentTf(tfStr);
         return tid;
     }
     """,

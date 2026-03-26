@@ -86,6 +86,11 @@
     var initAttempts = 0;
     var syncingRange = false;
     var volumePaddingLeft = 0;
+    var rangeChangeHandler = null; // For listener leak prevention in syncTimeScales
+    var rsiLineRef = null;         // Reference to RSI line series for update
+    var macdLineRef = null;        // Reference to MACD line series for update
+    var macdSignalRef = null;      // Reference to MACD signal line for update
+    var macdHistRef = null;        // Reference to MACD histogram for update
     var tickPollCount = 0; // counts poll cycles for indicator refresh
     var INDICATOR_REFRESH_EVERY = 12; // refresh indicators every ~60s (12 * 5s)
     var activeIndicatorSettings = null; // last known indicator settings
@@ -469,10 +474,18 @@
         }
 
         // Restore visible range (user stays at same position)
-        // NOTE: setVisibleLogicalRange is skipped because it causes async errors in lightweight-charts
-        // when called after setData with many bars. The user will need to scroll to see the new bars.
-        if (visibleRange) {
-          writeDebug("DIAG", "[" + containerId + "] skipping setVisibleLogicalRange to avoid async errors");
+        // FIX: Use requestAnimationFrame to avoid async errors
+        if (visibleRange && visibleRange.from != null && visibleRange.to != null) {
+          requestAnimationFrame(function() {
+            try {
+              chart.timeScale().setVisibleLogicalRange(visibleRange);
+              if (volumeChart) {
+                volumeChart.timeScale().setVisibleLogicalRange(visibleRange);
+              }
+            } catch(e) {
+              writeDebug("WARN", "[" + containerId + "] viewport restore: " + e.message);
+            }
+          });
         }
 
         writeDebug(
@@ -763,27 +776,27 @@
 
     // =================================================================
     // 6. syncTimeScales  - time range sync pro volume chart
+    // FIX: Prevent listener leak by unsubscribing before subscribing new handler
     // =================================================================
     function syncTimeScales(sourceChart, targetCharts) {
-      sourceChart
-        .timeScale()
-        .subscribeVisibleLogicalRangeChange(function (range) {
-          // FIX: Check for null range AND null properties inside range
-          if (syncingRange || !range || range.from == null || range.to == null) return;
-          syncingRange = true;
-          targetCharts.forEach(function (tc) {
-            try {
-              if (tc && tc.timeScale) {
-                tc.timeScale().setVisibleLogicalRange(range);
-              } else {
-                writeDebug("WARN", "[" + containerId + "] syncTimeScales: tc is null or has no timeScale");
-              }
-            } catch (e) {
-              writeDebug("ERR", "[" + containerId + "] syncTimeScales failed: " + e.message);
-            }
-          });
-          syncingRange = false;
+      if (rangeChangeHandler) {
+        try {
+          sourceChart.timeScale()
+            .unsubscribeVisibleLogicalRangeChange(rangeChangeHandler);
+        } catch(e) {}
+      }
+      rangeChangeHandler = function(range) {
+        if (syncingRange || !range || range.from == null || range.to == null) return;
+        syncingRange = true;
+        targetCharts.forEach(function(tc) {
+          try {
+            if (tc && tc.timeScale) tc.timeScale().setVisibleLogicalRange(range);
+          } catch(e) {}
         });
+        syncingRange = false;
+      };
+      sourceChart.timeScale()
+        .subscribeVisibleLogicalRangeChange(rangeChangeHandler);
     }
 
     // =================================================================
@@ -855,6 +868,12 @@
       }
       removeSubContainer("rsi");
       removeSubContainer("macd");
+      rsiLineRef = null;
+      macdLineRef = null;
+      macdSignalRef = null;
+      macdHistRef = null;
+      // Re-sync volume chart after sub-charts are cleared
+      if (chart && volumeChart) syncTimeScales(chart, [volumeChart]);
     }
 
     // =================================================================
@@ -942,6 +961,7 @@
       );
 
       subCharts.rsi = rsiChart;
+      rsiLineRef = rsiLine; // Store reference for update
 
       // Sync z hlavniho chartu (jednosmerny - RSI nema scroll)
       var allPassive = [rsiChart];
@@ -1050,6 +1070,9 @@
       );
 
       subCharts.macd = macdChart;
+      macdLineRef = macdLine;
+      macdSignalRef = signalLine;
+      macdHistRef = histSeries;
 
       var allPassive = [macdChart];
       if (volumeChart) allPassive.push(volumeChart);
@@ -1193,19 +1216,63 @@
         removeIndicator("ema");
       }
 
-      if (subCharts.rsi) {
-        subCharts.rsi.remove();
-        delete subCharts.rsi;
+      if (data.rsi) {
+        if (subCharts.rsi && rsiLineRef) {
+          // Just update data - no flickering
+          var validRsi = data.rsi.filter(function(d) {
+            return d.value !== null && d.value !== undefined;
+          });
+          if (validRsi.length > 0) {
+            rsiLineRef.setData(validRsi.map(function(d) {
+              return { time: d.time, value: d.value };
+            }));
+          }
+        } else {
+          if (subCharts.rsi) { subCharts.rsi.remove(); delete subCharts.rsi; }
+          removeSubContainer("rsi");
+          createRsiChart(data.rsi, data.rsi_period || 14);
+        }
+      } else {
+        if (subCharts.rsi) { subCharts.rsi.remove(); delete subCharts.rsi; }
+        removeSubContainer("rsi");
+        rsiLineRef = null;
       }
-      removeSubContainer("rsi");
-      if (data.rsi) createRsiChart(data.rsi, data.rsi_period || 14);
 
-      if (subCharts.macd) {
-        subCharts.macd.remove();
-        delete subCharts.macd;
+      if (data.macd) {
+        if (subCharts.macd && macdLineRef) {
+          var validMacd = data.macd.filter(function(d) {
+            return d.macd !== null && d.macd !== undefined;
+          });
+          var validSignal = data.macd.filter(function(d) {
+            return d.signal !== null && d.signal !== undefined;
+          });
+          var validHist = data.macd.filter(function(d) {
+            return d.histogram !== null && d.histogram !== undefined;
+          });
+          if (validMacd.length > 0) {
+            macdLineRef.setData(validMacd.map(function(d) {
+              return { time: d.time, value: d.macd };
+            }));
+            macdSignalRef.setData(validSignal.map(function(d) {
+              return { time: d.time, value: d.signal };
+            }));
+            macdHistRef.setData(validHist.map(function(d) {
+              return {
+                time: d.time, value: d.histogram,
+                color: d.histogram >= 0 ? UP_COLOR + "aa" : DOWN_COLOR + "aa"
+              };
+            }));
+          }
+        } else {
+          if (subCharts.macd) { subCharts.macd.remove(); delete subCharts.macd; }
+          removeSubContainer("macd");
+          createMacdChart(data.macd);
+        }
+      } else {
+        if (subCharts.macd) { subCharts.macd.remove(); delete subCharts.macd; }
+        removeSubContainer("macd");
+        macdLineRef = null; macdSignalRef = null; macdHistRef = null;
       }
-      removeSubContainer("macd");
-      if (data.macd) createMacdChart(data.macd);
 
       // Pridat padding bary do volumeSeries pro timestamps EMA/SMA (historicke body pred prvni svickou).
       // Resync volume chartu s hlavnim chartem (EMA/SMA maj uz stejne timestamps jako OHLCV)
@@ -1220,6 +1287,15 @@
           } catch (e) {}
         }, 50);
       }
+    }
+
+    // =================================================================
+    // Set current timeframe (for TF switch callbacks)
+    // =================================================================
+    function setCurrentTf(tf) {
+      currentTf = tf;
+      tfSeconds = TF_TO_SECONDS[tf] || 300;
+      writeDebug("TF", "[" + containerId + "] TF set: " + tf + " -> " + tfSeconds + "s");
     }
 
     // =================================================================
@@ -1241,6 +1317,34 @@
       getAllBars: function () {
         return allBars;
       },
+      getCurrentSymbol: function () {
+        return currentSymbol;
+      },
+      getCurrentAssetType: function () {
+        return currentAssetType;
+      },
+      getCurrentTf: function () {
+        return currentTf;
+      },
+      getTfSeconds: function () {
+        return tfSeconds;
+      },
+      getLastBarTime: function () {
+        return lastBarTime;
+      },
+      isTickEnabled: function () {
+        return tickEnabled;
+      },
+      hasTickTimer: function () {
+        return tickTimer !== null;
+      },
+      getActiveIndicators: function () {
+        return activeIndicatorSettings;
+      },
+      getSubCharts: function () {
+        return subCharts;
+      },
+      setCurrentTf: setCurrentTf,
     };
   }
 
@@ -1254,6 +1358,281 @@
   writeDebug("INIT", "=== LWC Manager " + VERSION + " factory loaded ===");
   writeDebug("INIT", "=== lwcManager (Chart 1): full features ===");
   writeDebug("INIT", "=== lwcManager2 (Chart 2): full features (parity with Chart 1) ===");
+
+  // =================================================================
+  // Chart Debug Panel - window.chartDebug
+  // =================================================================
+  window.chartDebug = (function () {
+    var autoCheckInterval = null;
+
+    function getInstance(chartId) {
+      if (chartId === "lwc-container-2") return window.lwcManager2;
+      return window.lwcManager;
+    }
+
+    function formatTime(ts) {
+      if (!ts) return "null";
+      var d = new Date(ts * 1000);
+      var utcStr = d.toISOString().replace("T", " ").replace("Z", " UTC");
+      return utcStr + " (" + ts + ")";
+    }
+
+    function status(chartId) {
+      var mgr = getInstance(chartId);
+      if (!mgr) {
+        console.log("[CHART DEBUG] No chart instance: " + (chartId || "default"));
+        return;
+      }
+      var symbol = mgr.getCurrentSymbol();
+      var tf = mgr.getCurrentTf();
+      var tfSec = mgr.getTfSeconds();
+      var bars = mgr.getAllBars();
+      var lastBar = bars.length > 0 ? bars[bars.length - 1] : null;
+      var lastBarTime = mgr.getLastBarTime();
+      var tickEnabled = mgr.isTickEnabled();
+      var hasTimer = mgr.hasTickTimer();
+      var indicators = mgr.getActiveIndicators();
+      var subCharts = mgr.getSubCharts();
+
+      var indStr = "{";
+      if (indicators) {
+        if (indicators.sma) indStr += "sma: true, ";
+        if (indicators.ema) indStr += "ema: true, ";
+        if (indicators.rsi) indStr += "rsi: true, ";
+        if (indicators.macd) indStr += "macd: true, ";
+      }
+      indStr += "}";
+
+      var subStr = "{";
+      if (subCharts) {
+        if (subCharts.rsi) subStr += "rsi: exists, ";
+        if (subCharts.macd) subStr += "macd: exists, ";
+        subStr += "}";
+      } else {
+        subStr = "null";
+      }
+
+      console.log("[CHART DEBUG] " + (chartId || "lwc-container"));
+      console.log("symbol    : " + (symbol || "null") + " (" + (mgr.getCurrentAssetType() || "STOCK") + ")");
+      console.log("timeframe : " + tf + " (" + tfSec + "s)");
+      console.log("bars loaded : " + bars.length);
+      if (bars.length > 0) {
+        console.log("first bar : " + formatTime(bars[0].time));
+        console.log("last bar  : " + formatTime(bars[bars.length - 1].time));
+      }
+      console.log("lastBarTime : " + lastBarTime);
+      console.log("tfSeconds   : " + tfSec);
+      console.log("tickEnabled : " + tickEnabled);
+      console.log("tickTimer   : " + (hasTimer ? "running" : "null"));
+      if (lastBar) {
+        console.log("allBars[-1] : {time:" + lastBar.time + ", open:" + lastBar.open + ", high:" + lastBar.high + ", low:" + lastBar.low + ", close:" + lastBar.close + "}");
+      }
+      console.log("indicators : " + indStr);
+      console.log("subCharts  : " + subStr);
+    }
+
+    function validateTimestamps(chartId) {
+      var mgr = getInstance(chartId);
+      if (!mgr) {
+        console.log("[CHART DEBUG] No chart instance: " + (chartId || "default"));
+        return;
+      }
+      var bars = mgr.getAllBars();
+      var tfSec = mgr.getTfSeconds();
+      var duplicates = 0;
+      var unsorted = 0;
+      var gaps = [];
+      var dailyAlign = true;
+      var isDaily = tfSec >= 86400;
+
+      for (var i = 0; i < bars.length; i++) {
+        if (i > 0) {
+          if (bars[i].time === bars[i - 1].time) duplicates++;
+          if (bars[i].time < bars[i - 1].time) unsorted++;
+        }
+        if (i > 0 && i < bars.length - 1) {
+          var gap = bars[i + 1].time - bars[i].time;
+          if (gap > tfSec * 3) {
+            gaps.push({ idx: i, gap: gap });
+          }
+        }
+        if (isDaily && (bars[i].time % 86400 !== 0)) {
+          dailyAlign = false;
+        }
+      }
+
+      console.log("[CHART DEBUG] validateTimestamps " + (chartId || "lwc-container"));
+      console.log("Total bars    : " + bars.length);
+      console.log("Duplicates    : " + duplicates);
+      console.log("Unsorted      : " + unsorted);
+      if (gaps.length > 0) {
+        var gapStrs = gaps.slice(0, 5).map(function (g) {
+          return "idx " + g.idx + " gap=" + g.gap + "s";
+        });
+        console.log("Gaps (>3xTF)   : " + gaps.length + " [" + gapStrs.join(", ") + "]" + (gaps.length > 5 ? " ..." : ""));
+      } else {
+        console.log("Gaps (>3xTF)   : 0");
+      }
+      if (isDaily) {
+        console.log("Daily align    : " + (dailyAlign ? "✓ all daily bars at UTC midnight" : "✗ NOT at UTC midnight!"));
+      }
+    }
+
+    function testTick(chartId) {
+      var mgr = getInstance(chartId);
+      if (!mgr) {
+        console.log("[CHART DEBUG] No chart instance: " + (chartId || "default"));
+        return;
+      }
+      var symbol = mgr.getCurrentSymbol();
+      var assetType = mgr.getCurrentAssetType() || "STOCK";
+      var tfSec = mgr.getTfSeconds();
+      var lastBarTime = mgr.getLastBarTime();
+
+      console.log("[CHART DEBUG] testTick " + (chartId || "lwc-container"));
+      console.log("fetch: /api/tick/" + symbol + "?asset_type=" + assetType);
+
+      fetch("/api/tick/" + symbol + "?asset_type=" + assetType)
+        .then(function (res) { return res.json(); })
+        .then(function (data) {
+          console.log("response    : " + JSON.stringify(data));
+          var tickTime = data.time;
+          var tickBarTime = Math.floor(tickTime / tfSec) * tfSec;
+          console.log("tickTime    : " + tickTime);
+          console.log("tickBarTime : " + tickBarTime + " (floor to " + tfSec + "s boundary)");
+          console.log("lastBarTime : " + lastBarTime);
+          if (tickBarTime === lastBarTime) {
+            console.log("verdict     : ✓ tick matches current bar");
+          } else {
+            console.log("verdict     : ⚠ tick bar time differs from lastBarTime");
+          }
+        })
+        .catch(function (e) {
+          console.log("fetch error : " + e.message);
+        });
+    }
+
+    function testBars(symbol, tf, assetType, count) {
+      var endtime = "now";
+      console.log("[CHART DEBUG] testBars " + symbol + " " + tf + " " + (assetType || "STOCK") + " " + count);
+      console.log("fetch: /api/bars/" + symbol + "?timeframe=" + encodeURIComponent(tf) + "&asset_type=" + (assetType || "STOCK") + "&count=" + count + "&endtime=" + endtime);
+
+      fetch("/api/bars/" + symbol + "?timeframe=" + encodeURIComponent(tf) + "&asset_type=" + (assetType || "STOCK") + "&count=" + count + "&endtime=" + endtime)
+        .then(function (res) {
+          console.log("status: " + res.status + " " + res.statusText);
+          return res.json();
+        })
+        .then(function (data) {
+          if (!data.bars || data.bars.length === 0) {
+            console.log("bars received: 0 (no data)");
+            return;
+          }
+          var bars = data.bars;
+          console.log("bars received: " + bars.length);
+          var first = bars[0];
+          var last = bars[bars.length - 1];
+          var firstStr = formatTime(first.time);
+          var lastStr = formatTime(last.time);
+          var isDaily = tf.indexOf("day") >= 0 || tf.indexOf("D") >= 0;
+          var firstAligned = isDaily ? (first.time % 86400 === 0 ? "✓" : "✗") : "N/A";
+          var lastAligned = isDaily ? (last.time % 86400 === 0 ? "✓" : "✗") : "N/A";
+
+          console.log("first: " + firstStr + " ← UTC midnight? " + firstAligned);
+          console.log("last:  " + lastStr + " ← UTC midnight? " + lastAligned);
+
+          // Check sorted
+          var sorted = true;
+          for (var i = 1; i < bars.length; i++) {
+            if (bars[i].time < bars[i - 1].time) {
+              sorted = false;
+              break;
+            }
+          }
+          console.log("sorted: " + (sorted ? "✓" : "✗ NOT SORTED!"));
+
+          // Check gaps
+          var tfSecs = TF_TO_SECONDS[tf] || 300;
+          var gapCount = 0;
+          for (var j = 1; j < bars.length; j++) {
+            if (bars[j].time - bars[j - 1].time > tfSecs * 3) {
+              gapCount++;
+            }
+          }
+          console.log("gaps: " + gapCount);
+        })
+        .catch(function (e) {
+          console.log("fetch error: " + e.message);
+        });
+    }
+
+    function listenerReport() {
+      console.log("[CHART DEBUG] listenerReport");
+      console.log("NOTE: Listener tracking is manual in this implementation.");
+      console.log("To check for listener leaks:");
+      console.log("1. Open DevTools -> Performance tab");
+      console.log("2. Record for 2 minutes while interacting with charts");
+      console.log("3. Look for accumulating 'subscribeVisibleLogicalRangeChange' calls");
+      console.log("4. CPU usage should NOT increase linearly over time");
+      console.log("");
+      console.log("If you see growing listeners, check syncTimeScales() in chart_manager.js");
+      console.log("Each chart should only have ONE active range change handler.");
+    }
+
+    function autoCheck(intervalMs) {
+      if (autoCheckInterval) {
+        clearInterval(autoCheckInterval);
+      }
+      intervalMs = intervalMs || 30000;
+      console.log("[CHART DEBUG] autoCheck started every " + intervalMs + "ms");
+
+      function runCheck() {
+        var ts = new Date().toLocaleTimeString("cs-CZ");
+        var mgr1 = window.lwcManager;
+        var mgr2 = window.lwcManager2;
+        var bars1 = mgr1 ? mgr1.getAllBars() : [];
+        var bars2 = mgr2 ? mgr2.getAllBars() : [];
+        var tick1 = mgr1 && mgr1.isTickEnabled() ? "✓" : "✗";
+        var tick2 = mgr2 && mgr2.isTickEnabled() ? "✓" : "✗";
+
+        // Quick timestamp check
+        var tsErr1 = false, tsErr2 = false;
+        if (bars1.length > 1) {
+          for (var i = 1; i < bars1.length; i++) {
+            if (bars1[i].time <= bars1[i - 1].time) { tsErr1 = true; break; }
+          }
+        }
+        if (bars2.length > 1) {
+          for (var j = 1; j < bars2.length; j++) {
+            if (bars2[j].time <= bars2[j - 1].time) { tsErr2 = true; break; }
+          }
+        }
+
+        console.log("[AUTO-CHECK " + ts + "] lwc-container: " + bars1.length + " bars, tick " + tick1 + ", timestamp errors: " + (tsErr1 ? "YES" : "none"));
+        console.log("[AUTO-CHECK " + ts + "] lwc-container-2: " + bars2.length + " bars, tick " + tick2 + ", timestamp errors: " + (tsErr2 ? "YES" : "none"));
+      }
+
+      runCheck();
+      autoCheckInterval = setInterval(runCheck, intervalMs);
+    }
+
+    function stopAutoCheck() {
+      if (autoCheckInterval) {
+        clearInterval(autoCheckInterval);
+        autoCheckInterval = null;
+        console.log("[CHART DEBUG] autoCheck stopped");
+      }
+    }
+
+    return {
+      status: status,
+      validateTimestamps: validateTimestamps,
+      testTick: testTick,
+      testBars: testBars,
+      listenerReport: listenerReport,
+      autoCheck: autoCheck,
+      stopAutoCheck: stopAutoCheck
+    };
+  })();
 
   // Auto-init main chart after DOM is ready
   setTimeout(function () {
