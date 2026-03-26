@@ -1102,8 +1102,9 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
      Input('load-chart2-btn', 'n_clicks'),
      Input('tf2-1m', 'n_clicks'), Input('tf2-5m', 'n_clicks'),
      Input('tf2-15m', 'n_clicks'), Input('tf2-30m', 'n_clicks'),
-     Input('tf2-1h', 'n_clicks'), Input('tf2-1d', 'n_clicks'),
-     Input('deep-load-finished-trigger', 'data')],  # Added for Load More support
+     Input('tf2-1h', 'n_clicks'), Input('tf2-1d', 'n_clicks')],
+    # NOTE: Load More for Chart 2 is handled by clientside callback (chart2-append-store -> lwcManager2.prependData)
+    # Do NOT add deep-load-finished-trigger here - it would cause both charts to reload when only one Load More is clicked
     [State('symbol-input-2', 'value'),
      State('asset-type-select-2', 'value'),
      State('exchange-select-2', 'value'),
@@ -1111,7 +1112,7 @@ def load_chart_data(load_clicks, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
      State('chart2-meta-store', 'data')],
     prevent_initial_call=True
 )
-def load_chart2_data(load_clicks, load_clicks2, tf1, tf5, tf15, tf30, tf1h, tf1d, dl_trigger,
+def load_chart2_data(load_clicks, load_clicks2, tf1, tf5, tf15, tf30, tf1h, tf1d,
                      symbol, asset_type, exchange, n_candles, meta):
     """Load data for chart 2. Independent per-block state (3.3)."""
     try:
