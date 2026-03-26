@@ -1122,8 +1122,9 @@ def load_chart2_data(load_clicks, load_clicks2, tf1, tf5, tf15, tf30, tf1h, tf1d
         log("DEBUG", f"[CB2] TRIGGERED: {btn} | symbol={symbol} asset_type={asset_type}")
         tf_map = {'tf2-1m': '1 min', 'tf2-5m': '5 mins',
                   'tf2-15m': '15 mins', 'tf2-30m': '30 mins',
-                  'tf2-1h': '1 hour', 'tf2-1d': '1 day',
-                  'load-chart-btn-2': None, 'load-chart2-btn': None}
+                  'tf2-1h': '1 hour', 'tf2-1d': '1 day'}
+        # NOTE: load-chart2-btn is for initial load (handled in tf_map as None)
+        # load-chart-btn-2 is "Load More" - NOT in tf_map so it triggers APPEND
 
         symbol     = (symbol or 'EURUSD').upper()
         asset_type = normalize_asset_type(asset_type)
