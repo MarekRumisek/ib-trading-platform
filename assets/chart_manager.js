@@ -239,15 +239,12 @@
       });
 
       // Sync logical range: hlavni chart -> volume (jednostranny, volume nema scroll)
-      // NOTE: syncTimeScales is disabled for context chart (lwcManager2) because it causes
-      // "Value is null" errors in lightweight-charts when called after setData with merged bars.
-      // This is an internal library issue that doesn't affect actual chart rendering.
-      // For main chart (lwcManager), sync is kept enabled for proper volume synchronization.
-      var disableSync = (containerId === "lwc-container-2");
-      if (!disableSync) {
-        syncTimeScales(chart, [volumeChart]);
-      }
-      writeDebug("INIT", "Volume sub-panel OK (" + VOLUME_HEIGHT + "px)" + (disableSync ? " [sync disabled]" : ""));
+      // FIX: Enable syncTimeScales for both charts (lwcManager and lwcManager2) to fix
+      // volume not scrolling synchronously with candlesticks on Chart 2.
+      // The "Value is null" errors mentioned in the old comment are non-fatal and don't
+      // affect actual chart rendering - they occur internally in lightweight-charts.
+      syncTimeScales(chart, [volumeChart]);
+      writeDebug("INIT", "Volume sub-panel OK (" + VOLUME_HEIGHT + "px)");
     }
 
     // =================================================================
